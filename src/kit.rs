@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 
 /// Collects shapes and merges them into one vertex-coloured mesh.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Kit {
     mesh: Option<Mesh>,
 }

@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 
 use crate::config::{key_name, Action, Settings};
-use crate::data::{elements_in, gun_def, has_perk, skin_def, xp_to_next, Perk, BOX_COST, MAX_LEVEL};
+use crate::data::{elements_in, gun_def, wall_cost, has_perk, skin_def, xp_to_next, Perk, BOX_COST, MAX_LEVEL};
 use crate::game::{match_ended, MatchResult, Overlay};
 use crate::maps::{map_name, CurrentMap};
 use crate::ui::{button, UiAction, ACCENT, PANEL};
@@ -22,6 +22,7 @@ impl Plugin for HudPlugin {
             Update,
             (
                 update_hud,
+                update_sights,
                 update_prompt,
                 update_banner,
                 update_scoreboard,
@@ -87,7 +88,105 @@ fn text(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, T
     )
 }
 
-fn spawn_hud(mut commands: Commands) {
+/// The four crosshair lines (hidden while aiming down sights).
+#[derive(Component)]
+struct CrosshairLine;
+
+/// The black scope view shown while looking through a magnified scope.
+#[derive(Component)]
+struct ScopeOverlay;
+
+/// A scope's view: clear in a circle with fine crosshairs and range marks,
+/// black outside.
+fn scope_image() -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    const N: usize = 512;
+    let mut data = vec![0u8; N * N * 4];
+    let c = N as f32 / 2.0;
+    for y in 0..N {
+        for x in 0..N {
+            let (dx, dy) = (x as f32 + 0.5 - c, y as f32 + 0.5 - c);
+            let r = (dx * dx + dy * dy).sqrt() / c;
+            // Dark outside the lens, with a soft shaded rim inside it.
+            let mut alpha = ((r - 0.93) / 0.03).clamp(0.0, 1.0);
+            alpha = alpha.max(((r - 0.75) / 0.18).clamp(0.0, 1.0).powi(3) * 0.55);
+            // Thin crosshair lines, thicker posts towards the edge.
+            let thick = if r > 0.55 { 3.0 } else { 0.9 };
+            if dx.abs() < thick || dy.abs() < thick {
+                alpha = alpha.max(0.95);
+            }
+            // Range marks along the lines.
+            for k in 1..6 {
+                let m = k as f32 * 0.08 * c;
+                if (dx.abs() < 1.2 && (dy.abs() - m).abs() < 1.6 && dy.abs() < 0.5 * c)
+                    || (dy.abs() < 1.2 && (dx.abs() - m).abs() < 1.6 && dx.abs() < 0.5 * c)
+                {
+                    alpha = alpha.max(0.9);
+                }
+            }
+            let i = (y * N + x) * 4;
+            data[i + 3] = (alpha * 255.0) as u8;
+        }
+    }
+    Image::new(
+        Extent3d {
+            width: N as u32,
+            height: N as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    )
+}
+
+/// Hides the crosshair while aiming and shows the scope view when scoped in.
+fn update_sights(
+    aim: Res<crate::weapons::Aim>,
+    player: Single<&crate::player::LocalPlayer>,
+    mut lines: Query<&mut Visibility, (With<CrosshairLine>, Without<ScopeOverlay>)>,
+    mut scope: Query<&mut Visibility, (With<ScopeOverlay>, Without<CrosshairLine>)>,
+) {
+    let hide = aim.amount > 0.4 || player.third_person();
+    for mut v in &mut lines {
+        *v = if hide { Visibility::Hidden } else { Visibility::Inherited };
+    }
+    for mut v in &mut scope {
+        *v = if aim.scoped { Visibility::Inherited } else { Visibility::Hidden };
+    }
+}
+
+fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    // Scope view: black bars either side of a square lens image.
+    let lens = images.add(scope_image());
+    commands
+        .spawn((
+            InGameEntity,
+            ScopeOverlay,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: FlexDirection::Row,
+                ..default()
+            },
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ))
+        .with_children(|o| {
+            o.spawn((Node { flex_grow: 1.0, ..default() }, BackgroundColor(Color::BLACK)));
+            o.spawn((
+                Node {
+                    height: Val::Percent(100.0),
+                    aspect_ratio: Some(1.0),
+                    ..default()
+                },
+                ImageNode::new(lens),
+            ));
+            o.spawn((Node { flex_grow: 1.0, ..default() }, BackgroundColor(Color::BLACK)));
+        });
     let white = Color::WHITE;
     let dim = Color::srgb(0.75, 0.78, 0.85);
 
@@ -128,6 +227,7 @@ fn spawn_hud(mut commands: Commands) {
                 (2.0, 2.0, 0.0, 0.0),
             ] {
                 c.spawn((
+                    CrosshairLine,
                     Node {
                         position_type: PositionType::Absolute,
                         width: Val::Px(w),
@@ -455,7 +555,11 @@ fn update_hud(
             HudText::Points => format!("{} pts", me.points),
             HudText::Gun => loadout
                 .current()
-                .map(|g| format!("{}  ({})", gun_def(g.id).name, skin_def(me.skin_for(g.id)).name))
+                .map(|g| {
+                    let parts = g.attach.names();
+                    let extra = if parts.is_empty() { String::new() } else { format!("\n{}", parts.join(" + ")) };
+                    format!("{}  ({}){extra}", gun_def(g.id).name, skin_def(me.skin_for(g.id)).name)
+                })
                 .unwrap_or_default(),
             HudText::Ammo => match loadout.current() {
                 Some(_) if me.overdrive > 0.0 => "INFINITE".to_string(),
@@ -597,9 +701,15 @@ fn update_prompt(
                         "Someone is using the box".into()
                     }
                 }
-                BoxState::Offer { player, gun, .. } => {
+                BoxState::Offer { player, gun, attach, .. } => {
                     let def = gun_def(gun);
                     let rare = if def.rare { "RARE! " } else { "" };
+                    let parts = attach.names();
+                    let kit = if parts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\nwith {}", parts.join(", "))
+                    };
                     if player == me.id {
                         let slot = if me.guns[1].is_none() {
                             "into your empty slot".to_string()
@@ -607,9 +717,9 @@ fn update_prompt(
                             let cur = me.guns[me.active_slot as usize].map(|g| gun_def(g).name).unwrap_or("");
                             format!("replacing your {cur}")
                         };
-                        format!("[{key}] Take {rare}{} ({slot})", def.name)
+                        format!("[{key}] Take {rare}{} ({slot}){kit}", def.name)
                     } else {
-                        format!("{rare}{} - not yours", def.name)
+                        format!("{rare}{} - not yours{kit}", def.name)
                     }
                 }
                 BoxState::Moving { .. } => "The box flew away! Find where it landed.".into(),
@@ -635,6 +745,29 @@ fn update_prompt(
                     )
                 };
             }
+        }
+        let feet3 = me.feet();
+        if let Some(door) = map.0.doors.iter().find(|d| d.near(feet3) && state.doors & (1 << d.zone) == 0) {
+            msg = if me.points >= door.cost {
+                format!("[{key}] Open the door to {} ({} pts)", door.name, door.cost)
+            } else {
+                format!("Door to {} - need {} pts", door.name, door.cost)
+            };
+        }
+        if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet3)) {
+            let name = gun_def(wall.gun).name;
+            let cost = wall_cost(wall.gun);
+            msg = if me.guns.contains(&Some(wall.gun)) {
+                if me.points >= cost / 2 {
+                    format!("[{key}] Buy {name} ammo ({} pts)", cost / 2)
+                } else {
+                    format!("{name} ammo - need {} pts", cost / 2)
+                }
+            } else if me.points >= cost {
+                format!("[{key}] Buy {name} ({cost} pts)")
+            } else {
+                format!("{name} - need {cost} pts")
+            };
         }
         if msg.is_empty() && !me.choices.is_empty() {
             msg = format!(

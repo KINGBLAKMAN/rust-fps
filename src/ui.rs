@@ -9,14 +9,13 @@ use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
 use crate::abilities::{queue_action, ActionCounter};
-use crate::avatars::{spawn_person, ReplicatedAssets};
+use crate::avatars::spawn_person;
 use crate::config::{key_name, Action, Profile, Settings, RESOLUTIONS};
 use crate::config::quarters_text;
 use crate::data::{
     crate_odds, gun_def, roll_crate, skin_def, Character, CRATES, PREMIUM_TRADE_COST, ROUNDS_PER_PREMIUM_QUARTER,
 };
 use crate::game::Overlay;
-use crate::humanoid::HumanoidMeshes;
 use crate::maps::{map_name, MAP_NAMES};
 use crate::net::{LocalReady, Notice, PartyRequest, DEFAULT_PORT, MAX_NAME_LEN};
 use crate::sim::new_match;
@@ -121,6 +120,7 @@ pub enum UiAction {
     ResetKeys,
     SettingsBack,
     CycleMap(i8),
+    ToggleNight,
     ToggleReady,
     StartMatch,
     Leave,
@@ -406,9 +406,10 @@ fn rebuild_ui(
                 .map(|p| (p.id, p.name.clone(), p.character, p.ready))
                 .collect();
             format!(
-                "lobby {:?} {} {} {} {:?} {} {:?} {}",
+                "lobby {:?} {} {} {} {} {:?} {} {:?} {}",
                 players,
                 state.map,
+                state.night,
                 session.status,
                 session.connected,
                 profile.character,
@@ -585,41 +586,33 @@ fn join_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
 fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Settings) {
     panel(commands, false, |p| {
         title(p, "Choose your character");
+        row(p, |r| {
+            for c in Character::ALL {
+                button_sized(r, c.name(), UiAction::SelectCharacter(c), Some(112.0), profile.character == c);
+            }
+        });
+        let c = profile.character;
         let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
-        for c in Character::ALL {
-            let selected = profile.character == c;
-            p.spawn((
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
-                    padding: UiRect::all(Val::Px(12.0)),
-                    border: UiRect::all(Val::Px(2.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.12, 0.13, 0.19, 0.9)),
-                BorderColor(if selected { ACCENT } else { Color::NONE }),
-                BorderRadius::all(Val::Px(8.0)),
-            ))
-            .with_children(|card| {
-                label(card, c.name(), 26.0, c.suit_color().lighter(0.15));
-                label(card, c.tagline(), 15.0, DIM);
-                for (i, (name, desc)) in c.abilities().iter().enumerate() {
-                    label(
-                        card,
-                        format!("[{}] {name}: {desc}", key_name(settings.key(keys[i]))),
-                        15.0,
-                        Color::WHITE,
-                    );
-                }
-                button_sized(
-                    card,
-                    if selected { "Selected" } else { "Select" },
-                    UiAction::SelectCharacter(c),
-                    Some(140.0),
-                    selected,
-                );
-            });
-        }
+        p.spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                padding: UiRect::all(Val::Px(14.0)),
+                border: UiRect::all(Val::Px(2.0)),
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.12, 0.13, 0.19, 0.9)),
+            BorderColor(ACCENT),
+            BorderRadius::all(Val::Px(8.0)),
+        ))
+        .with_children(|card| {
+            label(card, c.name(), 30.0, c.suit_color().lighter(0.2));
+            label(card, c.tagline(), 16.0, DIM);
+            for (i, (name, desc)) in c.abilities().iter().enumerate() {
+                label(card, format!("[{}] {name}", key_name(settings.key(keys[i]))), 17.0, ACCENT);
+                label(card, *desc, 15.0, Color::WHITE);
+            }
+        });
         label(
             p,
             "Abilities get stronger as you level up in a match.",
@@ -931,7 +924,7 @@ fn lobby_screen(
                     r,
                     c.name(),
                     UiAction::SelectCharacter(c),
-                    Some(140.0),
+                    Some(104.0),
                     profile.character == c,
                 );
             }
@@ -958,6 +951,15 @@ fn lobby_screen(
             });
         } else {
             label(p, format!("{} (the host picks)", map_name(state.map)), 18.0, ACCENT);
+        }
+        let time = if state.night { "Night" } else { "Day" };
+        if authority {
+            row(p, |r| {
+                label(r, "Time:", 17.0, Color::WHITE);
+                button_sized(r, time, UiAction::ToggleNight, Some(110.0), state.night);
+            });
+        } else {
+            label(p, format!("Time: {time}"), 17.0, Color::WHITE);
         }
         let blurb = match state.map {
             0 => "Container stacks, cranes and narrow lanes.",
@@ -1243,6 +1245,11 @@ fn handle_buttons(
                     state.map = (state.map as i32 + d as i32).rem_euclid(n) as u8;
                 }
             }
+            UiAction::ToggleNight => {
+                if session.is_authority() {
+                    state.night = !state.night;
+                }
+            }
             UiAction::ToggleReady => ready.0 = !ready.0,
             UiAction::StartMatch => {
                 if session.is_authority() {
@@ -1332,8 +1339,7 @@ fn menu_scene(
     session: Res<Session>,
     roster: Res<Roster>,
     profile: Res<Profile>,
-    assets: Res<ReplicatedAssets>,
-    meshes: Res<HumanoidMeshes>,
+    rigs: Res<crate::rig::RigAssets>,
     mut mesh_assets: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene: Query<Entity, With<MenuScene>>,
@@ -1408,7 +1414,7 @@ fn menu_scene(
                         Visibility::default(),
                     ))
                     .with_children(|p| {
-                        crate::gunmodels::spawn_gun(p, &guns, gun, guns.skin(skin), false);
+                        crate::gunmodels::spawn_gun(p, &guns, gun, crate::data::Attach::NONE, guns.skin(skin), false);
                     });
             }
             for (i, (c, skin, gun)) in people.iter().enumerate() {
@@ -1419,7 +1425,7 @@ fn menu_scene(
                 // Face the camera (at the origin).
                 let base = x.atan2(z);
                 let tf = Transform::from_xyz(x, 0.0, z).with_rotation(Quat::from_rotation_y(base));
-                let (e, _) = spawn_person(&mut commands, &meshes, &mut materials, &assets, *c, *skin, *gun, tf);
+                let (e, _) = spawn_person(&mut commands, &rigs, *c, *skin, *gun, tf);
                 commands.entity(e).insert((MenuScene, Turntable(base, i as f32)));
             }
         }

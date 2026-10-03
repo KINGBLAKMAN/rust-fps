@@ -7,7 +7,7 @@ use bevy::window::PrimaryWindow;
 use rand::Rng;
 
 use crate::config::{Action, InputExt, Settings};
-use crate::data::{gun_def, has_perk, FireMode, GunClass, Perk};
+use crate::data::{gun_def, has_perk, mag_size, Attach, FireMode, GunClass, Perk};
 use crate::fx::{Fx, FxQueue};
 use crate::game::Paused;
 use crate::physics::{collect_boxes, trace_shot};
@@ -23,9 +23,10 @@ pub struct WeaponPlugin;
 impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Loadout>()
+            .init_resource::<Aim>()
             .add_systems(
                 Update,
-                (sync_loadout, switch_weapon, reload, fire)
+                (sync_loadout, switch_weapon, reload, aim, fire)
                     .chain()
                     .after(crate::player::movement)
                     .in_set(Phase::Local),
@@ -37,18 +38,70 @@ impl Plugin for WeaponPlugin {
 #[derive(Clone, Copy, Debug)]
 pub struct GunState {
     pub id: u8,
+    pub attach: Attach,
     pub mag: u32,
     pub reserve: u32,
 }
 
 impl GunState {
-    fn fresh(id: u8) -> Self {
-        let d = gun_def(id);
+    fn fresh(id: u8, attach: Attach) -> Self {
         Self {
             id,
-            mag: d.mag,
-            reserve: d.reserve,
+            attach,
+            mag: mag_size(id, attach),
+            reserve: gun_def(id).reserve,
         }
+    }
+
+    pub fn mag_size(&self) -> u32 {
+        mag_size(self.id, self.attach)
+    }
+}
+
+/// Aiming down sights: how far the gun is raised (0 hip, 1 fully aimed) and
+/// the zoom the current sight gives (field of view multiplier).
+#[derive(Resource)]
+pub struct Aim {
+    pub amount: f32,
+    pub zoom: f32,
+    /// Looking through a magnified scope (draws the scope overlay).
+    pub scoped: bool,
+}
+
+impl Default for Aim {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            zoom: 1.0,
+            scoped: false,
+        }
+    }
+}
+
+impl Aim {
+    /// Field of view multiplier right now.
+    pub fn fov_scale(&self) -> f32 {
+        1.0 + (self.zoom - 1.0) * self.amount
+    }
+}
+
+/// Zoom (field of view multiplier) and whether it's a scope, for a gun.
+pub fn sight_zoom(gun: u8, attach: Attach) -> (f32, bool) {
+    let d = gun_def(gun);
+    if d.class == GunClass::Sniper {
+        return (if gun == 15 { 0.28 } else { 0.42 }, true);
+    }
+    match attach.optic() {
+        3 => (0.38, true),
+        1 | 2 => (0.72, false),
+        _ => (
+            match d.class {
+                GunClass::Pistol | GunClass::Shotgun => 0.85,
+                GunClass::Smg | GunClass::Wonder => 0.8,
+                _ => 0.76,
+            },
+            false,
+        ),
     }
 }
 
@@ -67,6 +120,7 @@ pub struct Loadout {
     /// Counts shots fired (the viewmodel animates each one).
     pub shots: u32,
     last_ammo_seq: u32,
+    last_supply_seq: u8,
     last_spawn_seq: u32,
     last_round: u32,
     /// Seconds left to show the hit marker, and whether it was a headshot.
@@ -80,8 +134,48 @@ impl Loadout {
     }
 }
 
-fn reset_loadout(mut loadout: ResMut<Loadout>) {
+fn reset_loadout(mut loadout: ResMut<Loadout>, mut aim: ResMut<Aim>) {
     *loadout = Loadout::default();
+    *aim = Aim::default();
+}
+
+/// Right mouse raises the sights (not while sprinting or aiming an ability).
+#[allow(clippy::too_many_arguments)]
+fn aim(
+    time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    state: Res<MatchState>,
+    paused: Res<Paused>,
+    cast: Res<crate::abilities::CastState>,
+    loadout: Res<Loadout>,
+    player: Single<&LocalPlayer>,
+    mut aim: ResMut<Aim>,
+) {
+    let Some(gun) = loadout.current() else {
+        aim.amount = 0.0;
+        return;
+    };
+    let def = gun_def(gun.id);
+    let want = can_act(&session, &roster, &state, &paused, &window)
+        && mouse.pressed(MouseButton::Right)
+        && cast.aiming.is_none()
+        && !player.emoting()
+        && player.dash_time <= 0.0;
+    // Heavier guns take longer to raise.
+    let time_to_aim = match def.class {
+        GunClass::Pistol => 0.13,
+        GunClass::Smg => 0.16,
+        GunClass::Lmg | GunClass::Sniper => 0.3,
+        _ => 0.21,
+    };
+    let step = time.delta_secs() / time_to_aim;
+    aim.amount = if want { (aim.amount + step).min(1.0) } else { (aim.amount - step * 1.3).max(0.0) };
+    let (zoom, scoped) = sight_zoom(gun.id, gun.attach);
+    aim.zoom = zoom;
+    aim.scoped = scoped && aim.amount > 0.9;
 }
 
 /// Keeps our guns in step with what the host says we hold (mystery box,
@@ -101,10 +195,10 @@ fn sync_loadout(
         loadout.reload = 0.0;
     }
     for i in 0..2 {
-        let want = me.guns[i];
-        let have = loadout.slots[i].map(|g| g.id);
+        let want = me.guns[i].map(|g| (g, me.attach[i]));
+        let have = loadout.slots[i].map(|g| (g.id, g.attach));
         if want != have {
-            loadout.slots[i] = want.map(GunState::fresh);
+            loadout.slots[i] = want.map(|(g, a)| GunState::fresh(g, a));
             if want.is_some() {
                 // A new gun from the box goes straight into your hands.
                 loadout.active = i;
@@ -123,12 +217,18 @@ fn sync_loadout(
             g.reserve = g.reserve.max(gun_def(g.id).reserve);
         }
     }
+    if me.supply_seq != loadout.last_supply_seq {
+        loadout.last_supply_seq = me.supply_seq;
+        for g in loadout.slots.iter_mut().flatten() {
+            g.reserve = g.reserve.max(gun_def(g.id).reserve);
+        }
+    }
     if state.max_ammo_seq != loadout.last_ammo_seq {
         loadout.last_ammo_seq = state.max_ammo_seq;
         for g in loadout.slots.iter_mut().flatten() {
             let d = gun_def(g.id);
             g.reserve = d.reserve;
-            g.mag = d.mag;
+            g.mag = g.mag_size();
         }
     }
 }
@@ -141,8 +241,14 @@ fn switch_weapon(
     session: Res<Session>,
     mut roster: ResMut<Roster>,
     mut loadout: ResMut<Loadout>,
+    menu: Res<crate::emotes::EmoteMenu>,
+    player: Single<&LocalPlayer>,
 ) {
     loadout.switch_cd -= time.delta_secs();
+    // The number keys pick emotes while that list is open.
+    if menu.open || player.emoting() {
+        return;
+    }
     let mut target = None;
     if keys.just_pressed(KeyCode::Digit1) {
         target = Some(0);
@@ -183,7 +289,7 @@ fn reload(
     let def = gun_def(gun.id);
     if keys.tapped(&settings, Action::Reload)
         && loadout.reload <= 0.0
-        && gun.mag < def.mag
+        && gun.mag < gun.mag_size()
         && gun.reserve > 0
     {
         loadout.reload = def.reload / speed;
@@ -194,7 +300,7 @@ fn reload(
         if loadout.reload <= 0.0 {
             loadout.reload = 0.0;
             if let Some(g) = loadout.slots[active].as_mut() {
-                let take = (def.mag - g.mag).min(g.reserve);
+                let take = (g.mag_size() - g.mag).min(g.reserve);
                 g.mag += take;
                 g.reserve -= take;
             }
@@ -212,6 +318,7 @@ pub fn fire(
     paused: Res<Paused>,
     cast: Res<crate::abilities::CastState>,
     view_muzzle: Res<crate::viewmodel::ViewMuzzle>,
+    aim: Res<Aim>,
     mut loadout: ResMut<Loadout>,
     mut shots: ResMut<ShotQueue>,
     mut fx: ResMut<FxQueue>,
@@ -298,6 +405,18 @@ pub fn fire(
             spread *= 0.6;
         }
     }
+    // Aimed shots are much tighter; the laser tightens hip fire.
+    let hip = gun.attach.hip_spread();
+    let aimed = match def.class {
+        GunClass::Sniper => 0.02,
+        GunClass::Shotgun => 0.7,
+        _ => 0.3,
+    };
+    spread *= hip + (aimed - hip) * aim.amount;
+    if def.class == GunClass::Sniper {
+        // Snipers are wild from the hip.
+        spread += 0.05 * (1.0 - aim.amount);
+    }
     let kick = match def.class {
         GunClass::Sniper => 0.05,
         GunClass::Shotgun => 0.045,
@@ -305,7 +424,7 @@ pub fn fire(
         GunClass::Pistol => 0.018,
         _ => 0.01,
     };
-    p.kick += kick;
+    p.kick += kick * gun.attach.recoil_scale() * (1.0 - 0.35 * aim.amount);
 
     let boxes = collect_boxes(colliders.iter());
     let muzzle = origin + cam.rotation * view_muzzle.0;

@@ -33,6 +33,54 @@ pub enum Ground {
     Grass,
 }
 
+/// Half size of the starting area (inside the inner fence).
+pub const INNER: f32 = 40.0;
+/// Half size of the whole map, including the areas behind the doors.
+pub const OUTER: f32 = 58.0;
+
+/// A door in the inner fence that players buy open. Opening it unlocks
+/// `zone` (1 north, 2 south, 3 east, 4 west).
+#[derive(Clone)]
+pub struct DoorDef {
+    pub pos: Vec3,
+    /// The door runs along X (in the north or south fence) or along Z.
+    pub along_x: bool,
+    pub cost: u32,
+    pub zone: u8,
+    pub name: &'static str,
+}
+
+pub const DOOR_WIDTH: f32 = 4.0;
+
+/// A gun hanging on a wall that you can buy (and buy ammo for).
+#[derive(Clone)]
+pub struct WallBuy {
+    pub pos: Vec3,
+    /// Which way the board faces (players stand on that side).
+    pub yaw: f32,
+    pub gun: u8,
+}
+
+impl DoorDef {
+    /// Close enough to buy it (from either side).
+    pub fn near(&self, feet: Vec3) -> bool {
+        let d = feet.with_y(0.0) - self.pos;
+        let (along, across) = if self.along_x { (d.x, d.z) } else { (d.z, d.x) };
+        along.abs() < DOOR_WIDTH / 2.0 + 0.6 && across.abs() < 2.4
+    }
+}
+
+impl WallBuy {
+    /// Where you stand to buy it.
+    pub fn stand(&self) -> Vec3 {
+        self.pos + Quat::from_rotation_y(self.yaw) * Vec3::new(0.0, 0.0, 1.0)
+    }
+
+    pub fn near(&self, feet: Vec3) -> bool {
+        feet.with_y(0.0).distance(self.stand()) < 2.2
+    }
+}
+
 pub struct MapLayout {
     pub half: f32,
     pub ground: Color,
@@ -44,16 +92,19 @@ pub struct MapLayout {
     /// Lamps: position, colour, brightness.
     pub lights: Vec<(Vec3, Color, f32)>,
     pub player_spawns: Vec<Vec3>,
-    pub enemy_spawns: Vec<Vec3>,
+    /// Enemy spawn points and the area each is in (only open areas spawn).
+    pub enemy_spawns: Vec<(Vec3, u8)>,
     pub box_spots: [Vec3; 5],
     pub perk_spots: [Vec3; 5],
     pub extraction: Vec3,
+    pub doors: Vec<DoorDef>,
+    pub wall_buys: Vec<WallBuy>,
 }
 
 impl MapLayout {
-    fn new(half: f32, ground: Color, ground_kind: Ground, sky: Color, sun: f32) -> Self {
+    fn new(_inner: f32, ground: Color, ground_kind: Ground, sky: Color, sun: f32) -> Self {
         let mut m = Self {
-            half,
+            half: OUTER,
             ground,
             ground_kind,
             sky,
@@ -66,8 +117,10 @@ impl MapLayout {
             box_spots: [Vec3::ZERO; 5],
             perk_spots: [Vec3::ZERO; 5],
             extraction: Vec3::ZERO,
+            doors: Vec::new(),
+            wall_buys: Vec::new(),
         };
-        let h = half;
+        let h = INNER;
         for (x, z) in [
             (-h + 4.0, -h + 4.0),
             (h - 4.0, -h + 4.0),
@@ -78,13 +131,32 @@ impl MapLayout {
             (-h + 4.0, 0.0),
             (h - 4.0, 0.0),
         ] {
-            m.enemy_spawns.push(Vec3::new(x, 0.0, z));
+            m.enemy_spawns.push((Vec3::new(x, 0.0, z), 0));
+        }
+        // Two in each area behind the doors, at the far edge.
+        let o = OUTER - 3.0;
+        for (x, z, zone) in [
+            (-20.0, o, 1),
+            (20.0, o, 1),
+            (-20.0, -o, 2),
+            (20.0, -o, 2),
+            (o, -20.0, 3),
+            (o, 20.0, 3),
+            (-o, -20.0, 4),
+            (-o, 20.0, 4),
+        ] {
+            m.enemy_spawns.push((Vec3::new(x, 0.0, z), zone));
         }
         m
     }
 
+    /// Is a spot in an area that's open (bit `zone` set in `open`)?
+    pub fn zone_open(open: u8, zone: u8) -> bool {
+        zone == 0 || open & (1 << zone) != 0
+    }
+
     /// Flat paint on the ground (roads, paths, markings).
-    fn ground_paint(&mut self, center: Vec3, size: Vec2, yaw: f32, color: Color, lift: f32) {
+    pub(crate) fn ground_paint(&mut self, center: Vec3, size: Vec2, yaw: f32, color: Color, lift: f32) {
         self.art.paint.cuboid_rot(
             Vec3::new(center.x, lift, center.z),
             Vec3::new(size.x, 0.02, size.y),
@@ -94,25 +166,29 @@ impl MapLayout {
     }
 
     /// Is this spot clear of the important places (spawns, box, perks)?
-    fn clear(&self, x: f32, z: f32, room: f32) -> bool {
+    pub(crate) fn clear(&self, x: f32, z: f32, room: f32) -> bool {
         let p = Vec3::new(x, 0.0, z);
         !self
             .box_spots
             .iter()
             .chain(self.perk_spots.iter())
             .chain(self.player_spawns.iter())
-            .chain(self.enemy_spawns.iter())
+            .chain(self.enemy_spawns.iter().map(|(p, _)| p))
+            .chain(self.doors.iter().map(|d| &d.pos))
+            .chain(self.wall_buys.iter().map(|w| &w.pos))
             .chain(std::iter::once(&self.extraction))
             .any(|s| s.distance(p) < room)
     }
 }
 
 pub fn layout(map: u8) -> MapLayout {
-    match map {
+    let mut m = match map {
         1 => central_park(),
         2 => neighborhood(),
         _ => shipping_yard(),
-    }
+    };
+    m.expand(map);
+    m
 }
 
 fn shipping_yard() -> MapLayout {
@@ -238,16 +314,16 @@ fn shipping_yard() -> MapLayout {
     }
 
     // Outside the fence: the ship at the quay and stacks of containers.
-    m.ship(0.0, -58.0, 90.0);
+    m.ship(0.0, -80.0, 90.0);
     for (side, along_z) in [(1.0f32, false), (-1.0, true), (1.0, true)] {
-        let mut t = -36.0;
+        let mut t = -63.0;
         let mut i = 0.0;
-        while t <= 36.0 {
+        while t <= 63.0 {
             let stack = 1 + (props::hash(t, side) * 3.0) as i32;
             for l in 0..stack {
                 let col = colors[((props::hash(t, l as f32 + side) * 6.0) as usize).min(5)];
                 i += 1.0;
-                let (x, z) = if along_z { (side * 47.0, t) } else { (t, 47.0) };
+                let (x, z) = if along_z { (side * 64.0, t) } else { (t, 64.0) };
                 m.container(x, z, l as f32 * 2.6, along_z, col, 100.0 + i);
             }
             t += 7.0;
@@ -269,7 +345,7 @@ fn central_park() -> MapLayout {
     m.perk_spots = PERK_SPOTS_OPEN;
     m.extraction = Vec3::new(-22.0, 0.0, 21.0);
     m.boundary(1, 3.0);
-    m.skyline(40.0, 3.0);
+    m.skyline(OUTER, 3.0);
 
     // Gravel paths with stone edging.
     let path = Color::srgb(0.7, 0.64, 0.52);
@@ -544,7 +620,8 @@ fn neighborhood() -> MapLayout {
     // Trees beyond the fence.
     for i in 0..48 {
         let ang = i as f32 / 48.0 * std::f32::consts::TAU;
-        let r = 52.0 + props::hash(i as f32, 9.0) * 10.0;
+        // Out past the edge of the square map.
+        let r = (63.0 + props::hash(i as f32, 9.0) * 10.0) / ang.cos().abs().max(ang.sin().abs());
         let (x, z) = (ang.cos() * r, ang.sin() * r);
         if i % 3 == 0 {
             m.oak(x, z, 1.5, i as f32);
@@ -851,8 +928,12 @@ pub fn spawn_map(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     map: u8,
+    night: bool,
 ) -> MapLayout {
     let mut layout = layout(map);
+    if night {
+        layout.sky = Color::srgb(0.025, 0.03, 0.065);
+    }
     let mats: [Handle<StandardMaterial>; 4] = [
         materials.add(vertex_material(0.85, 0.0)),
         materials.add(vertex_material(0.42, 0.3)),
@@ -900,23 +981,29 @@ pub fn spawn_map(
     }
     let art = std::mem::take(&mut layout.art);
     art_meshes(commands, meshes, &mats, art, None, |_| {});
+    // At night the lamps do the work: brighter and reaching further.
+    let (lamp, reach) = if night { (3.0, 24.0) } else { (1.0, 18.0) };
     for (pos, color, intensity) in &layout.lights {
         commands.spawn((
             InGameEntity,
             PointLight {
-                intensity: *intensity,
+                intensity: *intensity * lamp,
                 color: *color,
-                range: 18.0,
+                range: reach,
+                shadows_enabled: false,
                 ..default()
             },
             Transform::from_translation(*pos),
         ));
     }
 
+    // Sun by day, a pale moon by night.
+    let (sun, sun_color) = if night { (layout.sun * 0.04, Color::srgb(0.6, 0.7, 1.0)) } else { (layout.sun, Color::WHITE) };
     commands.spawn((
         InGameEntity,
         DirectionalLight {
-            illuminance: layout.sun,
+            illuminance: sun,
+            color: sun_color,
             shadows_enabled: true,
             ..default()
         },
@@ -982,17 +1069,35 @@ pub fn spawn_map(
     commands.entity(root).add_child(hinge);
     art_meshes(commands, meshes, &mats, lid, Some(hinge), |_| {});
     let extras = [
+        // A wide soft beam and a bright core, tall enough to see from
+        // anywhere on the map.
         commands
             .spawn((
                 BoxPillar,
-                Mesh3d(meshes.add(Cylinder::new(0.35, 40.0))),
+                Mesh3d(meshes.add(Cylinder::new(0.75, 120.0))),
                 MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgba(0.4, 0.75, 1.0, 0.18),
-                    alpha_mode: AlphaMode::Blend,
+                    base_color: Color::srgba(0.35, 0.7, 1.0, 0.28),
+                    emissive: LinearRgba::rgb(0.6, 1.4, 3.0),
+                    alpha_mode: AlphaMode::Add,
                     unlit: true,
                     ..default()
                 })),
-                Transform::from_xyz(0.0, 20.5, 0.0),
+                Transform::from_xyz(0.0, 60.5, 0.0),
+                bevy::pbr::NotShadowCaster,
+            ))
+            .id(),
+        commands
+            .spawn((
+                BoxPillar,
+                Mesh3d(meshes.add(Cylinder::new(0.2, 120.0))),
+                MeshMaterial3d(materials.add(StandardMaterial {
+                    base_color: Color::srgba(0.8, 0.95, 1.0, 0.9),
+                    emissive: LinearRgba::rgb(2.0, 4.0, 8.0),
+                    alpha_mode: AlphaMode::Add,
+                    unlit: true,
+                    ..default()
+                })),
+                Transform::from_xyz(0.0, 60.5, 0.0),
                 bevy::pbr::NotShadowCaster,
             ))
             .id(),

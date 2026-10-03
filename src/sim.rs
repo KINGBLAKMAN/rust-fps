@@ -8,8 +8,9 @@ use std::collections::HashMap;
 
 use crate::avatars::spawn_replicated;
 use crate::data::{
+    roll_attachments,
     ability_cooldown, elements_in, gun_def, has_perk, roll_box_gun, xp_to_next, Character,
-    Element, GunSpecial, Perk, PowerUp, Upgrade, BOX_COST, MAX_LEVEL, MAX_TIER,
+    Element, GunSpecial, Perk, PowerUp, Upgrade, wall_cost, BOX_COST, MAX_LEVEL, MAX_TIER,
 };
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
 use crate::maps::{CurrentMap, EXTRACT_RADIUS};
@@ -33,6 +34,7 @@ impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DamageQueue>()
             .init_resource::<Strikes>()
+            .init_resource::<Zones>()
             .init_resource::<LastHurt>()
             .add_systems(
                 Update,
@@ -43,6 +45,8 @@ impl Plugin for SimPlugin {
                     projectiles,
                     grenades,
                     orbital_strikes,
+                    zones,
+                    turrets,
                     apply_damage,
                     rounds,
                     enemy_ai,
@@ -106,7 +110,38 @@ pub struct GrenadeBrain {
     damage: f32,
     radius: f32,
     elements: u8,
+    /// A firebomb: bursts on landing and leaves a pool of fire.
+    pool: bool,
 }
+
+/// Tinker's sentry turret.
+#[derive(Component)]
+pub struct TurretBrain {
+    owner: u8,
+    life: f32,
+    cooldown: f32,
+    damage: f32,
+    elements: u8,
+}
+
+/// A lasting damage area (see `Fx::Zone` for the kinds).
+struct Zone {
+    owner: u8,
+    pos: Vec3,
+    follow: Option<u8>,
+    radius: f32,
+    damage: f32,
+    interval: f32,
+    timer: f32,
+    life: f32,
+    elements: u8,
+    kind: u8,
+    /// A model that goes away with the zone (the tesla coil).
+    model: Option<Entity>,
+}
+
+#[derive(Resource, Default)]
+struct Zones(Vec<Zone>);
 
 #[derive(Component)]
 pub struct PowerUpBrain {
@@ -134,7 +169,13 @@ struct Strikes(Vec<(u8, Vec3, f32, f32, f32, u8)>);
 #[derive(Resource, Default)]
 struct LastHurt(HashMap<u8, f32>);
 
-fn clear_sim(mut damage: ResMut<DamageQueue>, mut strikes: ResMut<Strikes>, mut hurt: ResMut<LastHurt>) {
+fn clear_sim(
+    mut damage: ResMut<DamageQueue>,
+    mut strikes: ResMut<Strikes>,
+    mut hurt: ResMut<LastHurt>,
+    mut zones: ResMut<Zones>,
+) {
+    zones.0.clear();
     damage.0.clear();
     strikes.0.clear();
     hurt.0.clear();
@@ -257,6 +298,7 @@ fn process_actions(
     map: Res<CurrentMap>,
     mut damage: ResMut<DamageQueue>,
     mut strikes: ResMut<Strikes>,
+    mut zones: ResMut<Zones>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
     enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
@@ -294,6 +336,11 @@ fn process_actions(
                 p.pending_picks = p.pending_picks.saturating_sub(1);
                 p.choices = if p.pending_picks > 0 { roll_choices(p) } else { Vec::new() };
             }
+            PlayerAction::Ping { pos, target } => {
+                if pos.iter().all(|v| v.is_finite()) {
+                    emit(&mut fx, &mut out, Fx::Ping { player: id, pos, target });
+                }
+            }
             PlayerAction::Interact => {
                 if !p.alive {
                     continue;
@@ -302,9 +349,10 @@ fn process_actions(
                 let box_pos = map.0.box_spots[state.box_spot as usize];
                 let near_box = feet.with_y(0.0).distance(box_pos) < INTERACT_RANGE;
                 match state.box_state {
-                    BoxState::Offer { player, gun, .. } if near_box && player == id => {
+                    BoxState::Offer { player, gun, attach, .. } if near_box && player == id => {
                         let slot = if p.guns[1].is_none() { 1 } else { p.active_slot as usize };
                         p.guns[slot] = Some(gun);
+                        p.attach[slot] = attach;
                         p.active_slot = slot as u8;
                         state.box_state = BoxState::Idle;
                         continue;
@@ -318,6 +366,31 @@ fn process_actions(
                         continue;
                     }
                     _ => {}
+                }
+                // Doors to the other areas.
+                if let Some(door) = map.0.doors.iter().find(|d| d.near(feet) && state.doors & (1 << d.zone) == 0) {
+                    if p.points >= door.cost {
+                        p.points -= door.cost;
+                        state.doors |= 1 << door.zone;
+                    }
+                    continue;
+                }
+                // Guns on the wall: buy the gun, or ammo for it if you have it.
+                if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet)) {
+                    let cost = wall_cost(wall.gun);
+                    if p.guns.contains(&Some(wall.gun)) {
+                        if p.points >= cost / 2 {
+                            p.points -= cost / 2;
+                            p.supply_seq = p.supply_seq.wrapping_add(1);
+                        }
+                    } else if p.points >= cost {
+                        p.points -= cost;
+                        let slot = if p.guns[1].is_none() { 1 } else { p.active_slot as usize };
+                        p.guns[slot] = Some(wall.gun);
+                        p.attach[slot] = Default::default();
+                        p.active_slot = slot as u8;
+                    }
+                    continue;
                 }
                 for (spot, perk) in map.0.perk_spots.iter().zip(Perk::ALL) {
                     if feet.with_y(0.0).distance(*spot) < INTERACT_RANGE
@@ -388,6 +461,7 @@ fn process_actions(
                                 damage: (150.0 + 60.0 * tier) * mult,
                                 radius: 4.0 + 0.5 * tier,
                                 elements,
+                                pool: false,
                             },
                             Transform::from_translation(origin + dir * 0.6),
                         ));
@@ -450,6 +524,201 @@ fn process_actions(
                                 delay: 1.2,
                             },
                         );
+                    }
+
+                    (Character::Ronin, 0) => {
+                        // Iaido Slash: everything in a wide arc in front.
+                        let flat = dir.with_y(0.0).normalize_or(Vec3::NEG_Z);
+                        let radius = 5.0 + 0.5 * tier;
+                        let dmg = (150.0 + 60.0 * tier) * mult;
+                        for (e, pos) in &enemy_list {
+                            let to = (*pos - feet).with_y(0.0);
+                            let d = to.length();
+                            if d < radius && (d < 0.8 || to.normalize().dot(flat) > 0.45) && (pos.y - feet.y).abs() < 2.5 {
+                                damage.0.push(DamageEvent {
+                                    target: *e,
+                                    amount: dmg,
+                                    from: Some(id),
+                                    headshot: false,
+                                    elements,
+                                    chained: false,
+                                });
+                            }
+                        }
+                        emit(&mut fx, &mut out, Fx::Slash {
+                            pos: (feet + Vec3::Y * 1.1).to_array(),
+                            dir: flat.to_array(),
+                            radius,
+                        });
+                    }
+                    (Character::Ronin, 1) => {
+                        // Shadow Step: the blink is done locally; cut
+                        // everything along the path.
+                        let flat = dir.with_y(0.0).normalize_or_zero();
+                        let len = 22.0 * (0.2 + 0.03 * tier);
+                        let end = feet + flat * len;
+                        let dmg = (120.0 + 50.0 * tier) * mult;
+                        for (e, pos) in &enemy_list {
+                            let p2 = pos.with_y(0.0);
+                            let (a, b) = (feet.with_y(0.0), end.with_y(0.0));
+                            let ab = b - a;
+                            let t = ((p2 - a).dot(ab) / ab.length_squared().max(1e-4)).clamp(0.0, 1.0);
+                            if p2.distance(a + ab * t) < 1.8 {
+                                damage.0.push(DamageEvent {
+                                    target: *e,
+                                    amount: dmg,
+                                    from: Some(id),
+                                    headshot: false,
+                                    elements,
+                                    chained: false,
+                                });
+                            }
+                        }
+                        out.0.push(Fx::Dash { player: id, a: feet.to_array(), b: end.to_array() });
+                        emit(&mut fx, &mut out, Fx::Slash {
+                            pos: (end + Vec3::Y * 1.1).to_array(),
+                            dir: flat.to_array(),
+                            radius: 3.0,
+                        });
+                    }
+                    (Character::Ronin, _) => {
+                        let life = 6.0 + tier;
+                        zones.0.push(Zone {
+                            owner: id,
+                            pos: feet,
+                            follow: Some(id),
+                            radius: 5.0,
+                            damage: 70.0 * mult,
+                            interval: 0.25,
+                            timer: 0.0,
+                            life,
+                            elements,
+                            kind: 0,
+                            model: None,
+                        });
+                        emit(&mut fx, &mut out, Fx::Zone { pos: feet.to_array(), radius: 5.0, life, follow: id, kind: 0 });
+                    }
+                    (Character::Tinker, 0) => {
+                        // Sentry turret, set down where you aim (close by).
+                        let boxes = collect_boxes(colliders.iter());
+                        let flat = dir.with_y(0.0).normalize_or(Vec3::NEG_Z);
+                        let dist = ray_world(feet + Vec3::Y * 0.5, flat, 3.0, &boxes);
+                        let at = feet + flat * (dist - 0.6).max(0.3);
+                        let id_net = state.next_net_id;
+                        state.next_net_id += 1;
+                        commands.spawn((
+                            crate::InGameEntity,
+                            Replicated { id: id_net, kind: NetKind::Turret },
+                            TurretBrain {
+                                owner: id,
+                                life: 15.0 + 5.0 * tier,
+                                cooldown: 0.5,
+                                damage: (24.0 + 8.0 * tier) * mult,
+                                elements,
+                            },
+                            Transform::from_translation(at).with_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, flat)),
+                        ));
+                        emit(&mut fx, &mut out, Fx::Ring { pos: at.to_array(), radius: 1.5, color: [0.3, 0.9, 1.0] });
+                    }
+                    (Character::Tinker, 1) => {
+                        let heal = 35.0 + 15.0 * tier;
+                        for other in roster.0.values_mut() {
+                            if other.alive && other.feet().distance(feet) < 8.0 {
+                                other.health = (other.health + heal).min(other.max_health());
+                                other.supply_seq = other.supply_seq.wrapping_add(1);
+                            }
+                        }
+                        emit(&mut fx, &mut out, Fx::Ring { pos: feet.to_array(), radius: 8.0, color: [1.0, 0.8, 0.2] });
+                        emit(&mut fx, &mut out, Fx::Ring { pos: (feet + Vec3::Y * 0.6).to_array(), radius: 6.0, color: [0.3, 0.9, 1.0] });
+                    }
+                    (Character::Tinker, _) => {
+                        // Tesla coil where you aim.
+                        let boxes = collect_boxes(colliders.iter());
+                        let dist = ray_world(origin, dir, 40.0, &boxes);
+                        let at = (origin + dir * (dist - 0.5).max(0.5)).with_y(feet.y.min(origin.y));
+                        let at = if (origin + dir * dist).y < feet.y + 0.3 { at } else { at.with_y(feet.y) };
+                        let id_net = state.next_net_id;
+                        state.next_net_id += 1;
+                        let model = commands
+                            .spawn((
+                                crate::InGameEntity,
+                                Replicated { id: id_net, kind: NetKind::Coil },
+                                Transform::from_translation(at),
+                            ))
+                            .id();
+                        let life = 10.0 + tier;
+                        zones.0.push(Zone {
+                            owner: id,
+                            pos: at,
+                            follow: None,
+                            radius: 8.0,
+                            damage: 90.0 * mult,
+                            interval: 0.4,
+                            timer: 0.3,
+                            life,
+                            elements: elements | Element::Shock.bit(),
+                            kind: 1,
+                            model: Some(model),
+                        });
+                        emit(&mut fx, &mut out, Fx::Zone { pos: at.to_array(), radius: 8.0, life, follow: 255, kind: 1 });
+                    }
+                    (Character::Blaze, 0) => {
+                        let id_net = state.next_net_id;
+                        state.next_net_id += 1;
+                        commands.spawn((
+                            crate::InGameEntity,
+                            Replicated { id: id_net, kind: NetKind::Firebomb },
+                            GrenadeBrain {
+                                owner: id,
+                                velocity: dir * crate::abilities::GRENADE_SPEED + Vec3::Y * crate::abilities::GRENADE_LIFT,
+                                fuse: crate::abilities::GRENADE_FUSE,
+                                damage: (60.0 + 20.0 * tier) * mult,
+                                radius: 4.0 + 0.5 * tier,
+                                elements: elements | Element::Fire.bit(),
+                                pool: true,
+                            },
+                            Transform::from_translation(origin + dir * 0.6),
+                        ));
+                    }
+                    (Character::Blaze, 1) => {
+                        let range = 8.0 + tier;
+                        let dmg = (70.0 + 30.0 * tier) * mult;
+                        for (e, pos) in &enemy_list {
+                            let to = *pos + Vec3::Y - origin;
+                            let d = to.length();
+                            if d < range && (d < 1.0 || to.normalize().dot(dir) > 0.8) {
+                                damage.0.push(DamageEvent {
+                                    target: *e,
+                                    amount: dmg,
+                                    from: Some(id),
+                                    headshot: false,
+                                    elements: elements | Element::Fire.bit(),
+                                    chained: false,
+                                });
+                            }
+                        }
+                        emit(&mut fx, &mut out, Fx::Cone {
+                            pos: (origin + dir * 0.5 - Vec3::Y * 0.2).to_array(),
+                            dir: dir.to_array(),
+                            range,
+                        });
+                    }
+                    (Character::Blaze, _) => {
+                        let life = 8.0 + tier;
+                        zones.0.push(Zone {
+                            owner: id,
+                            pos: feet,
+                            follow: Some(id),
+                            radius: 6.0,
+                            damage: 50.0 * mult,
+                            interval: 0.3,
+                            timer: 0.0,
+                            life,
+                            elements: elements | Element::Fire.bit(),
+                            kind: 3,
+                            model: None,
+                        });
+                        emit(&mut fx, &mut out, Fx::Zone { pos: feet.to_array(), radius: 6.0, life, follow: id, kind: 3 });
                     }
                 }
                 let _ = &mut rng;
@@ -819,14 +1088,20 @@ fn rounds(
 
     let mut rng = rand::thread_rng();
     let living: Vec<Vec3> = roster.0.values().filter(|p| p.alive).map(|p| p.feet()).collect();
-    let far: Vec<Vec3> = map
+    // Only areas the team has opened spawn enemies.
+    let open: Vec<Vec3> = map
         .0
         .enemy_spawns
+        .iter()
+        .filter(|(_, zone)| crate::maps::MapLayout::zone_open(state.doors, *zone))
+        .map(|(p, _)| *p)
+        .collect();
+    let far: Vec<Vec3> = open
         .iter()
         .copied()
         .filter(|s| living.iter().all(|p| p.distance(*s) > 14.0))
         .collect();
-    let pool = if far.is_empty() { &map.0.enemy_spawns } else { &far };
+    let pool = if far.is_empty() { &open } else { &far };
     let base = pool[rng.gen_range(0..pool.len())];
     let pos = base + Vec3::new(rng.gen_range(-1.5..1.5), 0.0, rng.gen_range(-1.5..1.5));
 
@@ -1016,6 +1291,7 @@ fn projectiles(
 fn grenades(
     mut commands: Commands,
     time: Res<Time>,
+    mut zones: ResMut<Zones>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
@@ -1034,7 +1310,10 @@ fn grenades(
         g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
         let next = tf.translation + g.velocity * dt;
         // Bounce off the floor and stop at walls.
-        if next.y < 0.1 {
+        if next.y < 0.1 && g.pool {
+            g.fuse = 0.0;
+            tf.translation.y = 0.1;
+        } else if next.y < 0.1 {
             g.velocity.y = -g.velocity.y * 0.35;
             g.velocity *= 0.6;
             tf.translation.y = 0.1;
@@ -1051,6 +1330,25 @@ fn grenades(
             if let Some(el) = elements_in(g.elements).next() {
                 color = el.color();
             }
+            if g.pool {
+                let at = tf.translation.with_y(0.0);
+                let life = 6.0;
+                zones.0.push(Zone {
+                    owner: g.owner,
+                    pos: at,
+                    follow: None,
+                    radius: g.radius,
+                    damage: g.damage * 0.4,
+                    interval: 0.3,
+                    timer: 0.0,
+                    life,
+                    elements: g.elements,
+                    kind: 2,
+                    model: None,
+                });
+                emit(&mut fx, &mut out, Fx::Zone { pos: at.to_array(), radius: g.radius, life, follow: 255, kind: 2 });
+                color = Color::srgb(1.0, 0.45, 0.1);
+            }
             explode(
                 tf.translation + Vec3::Y * 0.3,
                 g.radius,
@@ -1064,6 +1362,113 @@ fn grenades(
                 color,
             );
             commands.entity(e).despawn();
+        }
+    }
+}
+
+fn zones(
+    mut commands: Commands,
+    time: Res<Time>,
+    roster: Res<Roster>,
+    mut zones: ResMut<Zones>,
+    mut damage: ResMut<DamageQueue>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
+    enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
+) {
+    let dt = time.delta_secs();
+    for z in zones.0.iter_mut() {
+        z.life -= dt;
+        if let Some(p) = z.follow.and_then(|id| roster.0.get(&id)) {
+            if p.alive {
+                z.pos = p.feet();
+            } else {
+                z.life = z.life.min(0.0);
+            }
+        }
+        z.timer -= dt;
+        if z.timer > 0.0 || z.life <= 0.0 {
+            continue;
+        }
+        z.timer += z.interval;
+        let mut arcs = 0;
+        for (e, t) in &enemies {
+            let d = t.translation.with_y(0.0).distance(z.pos.with_y(0.0));
+            if d < z.radius && (t.translation.y - z.pos.y).abs() < 3.0 {
+                damage.0.push(DamageEvent {
+                    target: e,
+                    amount: z.damage,
+                    from: Some(z.owner),
+                    headshot: false,
+                    elements: z.elements,
+                    chained: true,
+                });
+                if z.kind == 1 && arcs < 4 {
+                    arcs += 1;
+                    emit(&mut fx, &mut out, Fx::Lightning {
+                        a: (z.pos + Vec3::Y * 2.5).to_array(),
+                        b: (t.translation + Vec3::Y * 1.2).to_array(),
+                    });
+                }
+            }
+        }
+    }
+    zones.0.retain(|z| {
+        if z.life > 0.0 {
+            return true;
+        }
+        if let Some(m) = z.model {
+            if let Ok(mut e) = commands.get_entity(m) {
+                e.try_despawn();
+            }
+        }
+        false
+    });
+}
+
+fn turrets(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut damage: ResMut<DamageQueue>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
+    mut turrets: Query<(Entity, &mut Transform, &mut TurretBrain), Without<EnemyBrain>>,
+    enemies: Query<(Entity, &Transform, &EnemyBrain)>,
+    colliders: Query<(&Transform, &Collider), (Without<TurretBrain>, Without<EnemyBrain>)>,
+) {
+    if turrets.is_empty() {
+        return;
+    }
+    let dt = time.delta_secs();
+    let boxes = collect_boxes(colliders.iter());
+    for (e, mut tf, mut t) in &mut turrets {
+        t.life -= dt;
+        if t.life <= 0.0 {
+            emit(&mut fx, &mut out, Fx::Explosion { pos: (tf.translation + Vec3::Y * 0.6).to_array(), radius: 1.2, color: [0.3, 0.9, 1.0] });
+            commands.entity(e).despawn();
+            continue;
+        }
+        t.cooldown -= dt;
+        let gun = tf.translation + Vec3::Y * 0.85;
+        let target = enemies
+            .iter()
+            .map(|(e, et, b)| (e, et.translation + Vec3::Y * 1.1 * enemy_scale(b.kind)))
+            .filter(|(_, p)| p.distance(gun) < 24.0 && line_of_sight(gun, *p, &boxes))
+            .min_by(|a, b| a.1.distance(gun).total_cmp(&b.1.distance(gun)));
+        let Some((enemy, at)) = target else { continue };
+        let flat = (at - gun).with_y(0.0).normalize_or(Vec3::NEG_Z);
+        tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, flat);
+        if t.cooldown <= 0.0 {
+            t.cooldown = 0.15;
+            damage.0.push(DamageEvent {
+                target: enemy,
+                amount: t.damage,
+                from: Some(t.owner),
+                headshot: false,
+                elements: t.elements,
+                chained: false,
+            });
+            emit(&mut fx, &mut out, Fx::Tracer { shooter: 255, a: (gun + flat * 0.5).to_array(), b: at.to_array() });
         }
     }
 }
@@ -1183,9 +1588,12 @@ fn mystery_box(time: Res<Time>, map: Res<CurrentMap>, mut state: ResMut<MatchSta
                 BoxState::Moving { time: 4.0 }
             } else {
                 let exclude = roster.0.get(&player).map(|p| p.guns).unwrap_or([None, None]);
+                let wall: Vec<u8> = map.0.wall_buys.iter().map(|w| w.gun).collect();
+                let gun = roll_box_gun(&mut rng, &exclude, &wall);
                 BoxState::Offer {
                     player,
-                    gun: roll_box_gun(&mut rng, &exclude),
+                    gun,
+                    attach: roll_attachments(gun, &mut rng),
                     time: 9.0,
                 }
             }
@@ -1195,9 +1603,10 @@ fn mystery_box(time: Res<Time>, map: Res<CurrentMap>, mut state: ResMut<MatchSta
             time: time - dt,
         },
         BoxState::Offer { time, .. } if time - dt <= 0.0 => BoxState::Idle,
-        BoxState::Offer { player, gun, time } => BoxState::Offer {
+        BoxState::Offer { player, gun, attach, time } => BoxState::Offer {
             player,
             gun,
+            attach,
             time: time - dt,
         },
         BoxState::Moving { time } if time - dt <= 0.0 => BoxState::Idle,
@@ -1244,7 +1653,9 @@ fn check_game_over(roster: Res<Roster>, mut state: ResMut<MatchState>) {
 /// Fresh match state for the host when a match begins.
 pub fn new_match(state: &mut MatchState, roster: &mut Roster, map: u8) {
     let mut rng = rand::thread_rng();
+    let night = state.night;
     *state = MatchState::new(map);
+    state.night = night;
     state.started = true;
     state.box_spot = rng.gen_range(0..5);
     state.box_move_after = rng.gen_range(4..9);

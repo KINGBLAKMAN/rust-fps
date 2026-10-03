@@ -152,16 +152,167 @@ pub fn gun_def(id: u8) -> &'static GunDef {
     &GUNS[(id as usize).min(GUNS.len() - 1)]
 }
 
-/// Rolls a mystery box gun, never one the player already holds.
-pub fn roll_box_gun(rng: &mut impl rand::Rng, exclude: &[Option<u8>; 2]) -> u8 {
+/// Price of a gun bought off the wall (ammo for it costs half).
+pub fn wall_cost(gun: u8) -> u32 {
+    match gun_def(gun).class {
+        GunClass::Pistol => 500,
+        GunClass::Smg | GunClass::Shotgun => 1000,
+        GunClass::Rifle => 1250,
+        _ => 1500,
+    }
+}
+
+/// Rolls a mystery box gun, never one the player already holds or one on
+/// this map's walls.
+pub fn roll_box_gun(rng: &mut impl rand::Rng, exclude: &[Option<u8>; 2], wall: &[u8]) -> u8 {
     loop {
         let id = if rng.gen_bool(0.06) {
             rng.gen_range(21..=22)
         } else {
             rng.gen_range(1..=20)
         };
-        if !exclude.contains(&Some(id)) {
+        if !exclude.contains(&Some(id)) && !wall.contains(&id) {
             return id;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attachments (mystery box guns only)
+// ---------------------------------------------------------------------------
+
+/// A gun's attachments, packed in one byte: optic (bits 0-1), muzzle (2-3),
+/// underbarrel (4-5), extended magazine (6). 0 in a slot means empty.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Attach(pub u8);
+
+pub const OPTIC_NAMES: [&str; 4] = ["", "Red Dot", "Holo Sight", "3x Scope"];
+pub const MUZZLE_NAMES: [&str; 3] = ["", "Suppressor", "Compensator"];
+pub const UNDER_NAMES: [&str; 3] = ["", "Foregrip", "Laser"];
+
+impl Attach {
+    pub const NONE: Attach = Attach(0);
+
+    pub fn optic(self) -> u8 {
+        self.0 & 3
+    }
+    pub fn muzzle(self) -> u8 {
+        (self.0 >> 2) & 3
+    }
+    pub fn under(self) -> u8 {
+        (self.0 >> 4) & 3
+    }
+    pub fn ext_mag(self) -> bool {
+        self.0 & 64 != 0
+    }
+    fn make(optic: u8, muzzle: u8, under: u8, mag: bool) -> Self {
+        Attach(optic | (muzzle << 2) | (under << 4) | if mag { 64 } else { 0 })
+    }
+
+    /// Names of everything fitted, e.g. ["Red Dot", "Suppressor"].
+    pub fn names(self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.optic() > 0 {
+            v.push(OPTIC_NAMES[self.optic() as usize]);
+        }
+        if self.muzzle() > 0 {
+            v.push(MUZZLE_NAMES[self.muzzle() as usize]);
+        }
+        if self.under() > 0 {
+            v.push(UNDER_NAMES[self.under() as usize]);
+        }
+        if self.ext_mag() {
+            v.push("Extended Mag");
+        }
+        v
+    }
+
+    /// How much recoil is left after the muzzle and grip (1 = none removed).
+    pub fn recoil_scale(self) -> f32 {
+        let m = match self.muzzle() {
+            1 => 0.85,
+            2 => 0.65,
+            _ => 1.0,
+        };
+        let u = if self.under() == 1 { 0.75 } else { 1.0 };
+        m * u
+    }
+
+    /// Hip-fire spread multiplier (the laser tightens it).
+    pub fn hip_spread(self) -> f32 {
+        if self.under() == 2 {
+            0.6
+        } else {
+            1.0
+        }
+    }
+}
+
+/// Magazine size with attachments.
+pub fn mag_size(gun: u8, attach: Attach) -> u32 {
+    let m = gun_def(gun).mag;
+    if attach.ext_mag() {
+        (m as f32 * 1.5).round() as u32
+    } else {
+        m
+    }
+}
+
+/// Which attachments a gun can take: (optics, muzzles, underbarrels, mag).
+fn attach_options(gun: u8) -> (&'static [u8], &'static [u8], &'static [u8], bool) {
+    let d = gun_def(gun);
+    let (optics, muzzles, unders, mag) = attach_slots(gun, d.class);
+    // Some models come with their own sight, suppressor or foregrip.
+    let builtin_optic = matches!(gun, 3 | 4 | 5 | 6 | 8 | 9 | 14 | 15 | 16 | 17);
+    let builtin_muzzle = matches!(gun, 3 | 16);
+    let builtin_grip = matches!(gun, 3 | 5 | 8 | 9 | 11);
+    (
+        if builtin_optic { &[] } else { optics },
+        if builtin_muzzle { &[] } else { muzzles },
+        if builtin_grip { &[] } else { unders },
+        mag,
+    )
+}
+
+fn attach_slots(gun: u8, class: GunClass) -> (&'static [u8], &'static [u8], &'static [u8], bool) {
+    match class {
+        GunClass::Wonder => (&[], &[], &[], false),
+        _ if gun == 12 || gun == 20 => (&[1], &[], &[2], false), // double barrel, dual SMGs
+        GunClass::Pistol => (&[1], &[1, 2], &[2], gun != 18),
+        GunClass::Smg => (&[1, 2], &[1, 2], &[1, 2], true),
+        GunClass::Rifle | GunClass::Lmg => (&[1, 2, 3], &[1, 2], &[1, 2], true),
+        GunClass::Shotgun => (&[1, 2], &[2], &[1, 2], true),
+        // Snipers come with their own scope.
+        GunClass::Sniper => (&[], &[1, 2], &[1, 2], true),
+    }
+}
+
+/// Random attachments for a mystery box gun: about a quarter come bare,
+/// half with some attachments and a quarter fully kitted out.
+pub fn roll_attachments(gun: u8, rng: &mut impl rand::Rng) -> Attach {
+    let (optics, muzzles, unders, mag) = attach_options(gun);
+    let pick = |rng: &mut dyn rand::RngCore, list: &[u8]| -> u8 {
+        if list.is_empty() {
+            0
+        } else {
+            list[(rng.next_u32() as usize) % list.len()]
+        }
+    };
+    let r: f32 = rng.gen_range(0.0..1.0);
+    if r < 0.25 {
+        return Attach::NONE;
+    }
+    let full = r >= 0.75;
+    loop {
+        let keep = |rng: &mut dyn rand::RngCore| full || rng.next_u32() % 100 < 45;
+        let optic = if keep(rng) { pick(rng, optics) } else { 0 };
+        let muzzle = if keep(rng) { pick(rng, muzzles) } else { 0 };
+        let under = if keep(rng) { pick(rng, unders) } else { 0 };
+        let ext = mag && keep(rng);
+        let a = Attach::make(optic, muzzle, under, ext);
+        // "Some" means at least one; guns that take nothing stay bare.
+        if a != Attach::NONE || (optics.is_empty() && muzzles.is_empty() && unders.is_empty() && !mag) {
+            return a;
         }
     }
 }
@@ -454,20 +605,32 @@ pub fn spins_for_round(round: u32) -> u32 {
 // Characters and abilities
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Character {
     #[default]
     Striker,
     Warden,
+    Ronin,
+    Tinker,
+    Blaze,
 }
 
 impl Character {
-    pub const ALL: [Character; 2] = [Character::Striker, Character::Warden];
+    pub const ALL: [Character; 5] = [
+        Character::Striker,
+        Character::Warden,
+        Character::Ronin,
+        Character::Tinker,
+        Character::Blaze,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Character::Striker => "Striker",
             Character::Warden => "Warden",
+            Character::Ronin => "Ronin",
+            Character::Tinker => "Tinker",
+            Character::Blaze => "Blaze",
         }
     }
 
@@ -475,6 +638,9 @@ impl Character {
         match self {
             Character::Striker => "Aggressive assault specialist",
             Character::Warden => "Support and crowd control",
+            Character::Ronin => "Blade master who strikes up close",
+            Character::Tinker => "Engineer with turrets and supplies",
+            Character::Blaze => "Pyro who sets the horde ablaze",
         }
     }
 
@@ -491,6 +657,21 @@ impl Character {
                 ("Frost Nova", "Damage and slow every enemy around you."),
                 ("Orbital Strike", "ULT: call a huge blast where you aim."),
             ],
+            Character::Ronin => [
+                ("Iaido Slash", "Draw and cut everything in front of you."),
+                ("Shadow Step", "Blink forward, slicing enemies you pass through."),
+                ("Blade Storm", "ULT: whirling blades shred enemies around you."),
+            ],
+            Character::Tinker => [
+                ("Sentry Turret", "Deploy a turret that shoots nearby enemies."),
+                ("Supply Drop", "Refill ammo and patch up teammates nearby."),
+                ("Tesla Coil", "ULT: plant a coil that shocks everything near it."),
+            ],
+            Character::Blaze => [
+                ("Firebomb", "Throw a bomb that leaves a pool of fire."),
+                ("Flame Wave", "Blast a cone of fire that sets enemies alight."),
+                ("Inferno", "ULT: wreathe yourself in a ring of fire."),
+            ],
         }
     }
 
@@ -498,6 +679,9 @@ impl Character {
         match self {
             Character::Striker => Color::srgb(0.15, 0.35, 0.85),
             Character::Warden => Color::srgb(0.2, 0.65, 0.35),
+            Character::Ronin => Color::srgb(0.6, 0.08, 0.08),
+            Character::Tinker => Color::srgb(0.95, 0.75, 0.12),
+            Character::Blaze => Color::srgb(0.25, 0.22, 0.2),
         }
     }
 
@@ -505,6 +689,9 @@ impl Character {
         match self {
             Character::Striker => Color::srgb(0.95, 0.55, 0.1),
             Character::Warden => Color::srgb(0.92, 0.92, 0.95),
+            Character::Ronin => Color::srgb(0.9, 0.7, 0.25),
+            Character::Tinker => Color::srgb(0.3, 0.9, 1.0),
+            Character::Blaze => Color::srgb(1.0, 0.45, 0.08),
         }
     }
 }
@@ -517,10 +704,26 @@ pub fn ability_cooldown(c: Character, slot: usize, tier: u8) -> f32 {
         (Character::Striker, _) => 12.0 - 2.0 * t,
         (Character::Warden, 0) => 14.0 - 2.0 * t,
         (Character::Warden, _) => 12.0 - 2.0 * t,
+        (Character::Ronin, 0) => 5.0 - t,
+        (Character::Ronin, _) => 9.0 - 1.5 * t,
+        (Character::Tinker, 0) => 20.0 - 3.0 * t,
+        (Character::Tinker, _) => 16.0 - 2.0 * t,
+        (Character::Blaze, 0) => 10.0 - 2.0 * t,
+        (Character::Blaze, _) => 7.0 - t,
     }
 }
 
 pub const MAX_TIER: u8 = 3;
+
+/// Abilities you hold in your hand and throw (with an arc preview).
+pub fn is_thrown(c: Character, slot: u8) -> bool {
+    matches!((c, slot), (Character::Striker, 1) | (Character::Blaze, 0))
+}
+
+/// Abilities that move you rather than use your hand.
+pub fn is_dash(c: Character, slot: u8) -> bool {
+    matches!((c, slot), (Character::Striker, 0) | (Character::Ronin, 1))
+}
 
 // ---------------------------------------------------------------------------
 // Perks, power-ups, elements, upgrades

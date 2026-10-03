@@ -9,7 +9,7 @@ use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, TAU};
 
 use crate::kit::{c, vertex_material, Kit};
 use crate::{AppState, InGameEntity, Phase};
@@ -21,6 +21,10 @@ impl Plugin for FxPlugin {
         app.init_resource::<FxQueue>()
             .init_resource::<FxOutbox>()
             .init_resource::<Lines>()
+            .add_systems(
+                Update,
+                zone_fx.in_set(Phase::Present).run_if(in_state(AppState::InGame)),
+            )
             .add_systems(PreStartup, setup)
             .add_systems(
                 Update,
@@ -46,6 +50,15 @@ pub enum Fx {
     /// A player dashed from `a` to `b` (skipped by the dasher, who plays it
     /// locally straight away).
     Dash { player: u8, a: [f32; 3], b: [f32; 3] },
+    /// A sword cut across an arc in front of `pos`.
+    Slash { pos: [f32; 3], dir: [f32; 3], radius: f32 },
+    /// A cone of flame.
+    Cone { pos: [f32; 3], dir: [f32; 3], range: f32 },
+    /// A lasting area effect: 0 blade storm, 1 tesla field, 2 fire pool,
+    /// 3 inferno. `follow` is a player id (255 stays put).
+    Zone { pos: [f32; 3], radius: f32, life: f32, follow: u8, kind: u8 },
+    /// A player pinged a spot or an enemy (see pings.rs).
+    Ping { player: u8, pos: [f32; 3], target: u32 },
 }
 
 /// Effects to show on this machine this frame.
@@ -58,10 +71,10 @@ pub struct FxOutbox(pub Vec<Fx>);
 
 /// Short-lived lines: (start, end, color, time left).
 #[derive(Resource, Default)]
-struct Lines(Vec<(Vec3, Vec3, Color, f32)>);
+pub struct Lines(Vec<(Vec3, Vec3, Color, f32)>);
 
 #[derive(Resource)]
-struct FxAssets {
+pub struct FxAssets {
     ball: Handle<Mesh>,
     disc: Handle<Mesh>,
     beam: Handle<Mesh>,
@@ -85,7 +98,25 @@ struct FxAssets {
     beam_outer: Handle<StandardMaterial>,
     marker_mat: Handle<StandardMaterial>,
     ghost_mat: Handle<StandardMaterial>,
+    blade: Handle<Mesh>,
+    blade_mat: Handle<StandardMaterial>,
+    tesla_mat: Handle<StandardMaterial>,
 }
+
+/// A lasting area effect on screen (see `Fx::Zone`).
+#[derive(Component)]
+struct ZoneFx {
+    life: f32,
+    max: f32,
+    radius: f32,
+    follow: Option<u8>,
+    kind: u8,
+    emit: f32,
+}
+
+/// Spinning blades of the Blade Storm.
+#[derive(Component)]
+struct StormBlade(Entity, f32);
 
 /// How a one-shot shape changes over its life.
 #[derive(Clone, Copy)]
@@ -256,6 +287,15 @@ fn setup(
             ..default()
         }),
         ghost_mat: unlit(&mut materials, Color::srgba(0.4, 0.75, 1.0, 0.3)),
+        blade: meshes.add({
+            let mut k = Kit::new();
+            k.cuboid(Vec3::new(0.0, 0.0, -0.45), Vec3::new(0.02, 0.09, 0.9), c(1.0, 0.85, 0.5));
+            k.wedge(Vec3::new(0.0, 0.0, -0.95), Vec3::new(0.09, 0.12, 0.02), Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_z(FRAC_PI_2), c(1.0, 0.9, 0.6));
+            k.cuboid(Vec3::new(0.0, 0.0, 0.02), Vec3::new(0.04, 0.16, 0.04), c(0.9, 0.6, 0.2));
+            k.build_or_empty()
+        }),
+        blade_mat: glow_material(&mut materials, [1.0, 0.8, 0.35], 0.9),
+        tesla_mat: glow_material(&mut materials, [0.45, 0.8, 1.0], 0.25),
     };
     commands.insert_resource(assets);
 }
@@ -442,7 +482,7 @@ fn explosion(
     );
 }
 
-fn play(
+pub fn play(
     mut commands: Commands,
     mut queue: ResMut<FxQueue>,
     mut lines: ResMut<Lines>,
@@ -620,6 +660,131 @@ fn play(
                     NotShadowCaster,
                 ));
             }
+            Fx::Slash { pos, dir, radius } => {
+                let (p, d) = (Vec3::from_array(pos), Vec3::from_array(dir));
+                let a0 = d.z.atan2(d.x);
+                for k in 0..4 {
+                    let h = -0.5 + k as f32 * 0.35;
+                    let r = radius * (0.55 + 0.15 * k as f32);
+                    let mut prev = None;
+                    for i in 0..=18 {
+                        let ang = a0 - 1.1 + 2.2 * i as f32 / 18.0;
+                        let q = p + Vec3::new(ang.cos() * r, h + 0.25 * (i as f32 / 18.0 - 0.5), ang.sin() * r);
+                        if let Some(pr) = prev {
+                            lines.0.push((pr, q, Color::srgb(1.0, 0.92 - 0.1 * k as f32, 0.6), 0.18 + k as f32 * 0.03));
+                        }
+                        prev = Some(q);
+                    }
+                }
+                for _ in 0..20 {
+                    let ang = a0 + rng.gen_range(-1.1..1.1);
+                    let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+                    particle(&mut commands, &a.ball, &a.spark, p + out * radius * rng.gen_range(0.3..0.9), Particle {
+                        vel: out * rng.gen_range(2.0..6.0) + Vec3::Y * rng.gen_range(0.0..2.0),
+                        life: rng.gen_range(0.2..0.45),
+                        max: 0.45,
+                        gravity: 6.0,
+                        drag: 2.0,
+                        size: (0.05, 0.0),
+                        pop: 0.0,
+                        spin: Vec3::ZERO,
+                        lands: false,
+                    });
+                }
+                flash_light(&mut commands, p, Color::srgb(1.0, 0.85, 0.5), 80_000.0, radius * 1.5, 0.25);
+            }
+            Fx::Cone { pos, dir, range } => {
+                let (p, d) = (Vec3::from_array(pos), Vec3::from_array(dir).normalize_or(Vec3::NEG_Z));
+                for _ in 0..55 {
+                    let spread = rand_dir(&mut rng) * rng.gen_range(0.0..0.35);
+                    let v = (d + spread).normalize() * range * rng.gen_range(1.6..2.4);
+                    particle(&mut commands, &a.ball, &a.fire, p + spread * 0.2, Particle {
+                        vel: v,
+                        life: rng.gen_range(0.35..0.55),
+                        max: 0.55,
+                        gravity: -2.0,
+                        drag: 1.2,
+                        size: (0.08, rng.gen_range(0.5..0.9)),
+                        pop: 0.05,
+                        spin: Vec3::ZERO,
+                        lands: false,
+                    });
+                }
+                for _ in 0..12 {
+                    let spread = rand_dir(&mut rng) * 0.3;
+                    particle(&mut commands, &a.ball, &a.smoke, p + d * range * 0.6, Particle {
+                        vel: (d + spread) * 3.0 + Vec3::Y * 1.5,
+                        life: rng.gen_range(0.6..1.1),
+                        max: 1.1,
+                        gravity: -1.0,
+                        drag: 1.0,
+                        size: (0.3, 1.0),
+                        pop: 0.2,
+                        spin: Vec3::ZERO,
+                        lands: false,
+                    });
+                }
+                flash_light(&mut commands, p + d * 2.0, Color::srgb(1.0, 0.5, 0.15), 250_000.0, range * 1.5, 0.4);
+            }
+            Fx::Zone { pos, radius, life, follow, kind } => {
+                let p = Vec3::from_array(pos);
+                let zone = commands
+                    .spawn((
+                        InGameEntity,
+                        ZoneFx {
+                            life,
+                            max: life,
+                            radius,
+                            follow: (follow != 255).then_some(follow),
+                            kind,
+                            emit: 0.0,
+                        },
+                        Transform::from_translation(p),
+                        Visibility::default(),
+                    ))
+                    .id();
+                let (color, light) = match kind {
+                    0 => ([1.0, 0.8, 0.35], Color::srgb(1.0, 0.8, 0.4)),
+                    1 => ([0.45, 0.8, 1.0], Color::srgb(0.5, 0.8, 1.0)),
+                    _ => ([1.0, 0.45, 0.1], Color::srgb(1.0, 0.5, 0.15)),
+                };
+                commands.entity(zone).with_children(|z| {
+                    z.spawn((
+                        Mesh3d(a.ring.clone()),
+                        MeshMaterial3d(glow_material(&mut materials, color, 0.55)),
+                        Transform::from_xyz(0.0, 0.08, 0.0).with_scale(Vec3::new(radius, 2.0, radius)),
+                        NotShadowCaster,
+                    ));
+                    let floor = if kind == 1 { a.tesla_mat.clone() } else if kind == 0 { glow_material(&mut materials, color, 0.12) } else { a.scorch.clone() };
+                    z.spawn((
+                        Mesh3d(a.disc.clone()),
+                        MeshMaterial3d(floor),
+                        Transform::from_xyz(0.0, 0.03, 0.0).with_scale(Vec3::new(radius, 1.0, radius)),
+                        NotShadowCaster,
+                    ));
+                    z.spawn((
+                        PointLight {
+                            intensity: 120_000.0,
+                            color: light,
+                            range: radius * 2.0,
+                            ..default()
+                        },
+                        Transform::from_xyz(0.0, 1.5, 0.0),
+                    ));
+                    if kind == 0 {
+                        for i in 0..6 {
+                            z.spawn((
+                                StormBlade(zone, i as f32 / 6.0 * TAU),
+                                Mesh3d(a.blade.clone()),
+                                MeshMaterial3d(a.blade_mat.clone()),
+                                Transform::default(),
+                                NotShadowCaster,
+                            ));
+                        }
+                    }
+                });
+            }
+            Fx::Ping { .. } => {}
             Fx::Dash { a: from, b: to, .. } => {
                 let (from, to) = (Vec3::from_array(from), Vec3::from_array(to));
                 for i in 0..5 {
@@ -791,6 +956,96 @@ fn markers(
             Grow::Column2(p.radius * 0.18),
         );
         explosion(&mut commands, a, &mut materials, p.pos + Vec3::Y * 0.5, p.radius, [1.0, 0.5, 0.15]);
+    }
+}
+
+/// Moves lasting zones with their player, spins the blades and keeps
+/// flames and sparks coming.
+fn zone_fx(
+    mut commands: Commands,
+    time: Res<Time>,
+    roster: Res<crate::Roster>,
+    assets: Res<FxAssets>,
+    mut lines: ResMut<Lines>,
+    mut zones: Query<(Entity, &mut ZoneFx, &mut Transform), Without<StormBlade>>,
+    mut blades: Query<(&StormBlade, &mut Transform), Without<ZoneFx>>,
+) {
+    let dt = time.delta_secs();
+    let t = time.elapsed_secs();
+    let a = &*assets;
+    let mut rng = rand::thread_rng();
+    let mut sizes = Vec::new();
+    for (e, mut z, mut tf) in &mut zones {
+        z.life -= dt;
+        if z.life <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        if let Some(p) = z.follow.and_then(|id| roster.0.get(&id)) {
+            tf.translation = p.feet();
+        }
+        let fade = (z.life / 0.4).min(1.0).min((z.max - z.life) / 0.25 + 0.2).min(1.0);
+        tf.scale = Vec3::new(fade, 1.0, fade);
+        sizes.push((e, z.radius));
+        z.emit -= dt;
+        if z.emit > 0.0 {
+            continue;
+        }
+        let p = tf.translation;
+        match z.kind {
+            0 => {
+                z.emit = 0.05;
+                let ang = rng.gen_range(0.0..TAU);
+                let r = z.radius * rng.gen_range(0.3..1.0);
+                let q = p + Vec3::new(ang.cos() * r, rng.gen_range(0.4..1.6), ang.sin() * r);
+                let tan = Vec3::new(-ang.sin(), 0.0, ang.cos());
+                lines.0.push((q, q + tan * 1.2, Color::srgb(1.0, 0.9, 0.6), 0.1));
+            }
+            1 => {
+                z.emit = 0.12;
+                let top = p + Vec3::Y * 2.5;
+                let ang = rng.gen_range(0.0..TAU);
+                let r = z.radius * rng.gen_range(0.3..1.0);
+                let end = p + Vec3::new(ang.cos() * r, 0.05, ang.sin() * r);
+                let mut prev = top;
+                for i in 1..=6 {
+                    let f = i as f32 / 6.0;
+                    let mut q = top.lerp(end, f);
+                    if i < 6 {
+                        q += Vec3::new(rng.gen_range(-0.3..0.3), rng.gen_range(-0.3..0.3), rng.gen_range(-0.3..0.3));
+                    }
+                    lines.0.push((prev, q, Color::srgb(0.7, 0.9, 1.0), 0.08));
+                    prev = q;
+                }
+            }
+            kind => {
+                // Fire pool or a ring of flame around the player.
+                z.emit = 0.025;
+                for _ in 0..2 {
+                    let ang = rng.gen_range(0.0..TAU);
+                    let r = if kind == 3 { z.radius * rng.gen_range(0.85..1.0) } else { z.radius * rng.gen_range(0.0f32..1.0).sqrt() };
+                    let q = p + Vec3::new(ang.cos() * r, 0.1, ang.sin() * r);
+                    particle(&mut commands, &a.ball, &a.fire, q, Particle {
+                        vel: Vec3::Y * rng.gen_range(1.5..3.5),
+                        life: rng.gen_range(0.35..0.7),
+                        max: 0.7,
+                        gravity: -1.0,
+                        drag: 0.5,
+                        size: (0.3, 0.05),
+                        pop: 0.1,
+                        spin: Vec3::ZERO,
+                        lands: false,
+                    });
+                }
+            }
+        }
+    }
+    for (b, mut tf) in &mut blades {
+        let Some((_, r)) = sizes.iter().find(|(e, _)| *e == b.0) else { continue };
+        let ang = b.1 + t * 7.0;
+        let r = r * 0.55;
+        tf.translation = Vec3::new(ang.cos() * r, 1.0 + 0.25 * (t * 5.0 + b.1).sin(), ang.sin() * r);
+        tf.rotation = Quat::from_rotation_y(-ang) * Quat::from_rotation_z(0.3);
     }
 }
 

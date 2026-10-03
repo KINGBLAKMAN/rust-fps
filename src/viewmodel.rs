@@ -49,7 +49,7 @@ impl Default for ViewMuzzle {
 
 #[derive(Resource, Default)]
 struct ViewAnim {
-    shown: Option<(u8, u8, Character)>,
+    shown: Option<(u8, u8, Character, crate::data::Attach)>,
     equip: f32,
     last_shots: u32,
     since_shot: f32,
@@ -199,8 +199,8 @@ fn rebuild(
     hand_meshes: Query<Entity, With<HandMesh>>,
 ) {
     let Some(me) = roster.me(&session) else { return };
-    let Some(gun) = loadout.current().map(|g| g.id) else { return };
-    let key = (gun, me.skin_for(gun), me.character);
+    let Some((gun, attach)) = loadout.current().map(|g| (g.id, g.attach)) else { return };
+    let key = (gun, me.skin_for(gun), me.character, attach);
     if anim.shown == Some(key) {
         return;
     }
@@ -218,7 +218,7 @@ fn rebuild(
             continue;
         }
         commands.entity(e).with_children(|p| {
-            spawn_gun(p, &guns, gun, skin.clone(), true);
+            spawn_gun(p, &guns, gun, attach, skin.clone(), true);
             if pivot.0 == 0 {
                 p.spawn((
                     Flash,
@@ -302,6 +302,12 @@ fn ability_color(character: Character, slot: u8) -> Color {
         (Character::Warden, 0) => c(0.35, 1.0, 0.5),
         (Character::Warden, 1) => c(0.55, 0.85, 1.0),
         (Character::Warden, _) => c(1.0, 0.25, 0.2),
+        (Character::Ronin, 0) => c(1.0, 0.8, 0.3),
+        (Character::Ronin, _) => c(1.0, 0.3, 0.3),
+        (Character::Tinker, 0) => c(0.3, 0.9, 1.0),
+        (Character::Tinker, 1) => c(1.0, 0.8, 0.2),
+        (Character::Tinker, _) => c(0.5, 0.8, 1.0),
+        (Character::Blaze, _) => c(1.0, 0.45, 0.1),
         _ => c(1.0, 1.0, 1.0),
     }
 }
@@ -315,6 +321,7 @@ fn animate(
     roster: Res<Roster>,
     loadout: Res<Loadout>,
     cast: Res<CastState>,
+    aim: Res<crate::weapons::Aim>,
     guns: Res<GunAssets>,
     rig_assets: Res<RigAssets>,
     mut anim: ResMut<ViewAnim>,
@@ -336,12 +343,20 @@ fn animate(
     let t = time.elapsed_secs();
     let me = roster.me(&session);
     let gun = loadout.current().map(|g| g.id);
-    let show = *state.get() == AppState::InGame && me.is_some_and(|m| m.alive) && gun.is_some();
+    let attach = loadout.current().map(|g| g.attach).unwrap_or_default();
+    // Hidden while dead, emoting or looking through a scope.
+    let show = *state.get() == AppState::InGame
+        && me.is_some_and(|m| m.alive)
+        && gun.is_some()
+        && !player.third_person()
+        && !aim.scoped;
     for mut vis in &mut parts.p7() {
         *vis = if show { Visibility::Inherited } else { Visibility::Hidden };
     }
     let (Some(me), Some(gun), true) = (me, gun, show) else { return };
-    let rig = guns.gun(gun).rig;
+    let (rig, sight_y) = crate::gunmodels::fitted_rig(&guns.gun(gun).rig, attach);
+    let ads = ease(aim.amount);
+    let steady = 1.0 - 0.85 * ads;
     let def = gun_def(gun);
     let character = me.character;
 
@@ -369,7 +384,7 @@ fn animate(
     // Is the left hand busy with an ability?
     let cast_anim = cast.cast.filter(|(_, s)| *s < 0.55);
     let cast_slot = cast.aiming.or(cast_anim.map(|(s, _)| s));
-    let uses_hand = |slot: u8| !(character == Character::Striker && slot == 0);
+    let uses_hand = |slot: u8| !crate::data::is_dash(character, slot);
     let busy = cast_slot.is_some_and(uses_hand);
     anim.busy = approach(anim.busy, if busy { 1.0 } else { 0.0 }, dt * 12.0);
 
@@ -384,15 +399,30 @@ fn animate(
     if rig.dual {
         pos.x = 0.15;
     }
+    // Aiming down sights: the sight line runs straight through the middle
+    // of the screen, with the eye a little behind the rear sight or optic.
+    if ads > 0.0 && !rig.dual {
+        let eye_z = if short {
+            -0.3
+        } else if attach.optic() > 0 {
+            -(rig.optic_at.z + 0.19)
+        } else {
+            -0.1
+        };
+        let ads_pos = Vec3::new(0.0, -sight_y - 0.002, eye_z);
+        pos = pos.lerp(ads_pos, ads);
+        rot = rot.slerp(Quat::IDENTITY, ads);
+    }
     // Breathing and walk bob.
-    pos.y += (t * 1.7).sin() * 0.002;
-    pos.x += anim.bob.sin() * 0.007 * amp;
-    pos.y -= anim.bob.cos().abs() * 0.009 * amp;
-    rot *= Quat::from_rotation_z(anim.bob.sin() * 0.015 * amp);
+    pos.y += (t * 1.7).sin() * 0.002 * steady;
+    pos.x += anim.bob.sin() * 0.007 * amp * steady;
+    pos.y -= anim.bob.cos().abs() * 0.009 * amp * steady;
+    rot *= Quat::from_rotation_z(anim.bob.sin() * 0.015 * amp * steady);
     // Sway lags behind the mouse.
-    pos.x += anim.sway.x * 0.15;
-    pos.y -= anim.sway.y * 0.15;
-    rot *= Quat::from_euler(EulerRot::YXZ, anim.sway.x, anim.sway.y, anim.sway.x * 0.8);
+    pos.x += anim.sway.x * 0.15 * steady;
+    pos.y -= anim.sway.y * 0.15 * steady;
+    let sw = anim.sway * steady;
+    rot *= Quat::from_euler(EulerRot::YXZ, sw.x, sw.y, sw.x * 0.8);
     // In the air the gun floats up a little.
     if !player.on_ground {
         pos.y += (player.vel.y * -0.002).clamp(-0.01, 0.015);
@@ -402,7 +432,7 @@ fn animate(
     pos += Vec3::new(-0.03, -0.045, 0.03) * sp;
     rot *= Quat::from_euler(EulerRot::YXZ, 0.65 * sp, -0.3 * sp, 0.35 * sp);
     // Crouch / slide cant.
-    rot *= Quat::from_rotation_z(0.12 * anim.crouch);
+    rot *= Quat::from_rotation_z(0.12 * anim.crouch * (1.0 - ads));
     // Recoil.
     let kick = match def.class {
         GunClass::Sniper => 1.7,
@@ -412,10 +442,10 @@ fn animate(
         GunClass::Lmg => 0.5,
         _ => 0.7,
     };
-    let r = loadout.recoil;
-    pos.z += r * 0.045 * kick;
+    let r = loadout.recoil * attach.recoil_scale();
+    pos.z += r * 0.045 * kick * (1.0 - 0.4 * ads);
     pos.y += r * 0.006 * kick;
-    rot *= Quat::from_rotation_x(r * 0.09 * kick);
+    rot *= Quat::from_rotation_x(r * 0.09 * kick * (1.0 - 0.6 * ads));
     // Raising a new gun.
     let e = ease(anim.equip);
     pos.y -= (1.0 - e) * 0.3;
@@ -539,7 +569,7 @@ fn animate(
     if busy {
         let slot = cast_slot.unwrap_or(0);
         let ready = at(Vec3::new(-0.13, -0.13, -0.32), Quat::from_rotation_x(0.15));
-        let grenade = character == Character::Striker && slot == 1;
+        let grenade = crate::data::is_thrown(character, slot);
         let color = ability_color(character, slot);
         let mut hand = ready;
         let mut pose = HandPose::Hold;
@@ -632,8 +662,8 @@ fn animate(
         *vis = if shown { Visibility::Inherited } else { Visibility::Hidden };
     }
 
-    // Muzzle flash.
-    let flash_on = anim.since_shot < 0.045 && loadout.shots > 0;
+    // Muzzle flash (a suppressor hides it).
+    let flash_on = anim.since_shot < 0.045 && loadout.shots > 0 && attach.muzzle() != 1;
     for (mut tf, mut vis) in &mut parts.p4() {
         *vis = if flash_on { Visibility::Inherited } else { Visibility::Hidden };
         let s = if def.class == GunClass::Shotgun || def.class == GunClass::Lmg { 1.4 } else { 1.0 };
@@ -653,7 +683,8 @@ fn animate(
             tf.translation = Vec3::new(0.0, 0.0, pump);
         } else {
             tf.translation = rig.mag_pos + rig.mag_out * mag_offset;
-            tf.scale = if mag_hidden { Vec3::ZERO } else { Vec3::ONE };
+            let long = if attach.ext_mag() { 1.45 } else { 1.0 };
+            tf.scale = if mag_hidden { Vec3::ZERO } else { Vec3::new(1.0, long, 1.0) };
         }
     }
     for (mut vis, mut tf, is_grenade) in &mut parts.p6() {

@@ -14,7 +14,7 @@ use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
-use crate::data::{GUNS, SKINS};
+use crate::data::{Attach, GUNS, SKINS};
 use crate::kit::{c, glow_material, vertex_material, Kit};
 
 pub struct GunModelPlugin;
@@ -56,6 +56,13 @@ pub struct GunRig {
     pub glow_color: Color,
     /// Overall length, used to place the gun on the screen.
     pub length: f32,
+    /// Height of the iron sight line above the grip (worked out from the
+    /// model).
+    pub sight_y: f32,
+    /// Top of the rail where an optic sits (worked out from the model).
+    pub optic_at: Vec3,
+    /// Centre height of a sight built into the model, if it has one.
+    pub builtin_sight: Option<f32>,
 }
 
 impl Default for GunRig {
@@ -72,6 +79,9 @@ impl Default for GunRig {
             single_load: false,
             glow_color: Color::WHITE,
             length: 0.8,
+            sight_y: 0.06,
+            optic_at: Vec3::new(0.0, 0.06, -0.08),
+            builtin_sight: None,
         }
     }
 }
@@ -85,10 +95,27 @@ pub struct GunHandles {
     pub rig: GunRig,
 }
 
+/// One attachment's meshes: painted metal parts and lit parts.
+pub struct AttachMesh {
+    pub detail: Handle<Mesh>,
+    pub glow: Option<Handle<Mesh>>,
+}
+
+/// Every attachment model, by kind.
+pub struct AttachModels {
+    /// Red dot, holo, 3x scope (index = optic id - 1).
+    pub optics: Vec<AttachMesh>,
+    /// Suppressor, compensator.
+    pub muzzles: Vec<AttachMesh>,
+    /// Foregrip, laser.
+    pub unders: Vec<AttachMesh>,
+}
+
 /// Every gun's meshes, plus the shared materials.
 #[derive(Resource)]
 pub struct GunAssets {
     pub guns: Vec<GunHandles>,
+    pub attach: AttachModels,
     pub detail_mat: Handle<StandardMaterial>,
     pub glow_mat: Handle<StandardMaterial>,
     pub skins: Vec<Handle<StandardMaterial>>,
@@ -124,7 +151,11 @@ fn build_all(
 ) {
     let guns = (0..GUNS.len() as u8)
         .map(|id| {
-            let m = build_gun(id);
+            let mut m = build_gun(id);
+            let body = m.body.clone().build();
+            let detail = m.detail.clone().build();
+            let meshes_for_sight: Vec<&Mesh> = body.iter().chain(detail.iter()).collect();
+            find_sights(&mut m.rig, &meshes_for_sight, id);
             GunHandles {
                 body: meshes.add({
                     let mut body = m.body.build_or_empty();
@@ -142,8 +173,18 @@ fn build_all(
     let skins = (0..SKINS.len() as u8)
         .map(|s| materials.add(crate::skins::material(s, &mut images)))
         .collect();
+    let mut add = |(d, g): (Kit, Kit)| AttachMesh {
+        detail: meshes.add(d.build_or_empty()),
+        glow: g.build().map(|g| meshes.add(g)),
+    };
+    let attach = AttachModels {
+        optics: vec![add(att_red_dot()), add(att_holo()), add(att_scope())],
+        muzzles: vec![add(att_suppressor()), add(att_compensator())],
+        unders: vec![add(att_foregrip()), add(att_laser())],
+    };
     commands.insert_resource(GunAssets {
         guns,
+        attach,
         detail_mat: materials.add(vertex_material(0.45, 0.35)),
         glow_mat: materials.add(glow_material(1.0)),
         skins,
@@ -155,10 +196,12 @@ pub fn spawn_gun(
     parent: &mut ChildSpawnerCommands,
     assets: &GunAssets,
     id: u8,
+    attach: Attach,
     body: Handle<StandardMaterial>,
     no_shadow: bool,
 ) {
     let g = assets.gun(id);
+    let rig = g.rig;
     let mut part = |mesh: &Handle<Mesh>, mat: Handle<StandardMaterial>, tf: Transform, tag: u8| {
         let mut e = parent.spawn((GunPart, Mesh3d(mesh.clone()), MeshMaterial3d(mat), tf));
         if no_shadow {
@@ -180,11 +223,193 @@ pub fn spawn_gun(
         part(glow, assets.glow_mat.clone(), Transform::default(), 0);
     }
     if let Some(mag) = &g.mag {
-        part(mag, assets.detail_mat.clone(), Transform::from_translation(g.rig.mag_pos), 1);
+        let long = if attach.ext_mag() { 1.45 } else { 1.0 };
+        part(
+            mag,
+            assets.detail_mat.clone(),
+            Transform::from_translation(g.rig.mag_pos).with_scale(Vec3::new(1.0, long, 1.0)),
+            1,
+        );
     }
     if let Some(pump) = &g.pump {
         part(pump, assets.detail_mat.clone(), Transform::default(), 2);
     }
+    for (am, tf) in attachment_parts(assets, &rig, attach) {
+        part(&am.detail, assets.detail_mat.clone(), tf, 0);
+        if let Some(glow) = &am.glow {
+            part(glow, assets.glow_mat.clone(), tf, 0);
+        }
+    }
+}
+
+/// Where each fitted attachment goes on a gun.
+fn attachment_parts<'a>(assets: &'a GunAssets, rig: &GunRig, attach: Attach) -> Vec<(&'a AttachMesh, Transform)> {
+    let mut v = Vec::new();
+    if attach.optic() > 0 {
+        v.push((&assets.attach.optics[attach.optic() as usize - 1], Transform::from_translation(rig.optic_at)));
+    }
+    if attach.muzzle() > 0 {
+        v.push((&assets.attach.muzzles[attach.muzzle() as usize - 1], Transform::from_translation(rig.muzzle)));
+    }
+    if attach.under() > 0 {
+        v.push((&assets.attach.unders[attach.under() as usize - 1], Transform::from_translation(under_mount(rig))));
+    }
+    v
+}
+
+/// Where an underbarrel attachment hangs: under the handguard, a little in
+/// front of where the support hand normally goes.
+pub fn under_mount(rig: &GunRig) -> Vec3 {
+    rig.support + Vec3::new(0.0, 0.012, -0.03)
+}
+
+/// The rig with attachments fitted: the muzzle moves out past a suppressor,
+/// a foregrip changes how the support hand holds on, and an optic raises the
+/// sight line. Returns the rig and the sight height to aim along.
+pub fn fitted_rig(rig: &GunRig, attach: Attach) -> (GunRig, f32) {
+    let mut r = *rig;
+    match attach.muzzle() {
+        1 => r.muzzle.z -= 0.15,
+        2 => r.muzzle.z -= 0.06,
+        _ => {}
+    }
+    if attach.under() == 1 && !r.dual {
+        r.support = under_mount(rig) + Vec3::new(0.0, -0.06, 0.0);
+        r.support_style = Support::Vertical;
+    }
+    let sight = match attach.optic() {
+        1 => rig.optic_at.y + 0.031,
+        2 => rig.optic_at.y + 0.036,
+        3 => rig.optic_at.y + 0.042,
+        _ => rig.sight_y,
+    };
+    (r, sight)
+}
+
+/// Works out the iron sight line and where an optic sits from the model.
+fn find_sights(rig: &mut GunRig, meshes: &[&Mesh], id: u8) {
+    let mut pts: Vec<Vec3> = Vec::new();
+    for m in meshes {
+        if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(p)) = m.attribute(Mesh::ATTRIBUTE_POSITION) {
+            pts.extend(p.iter().map(|a| Vec3::from_array(*a)));
+        }
+    }
+    let top = |z0: f32, z1: f32, half_w: f32| {
+        pts.iter()
+            .filter(|p| p.x.abs() < half_w && p.z >= z0.min(z1) && p.z <= z0.max(z1))
+            .map(|p| p.y)
+            .fold(f32::MIN, f32::max)
+    };
+    let front = rig.muzzle.z;
+    let sight = top(front * 0.9, 0.06, 0.015);
+    if let Some(b) = rig.builtin_sight {
+        rig.sight_y = b;
+    } else if sight > f32::MIN {
+        rig.sight_y = sight;
+    }
+    // Optics sit over the receiver: just ahead of the grip on long guns,
+    // over the slide on pistols.
+    let short = rig.length < 0.4;
+    let oz = if short { -0.06 } else { (front * 0.22).max(-0.16) };
+    let rail = top(oz - 0.035, oz + 0.035, 0.02);
+    rig.optic_at = Vec3::new(0.0, if rail > f32::MIN { rail } else { rig.sight_y }, oz);
+    let _ = id;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment models (origin at the mounting point, gun forward is -Z)
+// ---------------------------------------------------------------------------
+
+const LENS: Color = c(0.25, 0.55, 0.6);
+
+fn att_red_dot() -> (Kit, Kit) {
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    // Mount, then an open tube (two rings joined by thin rails) so you can
+    // see through it, with the dot projected in the middle.
+    boxr(&mut k, v(-0.012, 0.0, -0.025), v(0.012, 0.012, 0.02), GUNMETAL);
+    let cy = 0.031;
+    let rx = Quat::from_rotation_x(FRAC_PI_2);
+    k.torus(v(0.0, cy, 0.016), 0.0025, 0.018, rx, BLACK);
+    k.torus(v(0.0, cy, -0.024), 0.003, 0.019, rx, BLACK);
+    for (x, y) in [(0.0, 0.019), (0.019, 0.0), (-0.019, 0.0)] {
+        boxr(&mut k, v(x - 0.002, cy + y - 0.002, -0.024), v(x + 0.002, cy + y + 0.002, 0.016), BLACK);
+    }
+    boxr(&mut k, v(0.018, cy - 0.008, -0.01), v(0.026, cy + 0.006, 0.008), GUNMETAL);
+    g.sphere(v(0.0, cy, -0.02), 0.0016, c(1.0, 0.1, 0.1));
+    (k, g)
+}
+
+fn att_holo() -> (Kit, Kit) {
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    // Body under a rectangular window hood.
+    boxr(&mut k, v(-0.018, 0.0, -0.03), v(0.018, 0.016, 0.035), BLACK);
+    boxr(&mut k, v(-0.022, 0.016, -0.03), v(-0.018, 0.056, -0.022), BLACK);
+    boxr(&mut k, v(0.018, 0.016, -0.03), v(0.022, 0.056, -0.022), BLACK);
+    boxr(&mut k, v(-0.022, 0.056, -0.03), v(0.022, 0.06, -0.022), BLACK);
+    boxr(&mut k, v(0.02, 0.004, 0.0), v(0.03, 0.014, 0.025), GUNMETAL);
+    // Ring reticle with a centre dot, just behind the glass.
+    g.torus(v(0.0, 0.036, -0.022), 0.0008, 0.008, Quat::from_rotation_x(FRAC_PI_2), c(1.0, 0.25, 0.15));
+    g.sphere(v(0.0, 0.036, -0.022), 0.0013, c(1.0, 0.25, 0.15));
+    (k, g)
+}
+
+fn att_scope() -> (Kit, Kit) {
+    let (mut k, g) = (Kit::new(), Kit::new());
+    // Two rings on the rail holding a tube with bells at both ends.
+    for z in [-0.04, 0.035] {
+        boxr(&mut k, v(-0.01, 0.0, z - 0.01), v(0.01, 0.02, z + 0.01), GUNMETAL);
+        k.torus(v(0.0, 0.042, z), 0.004, 0.017, Quat::from_rotation_x(FRAC_PI_2), GUNMETAL);
+    }
+    k.cyl_z(v(0.0, 0.042, -0.005), 0.014, 0.13, BLACK);
+    k.frustum(v(0.0, 0.042, -0.085), 0.022, 0.015, 0.04, Quat::from_rotation_x(-FRAC_PI_2), BLACK);
+    k.frustum(v(0.0, 0.042, 0.075), 0.018, 0.014, 0.03, Quat::from_rotation_x(FRAC_PI_2), BLACK);
+    k.cyl(v(0.0, 0.06, -0.005), 0.006, 0.012, Quat::IDENTITY, GUNMETAL);
+    k.cyl(v(0.018, 0.042, -0.005), 0.006, 0.012, Quat::from_rotation_z(FRAC_PI_2), GUNMETAL);
+    k.cyl_z(v(0.0, 0.042, -0.106), 0.02, 0.002, LENS);
+    (k, g)
+}
+
+fn att_suppressor() -> (Kit, Kit) {
+    let mut k = Kit::new();
+    k.cyl_z(v(0.0, 0.0, -0.078), 0.019, 0.15, BLACK);
+    k.cyl_z(v(0.0, 0.0, -0.004), 0.021, 0.012, GUNMETAL);
+    k.torus(v(0.0, 0.0, -0.153), 0.003, 0.016, Quat::from_rotation_x(FRAC_PI_2), GUNMETAL);
+    (k, Kit::new())
+}
+
+fn att_compensator() -> (Kit, Kit) {
+    let mut k = Kit::new();
+    boxr(&mut k, v(-0.014, -0.012, -0.06), v(0.014, 0.014, 0.0), GUNMETAL);
+    // Ports cut in the top and sides.
+    for i in 0..3 {
+        let z = -0.012 - i as f32 * 0.016;
+        boxr(&mut k, v(-0.0145, 0.002, z - 0.004), v(0.0145, 0.009, z + 0.004), BLACK);
+        boxr(&mut k, v(-0.008, 0.0141, z - 0.004), v(0.008, 0.0145, z + 0.004), BLACK);
+    }
+    (k, Kit::new())
+}
+
+fn att_foregrip() -> (Kit, Kit) {
+    let mut k = Kit::new();
+    boxr(&mut k, v(-0.012, -0.008, -0.03), v(0.012, 0.0, 0.03), GUNMETAL);
+    k.cyl(v(0.0, -0.05, 0.0), 0.014, 0.085, Quat::from_rotation_x(0.12), POLY);
+    for i in 0..4 {
+        k.torus(v(0.0, -0.025 - i as f32 * 0.016, 0.002 * i as f32), 0.0025, 0.0145, Quat::from_rotation_x(0.12), RUBBER);
+    }
+    k.cyl(v(0.0, -0.094, 0.006), 0.017, 0.008, Quat::from_rotation_x(0.12), POLY);
+    (k, Kit::new())
+}
+
+fn att_laser() -> (Kit, Kit) {
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    boxr(&mut k, v(-0.01, -0.006, -0.02), v(0.01, 0.0, 0.02), GUNMETAL);
+    boxr(&mut k, v(-0.014, -0.032, -0.05), v(0.014, -0.006, 0.02), POLY);
+    k.cyl_z(v(-0.005, -0.019, -0.052), 0.006, 0.006, BLACK);
+    boxr(&mut k, v(0.008, -0.03, -0.02), v(0.015, -0.022, 0.0), c(0.6, 0.1, 0.1));
+    g.sphere(v(-0.005, -0.019, -0.056), 0.0035, c(1.0, 0.1, 0.1));
+    // A short visible beam.
+    g.cyl_z(v(-0.005, -0.019, -0.36), 0.0012, 0.6, c(1.0, 0.1, 0.1));
+    (k, g)
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +584,7 @@ fn red_dot(m: &mut Model, z: f32, y: f32, dot: Color) {
     d.cyl_z(v(0.0, cy, z - 0.026), 0.021, 0.006, GUNMETAL);
     d.cyl(v(0.014, cy, z + 0.004), 0.007, 0.012, Quat::from_rotation_z(FRAC_PI_2), GUNMETAL);
     d.cyl(v(0.0, cy + 0.02, z + 0.004), 0.007, 0.01, Quat::IDENTITY, GUNMETAL);
+    m.rig.builtin_sight = Some(cy);
     // Lens and dot.
     m.glow.cyl_z(v(0.0, cy, z + 0.026), 0.016, 0.002, c(0.1, 0.14, 0.18));
     m.glow.sphere(v(0.0, cy, z + 0.028), 0.0025, dot);
@@ -373,6 +599,7 @@ fn holo(m: &mut Model, z: f32, y: f32) {
     boxr(d, v(0.018, y + 0.018, z - 0.03), v(0.022, y + 0.05, z - 0.01), BLACK);
     boxr(d, v(-0.022, y + 0.05, z - 0.03), v(0.022, y + 0.054, z - 0.01), BLACK);
     d.cyl(v(0.025, y + 0.01, z + 0.02), 0.006, 0.008, Quat::from_rotation_z(FRAC_PI_2), GUNMETAL);
+    m.rig.builtin_sight = Some(y + 0.034);
     // Glass.
     m.glow.cuboid(v(0.0, y + 0.034, z - 0.02), v(0.034, 0.03, 0.002), c(0.25, 0.35, 0.4));
     m.glow.torus(v(0.0, y + 0.034, z - 0.018), 0.0012, 0.007, Quat::from_rotation_x(FRAC_PI_2), c(1.0, 0.2, 0.15));
@@ -380,8 +607,9 @@ fn holo(m: &mut Model, z: f32, y: f32) {
 
 /// Telescopic sight.
 fn scope(m: &mut Model, z: f32, y: f32, len: f32, r: f32, big: bool) {
-    let d = &mut m.detail;
     let cy = y + r + 0.022;
+    m.rig.builtin_sight = Some(cy);
+    let d = &mut m.detail;
     d.cyl_z(v(0.0, cy, z), r, len, BLACK);
     let bell = if big { r * 1.75 } else { r * 1.4 };
     let front = z - len / 2.0;
@@ -405,6 +633,7 @@ fn scope(m: &mut Model, z: f32, y: f32, len: f32, r: f32, big: bool) {
 
 /// Prism scope (boxy, ACOG-like).
 fn prism(m: &mut Model, z: f32, y: f32) {
+    m.rig.builtin_sight = Some(y + 0.034);
     let d = &mut m.detail;
     boxr(d, v(-0.018, y, z + 0.04), v(0.018, y + 0.012, z - 0.04), BLACK);
     boxr(d, v(-0.022, y + 0.012, z + 0.03), v(0.022, y + 0.05, z - 0.03), TAN);

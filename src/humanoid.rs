@@ -81,7 +81,19 @@ struct Limb {
 pub struct GunMount {
     pub want: Option<u8>,
     pub skin: u8,
-    shown: Option<(u8, u8)>,
+    pub attach: crate::data::Attach,
+    shown: Option<(u8, u8, crate::data::Attach)>,
+}
+
+impl GunMount {
+    pub fn new(gun: u8, skin: u8) -> Self {
+        Self {
+            want: Some(gun),
+            skin,
+            attach: crate::data::Attach::NONE,
+            shown: None,
+        }
+    }
 }
 
 fn fill_gun_mounts(
@@ -91,16 +103,16 @@ fn fill_gun_mounts(
 ) {
     let Some(guns) = guns else { return };
     for (e, mut m) in &mut mounts {
-        let want = m.want.map(|g| (g, m.skin));
+        let want = m.want.map(|g| (g, m.skin, m.attach));
         if m.shown == want {
             continue;
         }
         m.shown = want;
         commands.entity(e).despawn_related::<Children>();
-        if let Some((gun, skin)) = want {
+        if let Some((gun, skin, attach)) = want {
             commands
                 .entity(e)
-                .with_children(|p| crate::gunmodels::spawn_gun(p, &guns, gun, guns.skin(skin), false));
+                .with_children(|p| crate::gunmodels::spawn_gun(p, &guns, gun, attach, guns.skin(skin), false));
         }
     }
 }
@@ -163,6 +175,7 @@ pub fn build(commands: &mut Commands, root: Entity, meshes: &HumanoidMeshes, loo
                                 GunMount {
                                     want: Some(gun),
                                     skin,
+                                    attach: crate::data::Attach::NONE,
                                     shown: None,
                                 },
                                 Transform::from_xyz(-0.02, -0.68, 0.0)

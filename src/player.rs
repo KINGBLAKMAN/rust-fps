@@ -1,5 +1,5 @@
 //! The local player: camera, mouse look and movement (sprint, crouch, slide,
-//! jump and easy bunny hopping with air strafing).
+//! jump and bunny hopping with air strafing).
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -31,8 +31,13 @@ const SLIDE_TIME: f32 = 0.9;
 const SLIDE_MIN_SPEED: f32 = 5.0;
 /// Each well-timed hop adds this much speed, up to BHOP_MAX.
 const BHOP_GAIN: f32 = 0.6;
+/// A jump press this long before landing still counts as a perfect hop.
+const HOP_EARLY: f32 = 0.2;
+/// After landing from a jump, ground friction waits this long so a hop
+/// pressed just after touching down still keeps its speed.
+const HOP_LATE: f32 = 0.09;
 const BHOP_MAX: f32 = 13.0;
-const MOUSE_SCALE: f32 = 0.0022;
+pub const MOUSE_SCALE: f32 = 0.0022;
 
 pub struct PlayerPlugin;
 
@@ -71,6 +76,16 @@ pub struct LocalPlayer {
     air_time: f32,
     ground_time: f32,
     last_air: f32,
+    /// Time left on a jump press waiting for you to land.
+    jump_buffer: f32,
+    /// The emote playing: (which, seconds left).
+    pub emote: Option<(u8, f32)>,
+    /// Bumped each time an emote starts (so repeats restart for others).
+    pub emote_seq: u8,
+    /// How far the camera has pulled out for an emote (0-1), and the orbit
+    /// (yaw offset, pitch) the mouse has moved it to.
+    pub cam_out: f32,
+    pub orbit: Vec2,
 }
 
 impl LocalPlayer {
@@ -86,6 +101,15 @@ impl LocalPlayer {
         } else {
             0
         }
+    }
+
+    pub fn emoting(&self) -> bool {
+        self.emote.is_some()
+    }
+
+    /// The camera is out behind the character (emoting, or easing back in).
+    pub fn third_person(&self) -> bool {
+        self.emote.is_some() || self.cam_out > 0.0
     }
 
     pub fn horizontal_speed(&self) -> f32 {
@@ -113,11 +137,16 @@ pub fn spawn_camera(mut commands: Commands) {
             air_time: 0.0,
             ground_time: 0.0,
             last_air: 0.0,
+            jump_buffer: 0.0,
+            emote: None,
+            emote_seq: 0,
+            cam_out: 0.0,
+            orbit: Vec2::ZERO,
         },
         Camera3d::default(),
         Projection::from(PerspectiveProjection {
             fov: 80f32.to_radians(),
-            near: 0.05,
+            near: 0.02,
             ..default()
         }),
         Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
@@ -138,6 +167,7 @@ fn reset_camera(mut player: Single<(&mut Transform, &mut LocalPlayer)>) {
 fn apply_fov(
     time: Res<Time>,
     settings: Res<Settings>,
+    aim: Res<crate::weapons::Aim>,
     player: Single<(&LocalPlayer, &mut Projection)>,
 ) {
     let (p, mut proj) = player.into_inner();
@@ -147,8 +177,13 @@ fn apply_fov(
         } else {
             0.0
         };
-        let target = (settings.fov + boost).to_radians();
-        persp.fov += (target - persp.fov) * (1.0 - (-10.0 * time.delta_secs()).exp());
+        let target = (settings.fov + boost).to_radians() * aim.fov_scale();
+        // Zooming in follows the sights straight away; the sprint kick eases.
+        if aim.amount > 0.0 {
+            persp.fov = target;
+        } else {
+            persp.fov += (target - persp.fov) * (1.0 - (-10.0 * time.delta_secs()).exp());
+        }
     }
 }
 
@@ -194,12 +229,14 @@ fn mouse_look(
     settings: Res<Settings>,
     window: Single<&Window, With<PrimaryWindow>>,
     paused: Res<Paused>,
+    aim: Res<crate::weapons::Aim>,
     mut player: Single<&mut LocalPlayer>,
 ) {
-    if !cursor_locked(&window) || paused.0 {
+    if !cursor_locked(&window) || paused.0 || player.emoting() {
         return;
     }
-    let s = MOUSE_SCALE * settings.sensitivity;
+    // Slower turning when zoomed in, so aim feels the same.
+    let s = MOUSE_SCALE * settings.sensitivity * aim.fov_scale();
     player.yaw -= motion.delta.x * s;
     player.pitch = (player.pitch - motion.delta.y * s).clamp(-1.5, 1.5);
 }
@@ -224,6 +261,7 @@ pub fn movement(
     roster: Res<Roster>,
     state: Res<MatchState>,
     paused: Res<Paused>,
+    aim: Res<crate::weapons::Aim>,
     player: Single<(&mut Transform, &mut LocalPlayer)>,
     colliders: Query<(&Transform, &Collider), Without<LocalPlayer>>,
 ) {
@@ -281,7 +319,8 @@ pub fn movement(
         }
     }
     p.crouching = crouch_held || p.sliding > 0.0;
-    p.sprinting = held(Action::Sprint) && !p.crouching && wish.dot(forward) > 0.5;
+    let aiming = aim.amount > 0.3;
+    p.sprinting = held(Action::Sprint) && !p.crouching && !aiming && wish.dot(forward) > 0.5;
 
     let max_speed = if p.crouching {
         CROUCH_SPEED
@@ -289,17 +328,23 @@ pub fn movement(
         SPRINT_SPEED * stamina
     } else {
         WALK_SPEED
-    };
+    } * (1.0 - 0.4 * aim.amount);
 
-    // Jumping: holding the key keeps hopping as soon as you land (easy bunny
-    // hops). Jumping skips ground friction that frame, so speed is kept.
+    // Jumping takes a fresh press: holding the key doesn't hop again. A press
+    // shortly before landing waits for touchdown, and friction holds off for
+    // a moment after landing, so a well-timed tap keeps (and builds) speed.
     let mut jumped = false;
-    if p.on_ground && (held(Action::Jump) || tapped(Action::Jump)) {
+    if tapped(Action::Jump) {
+        p.jump_buffer = HOP_EARLY;
+    }
+    p.jump_buffer -= dt;
+    if p.on_ground && p.jump_buffer > 0.0 {
+        p.jump_buffer = 0.0;
         // Take off at full running speed in the direction you're holding.
         let mut v = p.vel;
         accelerate(&mut v, wish, max_speed, GROUND_ACCEL, dt);
         // Hopping again right as you land keeps building speed.
-        let chained = p.last_air > 0.3 && p.ground_time < 0.12;
+        let chained = p.last_air > 0.3 && p.ground_time < HOP_LATE + 0.02;
         let h = v.with_y(0.0);
         let hs = h.length();
         if chained && wish != Vec3::ZERO && hs > 1.0 {
@@ -323,7 +368,14 @@ pub fn movement(
             p.vel = Vec3::new(keep.x, p.vel.y, keep.z);
         }
     } else if p.on_ground && !jumped {
-        let friction = if p.sliding > 0.0 { SLIDE_FRICTION } else { FRICTION };
+        let landing_grace = p.last_air > 0.3 && p.ground_time < HOP_LATE && p.sliding <= 0.0;
+        let friction = if landing_grace {
+            0.0
+        } else if p.sliding > 0.0 {
+            SLIDE_FRICTION
+        } else {
+            FRICTION
+        };
         let h = p.vel.with_y(0.0);
         let hs = h.length();
         if hs > 0.0 {
@@ -410,5 +462,7 @@ fn sync_to_roster(session: Res<Session>, mut roster: ResMut<Roster>, player: Sin
         me.yaw = player.yaw;
         me.pitch = player.pitch;
         me.stance = player.stance();
+        me.emote = player.emote.map_or(0, |e| e.0);
+        me.emote_seq = player.emote_seq;
     }
 }

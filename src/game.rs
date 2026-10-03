@@ -32,7 +32,7 @@ impl Plugin for GamePlugin {
             )
             .add_systems(
                 Update,
-                (box_visuals, extraction_visuals)
+                (box_visuals, extraction_visuals, crate::strips::door_visuals)
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
             );
@@ -88,10 +88,45 @@ fn start_match(
     mut result: ResMut<MatchResult>,
     mut clear: ResMut<ClearColor>,
     guns: Res<crate::gunmodels::GunAssets>,
+    mut ambient: ResMut<AmbientLight>,
+    camera: Single<Entity, With<crate::player::LocalPlayer>>,
 ) {
-    let layout = spawn_map(&mut commands, &mut meshes, &mut materials, &mut images, state.map);
+    let layout = spawn_map(&mut commands, &mut meshes, &mut materials, &mut images, state.map, state.night);
     clear.0 = layout.sky;
+    // Night: dim blue ambient and a flashlight on your head.
+    *ambient = if state.night {
+        AmbientLight {
+            color: Color::srgb(0.55, 0.65, 1.0),
+            brightness: 45.0,
+            ..default()
+        }
+    } else {
+        AmbientLight {
+            color: Color::WHITE,
+            brightness: 350.0,
+            ..default()
+        }
+    };
+    if state.night {
+        let torch = commands
+            .spawn((
+                InGameEntity,
+                SpotLight {
+                    intensity: 900_000.0,
+                    color: Color::srgb(1.0, 0.95, 0.85),
+                    range: 40.0,
+                    outer_angle: 0.5,
+                    inner_angle: 0.3,
+                    shadows_enabled: false,
+                    ..default()
+                },
+                Transform::from_xyz(0.25, -0.2, 0.0),
+            ))
+            .id();
+        commands.entity(*camera).add_child(torch);
+    }
     commands.insert_resource(NavGrid::new(layout.half));
+    crate::strips::spawn_doors(&mut commands, &mut meshes, &mut materials, &guns, &layout);
     commands.insert_resource(CurrentMap(layout));
     *overlay = Overlay::None;
     paused.0 = false;
@@ -111,7 +146,7 @@ fn start_match(
         .with_children(|p| {
             for id in 0..crate::data::GUNS.len() as u8 {
                 p.spawn((BoxGunModel(Some(id)), Transform::from_scale(Vec3::splat(1.3)), Visibility::Hidden))
-                    .with_children(|g| crate::gunmodels::spawn_gun(g, &guns, id, glow.clone(), false));
+                    .with_children(|g| crate::gunmodels::spawn_gun(g, &guns, id, crate::data::Attach::NONE, glow.clone(), false));
             }
             p.spawn((
                 BoxGunModel(None),
@@ -150,6 +185,7 @@ fn end_match(
     mut commands: Commands,
     things: Query<Entity, With<InGameEntity>>,
     mut clear: ResMut<ClearColor>,
+    mut ambient: ResMut<AmbientLight>,
     mut overlay: ResMut<Overlay>,
     mut paused: ResMut<Paused>,
     mut window: Single<&mut Window, With<PrimaryWindow>>,
@@ -162,6 +198,8 @@ fn end_match(
     commands.remove_resource::<CurrentMap>();
     commands.remove_resource::<NavGrid>();
     clear.0 = Color::srgb(0.05, 0.06, 0.09);
+    ambient.brightness = 350.0;
+    ambient.color = Color::WHITE;
     *overlay = Overlay::None;
     paused.0 = false;
     set_cursor_lock(&mut window, false);
@@ -277,7 +315,7 @@ fn box_visuals(
     mut glow: Query<&mut PointLight, With<BoxGlow>>,
     gun: Single<(&mut Transform, &mut Visibility), (With<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>)>,
     mut models: Query<(&BoxGunModel, &mut Visibility), (Without<BoxGun>, Without<MysteryBox>)>,
-    mut pillars: Query<&mut Visibility, (With<BoxPillar>, Without<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>)>,
+    mut pillars: Query<(&mut Visibility, &mut Transform), (With<BoxPillar>, Without<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>, Without<BoxLid>)>,
 ) {
     let spot = map.0.box_spots[(state.box_spot as usize).min(4)];
     let t = time.elapsed_secs();
@@ -304,8 +342,11 @@ fn box_visuals(
         *vis = if show_box { Visibility::Inherited } else { Visibility::Hidden };
     }
     let open = matches!(state.box_state, BoxState::Rolling { .. } | BoxState::Offer { .. });
-    for mut vis in &mut pillars {
+    // The beam pulses so it catches the eye.
+    let pulse = 1.0 + 0.25 * (t * 2.5).sin();
+    for (mut vis, mut tf) in &mut pillars {
         *vis = if open || !matches!(state.box_state, BoxState::Idle) { Visibility::Hidden } else { Visibility::Inherited };
+        tf.scale = Vec3::new(pulse, 1.0, pulse);
     }
     let target = if open { -1.25 } else { 0.0 };
     *lid_angle += (target - *lid_angle) * (1.0 - (-8.0 * dt).exp());

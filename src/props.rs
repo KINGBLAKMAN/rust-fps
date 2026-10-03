@@ -43,7 +43,7 @@ pub fn boxr(k: &mut Kit, a: Vec3, b: Vec3, col: Color) {
     k.cuboid((min + max) / 2.0, max - min, col);
 }
 
-fn shade(col: Color, f: f32) -> Color {
+pub fn shade(col: Color, f: f32) -> Color {
     let s = col.to_srgba();
     Color::srgb((s.red * f).min(1.0), (s.green * f).min(1.0), (s.blue * f).min(1.0))
 }
@@ -1005,52 +1005,59 @@ impl MapLayout {
         let mut a = Art::default();
         let sides = [(v(-h, 0.0, -h - 0.5), v(h, 0.0, -h - 0.5)), (v(-h, 0.0, h + 0.5), v(h, 0.0, h + 0.5)), (v(-h - 0.5, 0.0, -h), v(-h - 0.5, 0.0, h)), (v(h + 0.5, 0.0, -h), v(h + 0.5, 0.0, h))];
         for (p0, p1) in sides {
-            let d = p1 - p0;
-            let len = d.length() + 1.0;
-            let dir = d.normalize();
-            let center = (p0 + p1) / 2.0;
-            let across = v(dir.z.abs(), 0.0, dir.x.abs());
-            let size = |t: f32, hh: f32| dir.abs() * len + across * t + v(0.0, hh, 0.0);
-            match style {
-                0 => {
-                    a.paint.cuboid(center + v(0.0, 0.6, 0.0), size(0.5, 1.2), c(0.55, 0.55, 0.53));
-                    a.glass.cuboid(center + v(0.0, 1.2 + (height - 1.2) / 2.0, 0.0), size(0.02, height - 1.2), c(0.5, 0.52, 0.55));
-                    let mut t = 0.0;
-                    while t <= len {
-                        let p = p0 - dir * 0.5 + dir * t;
-                        a.metal.cyl(p + v(0.0, height / 2.0 + 0.3, 0.0), 0.05, height - 0.6, Quat::IDENTITY, c(0.6, 0.6, 0.62));
-                        t += 3.0;
-                    }
-                    a.metal.beam(p0 - dir * 0.5 + v(0.0, height - 0.1, 0.0), p1 + dir * 0.5 + v(0.0, height - 0.1, 0.0), Vec2::splat(0.06), c(0.6, 0.6, 0.62));
-                }
-                1 => {
-                    a.paint.cuboid(center + v(0.0, 0.5, 0.0), size(0.6, 1.0), c(0.55, 0.52, 0.48));
-                    a.paint.cuboid(center + v(0.0, 1.05, 0.0), size(0.7, 0.1), c(0.45, 0.43, 0.4));
-                    let mut t = 0.0;
-                    while t <= len {
-                        let p = p0 - dir * 0.5 + dir * t;
-                        a.metal.cyl(p + v(0.0, 1.1 + (height - 1.1) / 2.0, 0.0), 0.025, height - 1.1, Quat::IDENTITY, c(0.08, 0.08, 0.08));
-                        a.metal.cone(p + v(0.0, height + 0.07, 0.0), 0.05, 0.14, Quat::IDENTITY, c(0.08, 0.08, 0.08));
-                        t += 0.25;
-                    }
-                    a.metal.beam(p0 - dir * 0.5 + v(0.0, height - 0.25, 0.0), p1 + dir * 0.5 + v(0.0, height - 0.25, 0.0), Vec2::splat(0.04), c(0.08, 0.08, 0.08));
-                }
-                _ => {
-                    let wood = c(0.55, 0.4, 0.27);
-                    let mut t = 0.0;
-                    while t <= len {
-                        let p = p0 - dir * 0.5 + dir * t;
-                        let hh = height + (hash(t, len) - 0.5) * 0.06;
-                        a.paint.cuboid(p + v(0.0, hh / 2.0, 0.0), dir.abs() * 0.14 + across * 0.04 + v(0.0, hh, 0.0), shade(wood, 0.85 + hash(t, 1.0) * 0.25));
-                        t += 0.15;
-                    }
-                    for y in [0.4, height - 0.4] {
-                        a.paint.cuboid(center + v(0.0, y, 0.0) - across * 0.06 * if center.x + center.z > 0.0 { 1.0 } else { -1.0 }, size(0.05, 0.12), shade(wood, 0.7));
-                    }
-                }
-            }
-            self.collide(center + v(0.0, 2.5, 0.0), size(1.0, 5.0));
+            self.fence_run(&mut a, p0, p1, style, height);
         }
         self.place(a, Vec3::ZERO, 0.0);
+    }
+
+    /// One straight run of fence from `p0` to `p1` (along X or Z) with an
+    /// invisible wall. Style: 0 concrete + chain-link, 1 stone + iron
+    /// railing, 2 wooden fence.
+    pub fn fence_run(&mut self, a: &mut Art, p0: Vec3, p1: Vec3, style: u8, height: f32) {
+        let d = p1 - p0;
+        let len = d.length() + 1.0;
+        let dir = d.normalize();
+        let center = (p0 + p1) / 2.0;
+        let across = v(dir.z.abs(), 0.0, dir.x.abs());
+        let size = |t: f32, hh: f32| dir.abs() * len + across * t + v(0.0, hh, 0.0);
+        match style {
+            0 => {
+                a.paint.cuboid(center + v(0.0, 0.6, 0.0), size(0.5, 1.2), c(0.55, 0.55, 0.53));
+                a.glass.cuboid(center + v(0.0, 1.2 + (height - 1.2) / 2.0, 0.0), size(0.02, height - 1.2), c(0.5, 0.52, 0.55));
+                let mut t = 0.0;
+                while t <= len {
+                    let p = p0 - dir * 0.5 + dir * t;
+                    a.metal.cyl(p + v(0.0, height / 2.0 + 0.3, 0.0), 0.05, height - 0.6, Quat::IDENTITY, c(0.6, 0.6, 0.62));
+                    t += 3.0;
+                }
+                a.metal.beam(p0 - dir * 0.5 + v(0.0, height - 0.1, 0.0), p1 + dir * 0.5 + v(0.0, height - 0.1, 0.0), Vec2::splat(0.06), c(0.6, 0.6, 0.62));
+            }
+            1 => {
+                a.paint.cuboid(center + v(0.0, 0.5, 0.0), size(0.6, 1.0), c(0.55, 0.52, 0.48));
+                a.paint.cuboid(center + v(0.0, 1.05, 0.0), size(0.7, 0.1), c(0.45, 0.43, 0.4));
+                let mut t = 0.0;
+                while t <= len {
+                    let p = p0 - dir * 0.5 + dir * t;
+                    a.metal.cyl(p + v(0.0, 1.1 + (height - 1.1) / 2.0, 0.0), 0.025, height - 1.1, Quat::IDENTITY, c(0.08, 0.08, 0.08));
+                    a.metal.cone(p + v(0.0, height + 0.07, 0.0), 0.05, 0.14, Quat::IDENTITY, c(0.08, 0.08, 0.08));
+                    t += 0.25;
+                }
+                a.metal.beam(p0 - dir * 0.5 + v(0.0, height - 0.25, 0.0), p1 + dir * 0.5 + v(0.0, height - 0.25, 0.0), Vec2::splat(0.04), c(0.08, 0.08, 0.08));
+            }
+            _ => {
+                let wood = c(0.55, 0.4, 0.27);
+                let mut t = 0.0;
+                while t <= len {
+                    let p = p0 - dir * 0.5 + dir * t;
+                    let hh = height + (hash(t, len) - 0.5) * 0.06;
+                    a.paint.cuboid(p + v(0.0, hh / 2.0, 0.0), dir.abs() * 0.14 + across * 0.04 + v(0.0, hh, 0.0), shade(wood, 0.85 + hash(t, 1.0) * 0.25));
+                    t += 0.15;
+                }
+                for y in [0.4, height - 0.4] {
+                    a.paint.cuboid(center + v(0.0, y, 0.0) - across * 0.06 * if center.x + center.z > 0.0 { 1.0 } else { -1.0 }, size(0.05, 0.12), shade(wood, 0.7));
+                }
+            }
+        }
+        self.collide(center + v(0.0, 2.5, 0.0), size(1.0, 5.0));
     }
 }

@@ -10,6 +10,7 @@ mod abilities;
 mod avatars;
 mod config;
 mod data;
+mod emotes;
 mod fx;
 mod game;
 mod gunmodels;
@@ -21,8 +22,11 @@ mod maps;
 mod nav;
 mod net;
 mod physics;
+mod pings;
 mod player;
 mod props;
+mod rig;
+mod strips;
 mod sim;
 mod skins;
 mod ui;
@@ -125,6 +129,11 @@ pub struct PlayerInfo {
     pub pitch: f32,
     /// 0 standing, 1 crouching, 2 sliding.
     pub stance: u8,
+    /// Emote playing (0 none) and a counter that restarts it.
+    pub emote: u8,
+    pub emote_seq: u8,
+    /// Bumped by the host when a Supply Drop refills this player's ammo.
+    pub supply_seq: u8,
 
     pub health: f32,
     pub alive: bool,
@@ -136,6 +145,8 @@ pub struct PlayerInfo {
     pub kills: u32,
 
     pub guns: [Option<u8>; 2],
+    /// Attachments on each gun.
+    pub attach: [data::Attach; 2],
     pub active_slot: u8,
     pub perks: u8,
 
@@ -173,6 +184,9 @@ impl PlayerInfo {
             yaw: 0.0,
             pitch: 0.0,
             stance: 0,
+            emote: 0,
+            emote_seq: 0,
+            supply_seq: 0,
             health: BASE_HEALTH,
             alive: true,
             spawn_seq: 0,
@@ -180,6 +194,7 @@ impl PlayerInfo {
             score: 0,
             kills: 0,
             guns: [Some(STARTER_GUN), None],
+            attach: [data::Attach::NONE; 2],
             active_slot: 0,
             perks: 0,
             level: 1,
@@ -251,7 +266,7 @@ pub enum BoxState {
     #[default]
     Idle,
     Rolling { player: u8, time: f32 },
-    Offer { player: u8, gun: u8, time: f32 },
+    Offer { player: u8, gun: u8, attach: data::Attach, time: f32 },
     Moving { time: f32 },
 }
 
@@ -283,6 +298,10 @@ pub struct MatchState {
     pub extraction: f32,
     /// How long the whole team has been standing in the zone.
     pub extract_hold: f32,
+    /// Areas opened by buying doors (bit 1 north, 2 south, 3 east, 4 west).
+    pub doors: u8,
+    /// Night version of the map (picked by the host in the lobby).
+    pub night: bool,
 }
 
 impl MatchState {
@@ -314,6 +333,8 @@ pub enum PlayerAction {
     /// `cook`: seconds a grenade was held before the throw.
     Ability { slot: u8, origin: [f32; 3], dir: [f32; 3], cook: f32 },
     Choose(u8),
+    /// Mark a spot (or an enemy by net id; u32::MAX for none).
+    Ping { pos: [f32; 3], target: u32 },
 }
 
 /// Actions waiting for the host: (player, sequence number, action).
@@ -334,6 +355,9 @@ pub enum NetKind {
     Fireball,
     Grenade,
     PowerUp(data::PowerUp),
+    Firebomb,
+    Turret,
+    Coil,
 }
 
 /// An entity the host replicates to clients (enemies, projectiles, pickups).
@@ -451,5 +475,6 @@ fn main() {
         gunmodels::GunModelPlugin,
         viewmodel::ViewModelPlugin,
     ))
+    .add_plugins((rig::RigPlugin, emotes::EmotePlugin, pings::PingPlugin))
     .run();
 }

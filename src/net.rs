@@ -26,7 +26,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 5;
+const PROTOCOL_VERSION: u32 = 6;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -123,6 +123,8 @@ struct ClientUpdate {
     yaw: f32,
     pitch: f32,
     stance: u8,
+    emote: u8,
+    emote_seq: u8,
     active_slot: u8,
     character: Character,
     skin: u8,
@@ -583,6 +585,8 @@ fn host_receive(
                     p.pitch = u.pitch;
                 }
                 p.stance = u.stance.min(2);
+                p.emote = u.emote.min(crate::rig::EMOTES.len() as u8);
+                p.emote_seq = u.emote_seq;
                 p.active_slot = u.active_slot.min(1);
                 // Cap per packet so a client can't fire faster than any gun allows.
                 for shot in u.shots.into_iter().take(32) {
@@ -721,6 +725,8 @@ fn client_send(
         yaw: me.yaw,
         pitch: me.pitch,
         stance: me.stance,
+        emote: me.emote,
+        emote_seq: me.emote_seq,
         active_slot: me.active_slot,
         character: profile.character,
         skin: profile.skin,
@@ -811,9 +817,11 @@ fn client_receive(
     let mine = roster
         .0
         .get(&session.my_id)
-        .map(|p| (p.pos, p.yaw, p.pitch, p.stance, p.active_slot));
+        .map(|p| (p.pos, p.yaw, p.pitch, p.stance, p.active_slot, p.emote, p.emote_seq));
     roster.0 = snap.players.into_iter().map(|p| (p.id, p)).collect();
-    if let (Some((pos, yaw, pitch, stance, slot)), Some(me)) = (mine, roster.0.get_mut(&session.my_id)) {
+    if let (Some((pos, yaw, pitch, stance, slot, emote, emote_seq)), Some(me)) = (mine, roster.0.get_mut(&session.my_id)) {
+        me.emote = emote;
+        me.emote_seq = emote_seq;
         me.pos = pos;
         me.yaw = yaw;
         me.pitch = pitch;

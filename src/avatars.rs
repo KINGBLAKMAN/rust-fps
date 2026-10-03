@@ -7,6 +7,7 @@ use std::f32::consts::FRAC_PI_2;
 use crate::data::{Character, PowerUp};
 use crate::humanoid::{self, HumanoidMeshes, Look, Pose};
 use crate::player::LocalPlayer;
+use crate::rig::{Rig, RigAssets};
 use crate::sim::enemy_scale;
 use crate::{AppState, Enemy, EnemyStatus, InGameEntity, NetKind, Phase, Replicated, Roster, Session};
 
@@ -17,7 +18,7 @@ impl Plugin for AvatarPlugin {
         app.add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (sync_avatars, place_name_tags, enemy_colors, spin, tumble)
+                (dress_new, sync_avatars, place_name_tags, enemy_colors, spin, tumble)
                     .chain()
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
@@ -38,8 +39,74 @@ pub struct ReplicatedAssets {
     spark: Handle<StandardMaterial>,
     pickup_meshes: [Handle<Mesh>; 4],
     pickup_mat: Handle<StandardMaterial>,
-    eyes: Handle<StandardMaterial>,
-    skin: Handle<StandardMaterial>,
+    /// Gadget models: (solid, glowing) for the firebomb, turret and coil.
+    gadgets: [(Handle<Mesh>, Handle<Mesh>); 3],
+    gadget_mat: Handle<StandardMaterial>,
+    gadget_glow: Handle<StandardMaterial>,
+}
+
+/// Blaze's firebomb: a bottle with a burning rag.
+fn firebomb_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+    use crate::kit::{c, Kit};
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    let v = Vec3::new;
+    k.cyl(v(0.0, 0.0, 0.0), 0.045, 0.13, Quat::IDENTITY, c(0.55, 0.25, 0.08));
+    k.frustum(v(0.0, 0.085, 0.0), 0.016, 0.045, 0.04, Quat::IDENTITY, c(0.55, 0.25, 0.08));
+    k.cyl(v(0.0, 0.12, 0.0), 0.016, 0.04, Quat::IDENTITY, c(0.5, 0.22, 0.07));
+    k.cyl(v(0.0, 0.0, 0.0), 0.047, 0.05, Quat::IDENTITY, c(0.85, 0.8, 0.65));
+    k.blob(v(0.0, 0.15, 0.0), v(0.025, 0.03, 0.025), c(0.8, 0.75, 0.6));
+    g.blob(v(0.0, 0.18, 0.0), v(0.03, 0.05, 0.03), c(1.0, 0.55, 0.1));
+    (k, g)
+}
+
+/// Tinker's sentry: tripod, ammo box, twin barrels and a sensor eye.
+fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+    use crate::kit::{c, Kit};
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    let v = Vec3::new;
+    let yellow = c(0.95, 0.75, 0.12);
+    let dark = c(0.15, 0.15, 0.17);
+    let steel = c(0.55, 0.57, 0.6);
+    for i in 0..3 {
+        let a = i as f32 * std::f32::consts::TAU / 3.0 + 0.5;
+        k.cyl_between(v(0.0, 0.55, 0.0), v(a.cos() * 0.5, 0.0, a.sin() * 0.5), 0.025, dark);
+        k.cyl(v(a.cos() * 0.5, 0.02, a.sin() * 0.5), 0.05, 0.04, Quat::IDENTITY, dark);
+    }
+    k.cyl(v(0.0, 0.6, 0.0), 0.08, 0.12, Quat::IDENTITY, steel);
+    k.cuboid(v(0.0, 0.82, 0.05), v(0.32, 0.26, 0.4), yellow);
+    k.cuboid(v(0.0, 0.96, 0.05), v(0.26, 0.04, 0.34), c(0.85, 0.65, 0.08));
+    k.cuboid(v(0.22, 0.76, 0.1), v(0.12, 0.16, 0.2), c(0.3, 0.36, 0.22));
+    for x in [-0.07, 0.07] {
+        k.cyl_z(v(x, 0.84, -0.35), 0.028, 0.45, dark);
+        k.cyl_z(v(x, 0.84, -0.58), 0.04, 0.06, steel);
+    }
+    k.cuboid(v(0.0, 0.84, -0.17), v(0.24, 0.12, 0.06), steel);
+    k.cuboid(v(-0.2, 0.84, 0.05), v(0.06, 0.12, 0.3), dark);
+    g.cyl_z(v(0.0, 0.93, -0.16), 0.035, 0.02, c(0.3, 0.9, 1.0));
+    g.cuboid(v(0.0, 0.97, 0.25), v(0.18, 0.012, 0.02), c(0.3, 0.9, 1.0));
+    (k, g)
+}
+
+/// Tinker's tesla coil: a base, a column wound with copper and a charged ball.
+fn coil_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+    use crate::kit::{c, Kit};
+    let (mut k, mut g) = (Kit::new(), Kit::new());
+    let v = Vec3::new;
+    let dark = c(0.18, 0.18, 0.2);
+    let copper = c(0.85, 0.48, 0.22);
+    k.cyl(v(0.0, 0.08, 0.0), 0.5, 0.16, Quat::IDENTITY, dark);
+    k.cyl(v(0.0, 0.2, 0.0), 0.38, 0.08, Quat::IDENTITY, c(0.95, 0.75, 0.12));
+    for i in 0..4 {
+        let a = i as f32 * std::f32::consts::FRAC_PI_2;
+        k.cuboid_rot(v(a.cos() * 0.45, 0.12, a.sin() * 0.45), v(0.2, 0.12, 0.12), Quat::from_rotation_y(-a), dark);
+    }
+    k.cyl(v(0.0, 1.2, 0.0), 0.1, 2.0, Quat::IDENTITY, c(0.35, 0.35, 0.38));
+    for i in 0..12 {
+        k.torus(v(0.0, 0.5 + i as f32 * 0.12, 0.0), 0.025, 0.15, Quat::IDENTITY, copper);
+    }
+    k.torus(v(0.0, 2.25, 0.0), 0.06, 0.32, Quat::IDENTITY, c(0.6, 0.62, 0.66));
+    g.sphere(v(0.0, 2.5, 0.0), 0.22, c(0.55, 0.85, 1.0));
+    (k, g)
 }
 
 fn glow(materials: &mut Assets<StandardMaterial>, color: Color, power: f32) -> Handle<StandardMaterial> {
@@ -83,8 +150,10 @@ fn setup(
             emissive: LinearRgba::rgb(0.25, 0.25, 0.25),
             ..crate::kit::vertex_material(0.4, 0.3)
         }),
-        eyes: glow(&mut materials, Color::srgb(0.6, 0.9, 1.0), 4.0),
-        skin: materials.add(Color::srgb(0.85, 0.66, 0.52)),
+        gadgets: [firebomb_kit(), turret_kit(), coil_kit()]
+            .map(|(k, g)| (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))),
+        gadget_mat: materials.add(crate::kit::vertex_material(0.5, 0.3)),
+        gadget_glow: materials.add(crate::kit::glow_material(3.0)),
     });
 }
 
@@ -199,6 +268,34 @@ pub fn spawn_replicated(
             Visibility::default(),
         ))
         .id();
+    dress(commands, assets, meshes, materials, root, kind, pos);
+    root
+}
+
+/// Host side: projectiles and gadgets the simulation spawns get their models.
+fn dress_new(
+    mut commands: Commands,
+    assets: Res<ReplicatedAssets>,
+    meshes: Res<HumanoidMeshes>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    new: Query<(Entity, &Replicated, &Transform), (Added<Replicated>, Without<Children>)>,
+) {
+    for (e, r, tf) in &new {
+        commands.entity(e).insert(Visibility::default());
+        dress(&mut commands, &assets, &meshes, &mut materials, e, r.kind, tf.translation);
+    }
+}
+
+/// Adds the model for a replicated thing to `root`.
+fn dress(
+    commands: &mut Commands,
+    assets: &ReplicatedAssets,
+    meshes: &HumanoidMeshes,
+    materials: &mut Assets<StandardMaterial>,
+    root: Entity,
+    kind: NetKind,
+    pos: Vec3,
+) {
     match kind {
         NetKind::Grunt | NetKind::Shooter | NetKind::Brute => {
             let i = match kind {
@@ -279,6 +376,40 @@ pub fn spawn_replicated(
                 ));
             });
         }
+        NetKind::Firebomb | NetKind::Turret | NetKind::Coil => {
+            let i = match kind {
+                NetKind::Firebomb => 0,
+                NetKind::Turret => 1,
+                _ => 2,
+            };
+            let (solid, glow) = assets.gadgets[i].clone();
+            commands.entity(root).with_children(|p| {
+                let scale = if i == 0 { 1.4 } else { 1.0 };
+                let mut e = p.spawn((
+                    Mesh3d(solid),
+                    MeshMaterial3d(assets.gadget_mat.clone()),
+                    Transform::from_scale(Vec3::splat(scale)),
+                ));
+                if i == 0 {
+                    e.insert(Tumble);
+                }
+                e.with_child((Mesh3d(glow), MeshMaterial3d(assets.gadget_glow.clone())));
+                let (color, height, power) = match i {
+                    0 => (Color::srgb(1.0, 0.5, 0.15), 0.2, 6_000.0),
+                    1 => (Color::srgb(0.3, 0.9, 1.0), 1.0, 4_000.0),
+                    _ => (Color::srgb(0.5, 0.8, 1.0), 2.5, 60_000.0),
+                };
+                p.spawn((
+                    PointLight {
+                        intensity: power,
+                        color,
+                        range: if i == 2 { 9.0 } else { 3.0 },
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, height, 0.0),
+                ));
+            });
+        }
         NetKind::PowerUp(kind) => {
             let i = PowerUp::ALL.iter().position(|p| *p == kind).unwrap_or(0);
             commands.entity(root).with_children(|p| {
@@ -300,7 +431,6 @@ pub fn spawn_replicated(
             });
         }
     }
-    root
 }
 
 fn enemy_colors(
@@ -348,74 +478,53 @@ struct Avatar {
     character: Character,
     skin: u8,
     mount: Option<Entity>,
+    emote_seq: u8,
 }
 
 #[derive(Component)]
 struct NameTag;
 
-/// Builds a person model for a player with their character colours and gun skin.
+/// Builds a player's character model, holding `gun` in `skin`.
 pub fn spawn_person(
     commands: &mut Commands,
-    meshes: &HumanoidMeshes,
-    materials: &mut Assets<StandardMaterial>,
-    assets: &ReplicatedAssets,
+    rigs: &RigAssets,
     character: Character,
     skin: u8,
     gun: u8,
     transform: Transform,
 ) -> (Entity, Option<Entity>) {
     let root = commands.spawn((transform, Visibility::default())).id();
-    let mount = humanoid::build(
-        commands,
-        root,
-        meshes,
-        Look {
-            skin: assets.skin.clone(),
-            shirt: materials.add(StandardMaterial {
-                base_color: character.suit_color(),
-                perceptual_roughness: 0.6,
-                ..default()
-            }),
-            pants: materials.add(StandardMaterial {
-                base_color: character.trim_color().darker(0.35),
-                perceptual_roughness: 0.7,
-                ..default()
-            }),
-            eyes: assets.eyes.clone(),
-            gun: Some((gun, skin)),
-            visor: character == Character::Striker,
-            pose: Pose::Rifle,
-        },
-    );
+    let mount = crate::rig::spawn_rig(commands, rigs, root, character, Some((gun, skin)));
     (root, mount)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_avatars(
     mut commands: Commands,
     time: Res<Time>,
     session: Res<Session>,
     roster: Res<Roster>,
-    assets: Res<ReplicatedAssets>,
-    meshes: Res<HumanoidMeshes>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut avatars: Query<(Entity, &Avatar, &mut Transform)>,
+    rigs: Res<RigAssets>,
+    local: Single<&LocalPlayer>,
+    mut avatars: Query<(Entity, &mut Avatar, &mut Transform, &mut Rig, &mut Visibility)>,
     mut tags: Query<&mut Text, With<NameTag>>,
     mut mounts: Query<&mut humanoid::GunMount>,
 ) {
     let blend = 1.0 - (-15.0 * time.delta_secs()).exp();
     let mut have = Vec::new();
 
-    for (entity, avatar, mut tf) in &mut avatars {
+    for (entity, mut avatar, mut tf, mut rig, mut vis) in &mut avatars {
         let p = roster
             .0
             .get(&avatar.id)
-            .filter(|p| p.id != session.my_id && p.character == avatar.character && p.skin == avatar.skin);
+            .filter(|p| p.character == avatar.character && p.skin == avatar.skin);
         let Some(p) = p else {
             commands.entity(avatar.tag).despawn();
             commands.entity(entity).despawn();
             continue;
         };
         have.push(avatar.id);
+        let mine = p.id == session.my_id;
         if let Some(mut m) = avatar.mount.and_then(|e| mounts.get_mut(e).ok()) {
             let gun = p.guns[(p.active_slot as usize).min(1)].or(p.guns[0]);
             if m.want != gun {
@@ -425,27 +534,56 @@ fn sync_avatars(
             if m.skin != skin {
                 m.skin = skin;
             }
+            let slot = if p.guns[(p.active_slot as usize).min(1)].is_some() { (p.active_slot as usize).min(1) } else { 0 };
+            let attach = p.attach[slot];
+            if m.attach != attach {
+                m.attach = attach;
+            }
         }
+        // Your own model only shows while the camera pulls out for an emote.
+        let (feet, yaw, pitch, stance, emote, seq) = if mine {
+            let l = *local;
+            let e = l.emote.map_or(0, |e| e.0);
+            (l.feet, l.yaw, l.pitch, l.stance(), e, l.emote_seq)
+        } else {
+            (p.feet(), p.yaw, p.pitch, p.stance, p.emote, p.emote_seq)
+        };
+        let shown = !mine || local.cam_out > 0.05;
+        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+        if seq != avatar.emote_seq {
+            avatar.emote_seq = seq;
+            rig.emote = 0;
+        }
+        if p.alive {
+            rig.play(emote);
+        } else {
+            rig.play(0);
+        }
+        rig.pitch = pitch;
+        rig.stance = if p.alive { stance } else { 0 };
         // The model faces -Z, the same as yaw 0.
         let (target_pos, target_rot) = if p.alive {
-            (p.feet(), Quat::from_rotation_y(p.yaw))
+            (feet, Quat::from_rotation_y(yaw))
         } else {
             // Downed players lie on the floor.
             (
-                p.feet() + Vec3::Y * 0.2,
-                Quat::from_rotation_y(p.yaw) * Quat::from_rotation_x(-FRAC_PI_2),
+                feet + Vec3::Y * 0.2,
+                Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-FRAC_PI_2),
             )
         };
-        if tf.translation.distance(target_pos) > 4.0 {
+        if mine || tf.translation.distance(target_pos) > 4.0 {
             tf.translation = target_pos;
         } else {
             tf.translation = tf.translation.lerp(target_pos, blend);
         }
-        tf.rotation = tf.rotation.slerp(target_rot, blend);
-        let crouch = if p.alive && p.stance > 0 { 0.72 } else { 1.0 };
-        tf.scale.y += (crouch - tf.scale.y) * blend;
+        tf.rotation = if mine { target_rot } else { tf.rotation.slerp(target_rot, blend) };
         if let Ok(mut text) = tags.get_mut(avatar.tag) {
-            let label = if p.alive {
+            let label = if mine {
+                String::new()
+            } else if p.alive {
                 format!("{} [{}] {:.0} HP", p.name, p.level, p.health)
             } else {
                 format!("{} (down)", p.name)
@@ -457,7 +595,7 @@ fn sync_avatars(
     }
 
     for p in roster.0.values() {
-        if p.id == session.my_id || have.contains(&p.id) {
+        if have.contains(&p.id) {
             continue;
         }
         let tag = commands
@@ -479,9 +617,7 @@ fn sync_avatars(
             .id();
         let (root, mount) = spawn_person(
             &mut commands,
-            &meshes,
-            &mut materials,
-            &assets,
+            &rigs,
             p.character,
             p.skin,
             p.guns[0].unwrap_or(0),
@@ -495,6 +631,7 @@ fn sync_avatars(
                 character: p.character,
                 skin: p.skin,
                 mount,
+                emote_seq: p.emote_seq,
             },
         ));
     }

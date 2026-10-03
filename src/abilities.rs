@@ -83,7 +83,7 @@ pub fn queue_action(
 }
 
 fn is_grenade(character: Character, slot: u8) -> bool {
-    character == Character::Striker && slot == 1
+    crate::data::is_thrown(character, slot)
 }
 
 const SLOTS: [(u8, Action); 3] = [(0, Action::Ability1), (1, Action::Ability2), (2, Action::Ultimate)];
@@ -217,9 +217,14 @@ fn use_abilities(
         cast.swallow_click = true;
         cast.blocks_fire = true;
     }
-    if me.character == Character::Striker && slot == 0 {
-        p.dash_dir = dash_direction(&keys, &settings, p.yaw);
-        p.dash_time = 0.18 + 0.03 * me.tiers[0] as f32;
+    if crate::data::is_dash(me.character, slot) {
+        let ronin = me.character == Character::Ronin;
+        p.dash_dir = if ronin {
+            cam.forward().as_vec3().with_y(0.0).normalize_or(Vec3::NEG_Z)
+        } else {
+            dash_direction(&keys, &settings, p.yaw)
+        };
+        p.dash_time = if ronin { 0.2 } else { 0.18 } + 0.03 * me.tiers[slot as usize] as f32;
         let to = p.feet + p.dash_dir * 22.0 * p.dash_time;
         fx.0.push(crate::fx::Fx::Dash {
             player: session.my_id,
@@ -280,7 +285,7 @@ fn draw_previews(
             gizmos.line(b, b - dir * 0.8 + side, color);
             gizmos.line(b, b - dir * 0.8 - side, color);
         }
-        (Character::Striker, 1) => {
+        (Character::Striker, 1) | (Character::Blaze, 0) => {
             // Grenade: the arc it will fly and where it lands.
             let boxes = collect_boxes(colliders.iter());
             let mut pos = cam.translation + forward * 0.6;
@@ -296,7 +301,7 @@ fn draw_previews(
                 pos = next;
                 pts.push(pos);
             }
-            let cooked = (cast.held / MAX_COOK).min(1.0);
+            let cooked = if me.character == Character::Blaze { 1.0 } else { (cast.held / MAX_COOK).min(1.0) };
             let color = Color::srgb(1.0, 0.6 - 0.45 * cooked, 0.15);
             gizmos.linestrip(pts, color);
             flat_circle(&mut gizmos, pos.with_y(0.0), 4.0 + 0.5 * tier, color.with_alpha(pulse));
@@ -309,6 +314,77 @@ fn draw_previews(
         }
         (Character::Warden, 1) => {
             flat_circle(&mut gizmos, feet, 7.0, Color::srgba(0.5, 0.85, 1.0, pulse));
+        }
+        (Character::Ronin, 0) => {
+            let r = 5.0 + 0.5 * tier;
+            let flat = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+            let color = Color::srgba(1.0, 0.8, 0.3, pulse);
+            let base = feet + Vec3::Y * 0.1;
+            let a0 = flat.z.atan2(flat.x);
+            let pts: Vec<Vec3> = (0..=16)
+                .map(|i| {
+                    let a = a0 - 1.1 + 2.2 * i as f32 / 16.0;
+                    base + Vec3::new(a.cos(), 0.0, a.sin()) * r
+                })
+                .collect();
+            gizmos.line(base, pts[0], color);
+            gizmos.line(base, pts[16], color);
+            gizmos.linestrip(pts, color);
+        }
+        (Character::Ronin, 1) => {
+            let flat = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+            let len = 22.0 * (0.2 + 0.03 * tier);
+            let a = feet + Vec3::Y * 0.1;
+            let b = a + flat * len;
+            let color = Color::srgba(0.85, 0.2, 0.25, pulse);
+            let side = Vec3::new(-flat.z, 0.0, flat.x) * 0.9;
+            gizmos.line(a + side, b + side, color);
+            gizmos.line(a - side, b - side, color);
+            gizmos.line(b + side, b - side, color);
+        }
+        (Character::Ronin, _) => {
+            flat_circle(&mut gizmos, feet, 5.0, Color::srgba(1.0, 0.8, 0.3, pulse));
+        }
+        (Character::Tinker, 0) => {
+            let flat = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+            let boxes = collect_boxes(colliders.iter());
+            let dist = ray_world(feet + Vec3::Y * 0.5, flat, 3.0, &boxes);
+            let at = feet + flat * (dist - 0.6).max(0.3);
+            let color = Color::srgba(0.3, 0.9, 1.0, pulse);
+            flat_circle(&mut gizmos, at, 0.6, color);
+            flat_circle(&mut gizmos, at, 24.0, color.with_alpha(0.25 * pulse));
+        }
+        (Character::Tinker, 1) => {
+            flat_circle(&mut gizmos, feet, 8.0, Color::srgba(1.0, 0.8, 0.2, pulse));
+        }
+        (Character::Tinker, _) => {
+            let boxes = collect_boxes(colliders.iter());
+            let dist = ray_world(cam.translation, forward, 40.0, &boxes);
+            let target = (cam.translation + forward * (dist - 0.5).max(0.5)).with_y(feet.y);
+            let color = Color::srgba(0.4, 0.9, 1.0, pulse);
+            flat_circle(&mut gizmos, target, 8.0, color);
+            gizmos.line(target, target + Vec3::Y * 2.6, color);
+        }
+        (Character::Blaze, 1) => {
+            let range = 8.0 + tier;
+            let origin = cam.translation;
+            let color = Color::srgba(1.0, 0.45, 0.1, pulse);
+            let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+            let up = right.cross(forward);
+            let r = range * 0.6;
+            let end = origin + forward * range;
+            let mut ring = Vec::new();
+            for i in 0..=16 {
+                let a = i as f32 / 16.0 * std::f32::consts::TAU;
+                ring.push(end + (right * a.cos() + up * a.sin()) * r);
+            }
+            for i in 0..4 {
+                gizmos.line(origin + forward * 0.5, ring[i * 4], color);
+            }
+            gizmos.linestrip(ring, color);
+        }
+        (Character::Blaze, _) => {
+            flat_circle(&mut gizmos, feet, 6.0, Color::srgba(1.0, 0.45, 0.1, pulse));
         }
         (Character::Warden, _) => {
             let boxes = collect_boxes(colliders.iter());
