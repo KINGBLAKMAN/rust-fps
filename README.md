@@ -1,5 +1,7 @@
 # Rust FPS
 
+Current version: **v4.0** (shown on the main menu and in the window title). Each version is one commit in this repo, tagged `v1` to `v4`; small updates bump the minor number (v4.1, v4.2...).
+
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
 ![screenshot](screenshot.png)

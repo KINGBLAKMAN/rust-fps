@@ -3,6 +3,9 @@
 //! Start the game and use the menus, or skip straight to a party from the
 //! command line with `host` or `join <address>`. See README.md.
 
+/// The game's version, from Cargo.toml (major.minor, e.g. "v4.0").
+pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+
 mod abilities;
 mod avatars;
 mod config;
@@ -403,7 +406,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: "Rust FPS".into(),
+            title: format!("Rust FPS {VERSION}"),
             ..default()
         }),
         ..default()

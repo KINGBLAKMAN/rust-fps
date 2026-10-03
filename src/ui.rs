@@ -543,8 +543,8 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         label(
             p,
             format!(
-                "Best round: {}    Extractions: {}",
-                profile.best_round, profile.extractions
+                "Best round: {}    Extractions: {}    Version {}",
+                profile.best_round, profile.extractions, crate::VERSION
             ),
             16.0,
             DIM,

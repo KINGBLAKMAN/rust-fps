@@ -535,7 +535,7 @@ fn host_receive(
                 skin,
             } => {
                 if version != PROTOCOL_VERSION {
-                    let reason = "Version mismatch - make sure everyone runs the same build".into();
+                    let reason = format!("Version mismatch - the host runs {}; everyone needs the same version", crate::VERSION);
                     net.send_to(&ServerMsg::Reject { reason }, addr);
                     continue;
                 }
