@@ -1,49 +1,52 @@
-//! The local player: camera, movement, the gun and its effects.
+//! The local player: camera, mouse look and movement (sprint, crouch, slide,
+//! jump and easy bunny hopping with air strafing).
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
-use std::f32::consts::FRAC_PI_2;
+use bevy::window::PrimaryWindow;
 
-use crate::physics::{collect_boxes, ground_height, resolve_collisions, trace_shot};
+use crate::config::{Action, InputExt, Settings};
+use crate::data::{has_perk, Perk};
+use crate::game::Paused;
+use crate::maps::{player_spawn, CurrentMap};
+use crate::physics::{collect_boxes, ground_height, resolve_collisions};
 use crate::{
-    cursor_locked, spawn_point, Collider, Enemy, MatchState, Phase, Roster, Session, ShotQueue,
-    Tracers, ARENA_HALF, EYE_HEIGHT, PLAYER_RADIUS,
+    cursor_locked, AppState, Collider, MatchState, Phase, Roster, Session, CROUCH_EYE_HEIGHT,
+    EYE_HEIGHT, PLAYER_RADIUS,
 };
 
 const WALK_SPEED: f32 = 6.0;
-const SPRINT_SPEED: f32 = 9.5;
-const JUMP_SPEED: f32 = 6.5;
+const SPRINT_SPEED: f32 = 8.5;
+const CROUCH_SPEED: f32 = 3.0;
+const GROUND_ACCEL: f32 = 60.0;
+const AIR_ACCEL: f32 = 80.0;
+/// Small air wish speed: lets you gain speed by strafing in the air.
+const AIR_WISH: f32 = 1.2;
+const FRICTION: f32 = 8.0;
+const SLIDE_FRICTION: f32 = 0.7;
+const JUMP_SPEED: f32 = 6.8;
 const GRAVITY: f32 = 18.0;
-const MOUSE_SENSITIVITY: f32 = 0.0022;
-
-pub const MAG_SIZE: u32 = 12;
-const FIRE_COOLDOWN: f32 = 0.16;
-pub const RELOAD_TIME: f32 = 1.2;
-pub const GUN_RANGE: f32 = 100.0;
+const MAX_SPEED: f32 = 20.0;
+const SLIDE_TIME: f32 = 0.9;
+const SLIDE_MIN_SPEED: f32 = 5.0;
+/// Each well-timed hop adds this much speed, up to BHOP_MAX.
+const BHOP_GAIN: f32 = 0.6;
+const BHOP_MAX: f32 = 13.0;
+const MOUSE_SCALE: f32 = 0.0022;
 
 pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Weapon>()
-            .add_systems(Startup, setup_player)
+        app.add_systems(Startup, spawn_camera)
             .add_systems(
                 Update,
-                (
-                    respawn,
-                    mouse_look,
-                    player_movement,
-                    shoot,
-                    reload,
-                    // After shooting, so the click that captures the mouse doesn't fire.
-                    grab_cursor,
-                    sync_to_roster,
-                )
+                (respawn, mouse_look, movement, sync_to_roster)
                     .chain()
                     .in_set(Phase::Local),
             )
-            .add_systems(Update, (animate_gun, draw_tracers).in_set(Phase::Present));
+            .add_systems(Update, apply_fov)
+            .add_systems(OnExit(AppState::InGame), reset_camera);
     }
 }
 
@@ -51,347 +54,361 @@ impl Plugin for PlayerPlugin {
 pub struct LocalPlayer {
     pub yaw: f32,
     pub pitch: f32,
-    vertical_velocity: f32,
-    on_ground: bool,
-}
-
-#[derive(Resource)]
-pub struct Weapon {
-    pub ammo: u32,
-    fire_cooldown: f32,
-    pub reload_timer: f32,
-    recoil: f32,
-    flash_timer: f32,
-    /// Last `spawn_seq` we teleported for; starts unset so we always spawn.
+    /// Recoil kick added on top of pitch.
+    pub kick: f32,
+    pub feet: Vec3,
+    pub vel: Vec3,
+    pub on_ground: bool,
+    pub crouching: bool,
+    pub sliding: f32,
+    slide_cd: f32,
+    eye: f32,
+    pub sprinting: bool,
+    /// Set by the Dash ability.
+    pub dash_time: f32,
+    pub dash_dir: Vec3,
     last_spawn_seq: Option<u32>,
+    air_time: f32,
+    ground_time: f32,
+    last_air: f32,
 }
 
-impl Default for Weapon {
-    fn default() -> Self {
-        Self {
-            ammo: MAG_SIZE,
-            fire_cooldown: 0.0,
-            reload_timer: 0.0,
-            recoil: 0.0,
-            flash_timer: 0.0,
-            last_spawn_seq: None,
+impl LocalPlayer {
+    pub fn eye_pos(&self) -> Vec3 {
+        self.feet + Vec3::Y * self.eye
+    }
+
+    pub fn stance(&self) -> u8 {
+        if self.sliding > 0.0 {
+            2
+        } else if self.crouching {
+            1
+        } else {
+            0
         }
+    }
+
+    pub fn horizontal_speed(&self) -> f32 {
+        self.vel.with_y(0.0).length()
     }
 }
 
-#[derive(Component)]
-struct Gun;
+fn spawn_camera(mut commands: Commands) {
+    commands.spawn((
+        LocalPlayer {
+            yaw: 0.0,
+            pitch: 0.0,
+            kick: 0.0,
+            feet: Vec3::ZERO,
+            vel: Vec3::ZERO,
+            on_ground: true,
+            crouching: false,
+            sliding: 0.0,
+            slide_cd: 0.0,
+            eye: EYE_HEIGHT,
+            sprinting: false,
+            dash_time: 0.0,
+            dash_dir: Vec3::ZERO,
+            last_spawn_seq: None,
+            air_time: 0.0,
+            ground_time: 0.0,
+            last_air: 0.0,
+        },
+        Camera3d::default(),
+        Projection::from(PerspectiveProjection {
+            fov: 80f32.to_radians(),
+            near: 0.05,
+            ..default()
+        }),
+        Transform::from_xyz(0.0, EYE_HEIGHT, 0.0),
+    ));
+}
 
-#[derive(Component)]
-struct MuzzleFlash;
+fn reset_camera(mut player: Single<(&mut Transform, &mut LocalPlayer)>) {
+    let (tf, p) = &mut *player;
+    p.last_spawn_seq = None;
+    p.vel = Vec3::ZERO;
+    p.sliding = 0.0;
+    p.dash_time = 0.0;
+    p.air_time = 0.0;
+    p.last_air = 0.0;
+    **tf = Transform::from_xyz(0.0, EYE_HEIGHT, 0.0);
+}
 
-fn setup_player(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+fn apply_fov(
+    time: Res<Time>,
+    settings: Res<Settings>,
+    player: Single<(&LocalPlayer, &mut Projection)>,
 ) {
-    let gun_body = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.12, 0.12, 0.14),
-        metallic: 0.6,
-        perceptual_roughness: 0.4,
-        ..default()
-    });
-    let gun_accent = materials.add(Color::srgb(0.7, 0.35, 0.1));
-
-    commands
-        .spawn((
-            LocalPlayer {
-                yaw: 0.0,
-                pitch: 0.0,
-                vertical_velocity: 0.0,
-                on_ground: true,
-            },
-            Camera3d::default(),
-            Projection::from(PerspectiveProjection {
-                fov: 75f32.to_radians(),
-                near: 0.05,
-                ..default()
-            }),
-            Transform::from_translation(crate::PLAYER_START + Vec3::Y * EYE_HEIGHT),
-        ))
-        .with_children(|cam| {
-            cam.spawn((
-                Gun,
-                Transform::from_xyz(0.28, -0.24, -0.55).with_scale(Vec3::splat(0.75)),
-                Visibility::default(),
-            ))
-            .with_children(|gun| {
-                gun.spawn((
-                    Mesh3d(meshes.add(Cuboid::new(0.1, 0.12, 0.5))),
-                    MeshMaterial3d(gun_body.clone()),
-                ));
-                gun.spawn((
-                    Mesh3d(meshes.add(Cylinder::new(0.03, 0.25))),
-                    MeshMaterial3d(gun_body.clone()),
-                    Transform::from_xyz(0.0, 0.02, -0.33)
-                        .with_rotation(Quat::from_rotation_x(FRAC_PI_2)),
-                ));
-                gun.spawn((
-                    Mesh3d(meshes.add(Cuboid::new(0.08, 0.16, 0.08))),
-                    MeshMaterial3d(gun_accent.clone()),
-                    Transform::from_xyz(0.0, -0.12, 0.12)
-                        .with_rotation(Quat::from_rotation_x(-0.3)),
-                ));
-                gun.spawn((
-                    MuzzleFlash,
-                    PointLight {
-                        intensity: 0.0,
-                        color: Color::srgb(1.0, 0.8, 0.4),
-                        range: 12.0,
-                        ..default()
-                    },
-                    Transform::from_xyz(0.0, 0.02, -0.5),
-                ));
-            });
-        });
+    let (p, mut proj) = player.into_inner();
+    if let Projection::Perspective(persp) = &mut *proj {
+        let boost = if p.sprinting || p.sliding > 0.0 || p.dash_time > 0.0 {
+            8.0
+        } else {
+            0.0
+        };
+        let target = (settings.fov + boost).to_radians();
+        persp.fov += (target - persp.fov) * (1.0 - (-10.0 * time.delta_secs()).exp());
+    }
 }
 
-/// Can the local player act right now?
-fn can_act(session: &Session, roster: &Roster, state: &MatchState) -> bool {
-    !state.game_over && roster.me(session).is_none_or(|me| me.alive)
-}
-
-/// Teleports to the spawn point whenever the host bumps our spawn counter
-/// (game start, restart, revive).
+/// Teleports to spawn whenever the host bumps our spawn counter (match
+/// start, revive).
 fn respawn(
     session: Res<Session>,
     roster: Res<Roster>,
-    mut weapon: ResMut<Weapon>,
-    player: Single<(&mut Transform, &mut LocalPlayer)>,
+    map: Option<Res<CurrentMap>>,
+    mut player: Single<&mut LocalPlayer>,
 ) {
-    let Some(me) = roster.me(&session) else {
+    let (Some(me), Some(map)) = (roster.me(&session), map) else {
         return;
     };
-    if weapon.last_spawn_seq == Some(me.spawn_seq) {
+    if player.last_spawn_seq == Some(me.spawn_seq) {
         return;
     }
-    weapon.last_spawn_seq = Some(me.spawn_seq);
-    weapon.ammo = MAG_SIZE;
-    weapon.reload_timer = 0.0;
-    let (mut tf, mut p) = player.into_inner();
-    tf.translation = spawn_point(session.my_id) + Vec3::Y * EYE_HEIGHT;
-    p.yaw = 0.0;
-    p.pitch = 0.0;
-    p.vertical_velocity = 0.0;
-    tf.rotation = Quat::IDENTITY;
+    player.last_spawn_seq = Some(me.spawn_seq);
+    player.feet = player_spawn(&map.0, session.my_id);
+    player.yaw = 0.0;
+    player.vel = Vec3::ZERO;
+    player.pitch = 0.0;
+    player.sliding = 0.0;
 }
 
-fn grab_cursor(
-    mut window: Single<&mut Window, With<PrimaryWindow>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
-) {
-    if mouse.just_pressed(MouseButton::Left) {
-        window.cursor_options.grab_mode = CursorGrabMode::Locked;
-        window.cursor_options.visible = false;
-    }
-    if keys.just_pressed(KeyCode::Escape) {
-        window.cursor_options.grab_mode = CursorGrabMode::None;
-        window.cursor_options.visible = true;
-    }
+/// Is the local player allowed to act (alive, playing, not in a menu)?
+pub fn can_act(
+    session: &Session,
+    roster: &Roster,
+    state: &MatchState,
+    paused: &Paused,
+    window: &Window,
+) -> bool {
+    !state.game_over
+        && !state.extracted
+        && !paused.0
+        && cursor_locked(window)
+        && roster.me(session).is_none_or(|me| me.alive)
 }
 
 fn mouse_look(
     motion: Res<AccumulatedMouseMotion>,
+    settings: Res<Settings>,
     window: Single<&Window, With<PrimaryWindow>>,
-    player: Single<(&mut Transform, &mut LocalPlayer)>,
+    paused: Res<Paused>,
+    mut player: Single<&mut LocalPlayer>,
 ) {
-    if !cursor_locked(&window) {
+    if !cursor_locked(&window) || paused.0 {
         return;
     }
-    let (mut tf, mut p) = player.into_inner();
-    p.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
-    p.pitch = (p.pitch - motion.delta.y * MOUSE_SENSITIVITY).clamp(-1.5, 1.5);
-    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, p.pitch, 0.0);
+    let s = MOUSE_SCALE * settings.sensitivity;
+    player.yaw -= motion.delta.x * s;
+    player.pitch = (player.pitch - motion.delta.y * s).clamp(-1.5, 1.5);
 }
 
-fn player_movement(
+/// Quake-style acceleration: only adds speed up to `wish_speed` along `wish`.
+fn accelerate(vel: &mut Vec3, wish: Vec3, wish_speed: f32, accel: f32, dt: f32) {
+    let current = vel.dot(wish);
+    let add = wish_speed - current;
+    if add <= 0.0 {
+        return;
+    }
+    let step = (accel * dt * wish_speed.max(4.0)).min(add);
+    *vel += wish * step;
+}
+
+pub fn movement(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
     window: Single<&Window, With<PrimaryWindow>>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
+    paused: Res<Paused>,
     player: Single<(&mut Transform, &mut LocalPlayer)>,
     colliders: Query<(&Transform, &Collider), Without<LocalPlayer>>,
 ) {
-    // Solo mode is paused while the mouse is free.
-    if session.role == crate::Role::Solo && !cursor_locked(&window) {
+    // Solo pause freezes everything.
+    if paused.0 && session.role == crate::Role::Solo {
         return;
     }
-    let dt = time.delta_secs();
+    let dt = time.delta_secs().min(0.05);
     let (mut tf, mut p) = player.into_inner();
     let boxes = collect_boxes(colliders.iter());
-    let active = can_act(&session, &roster, &state) && cursor_locked(&window);
+    let me = roster.me(&session);
+    let alive = me.is_none_or(|m| m.alive);
+    let active = can_act(&session, &roster, &state, &paused, &window);
+    let perks = me.map(|m| m.perks).unwrap_or(0);
+    let stamina = if has_perk(perks, Perk::Stamina) { 1.3 } else { 1.0 };
+
+    let held = |a| active && keys.held(&settings, a);
+    let tapped = |a| active && keys.tapped(&settings, a);
 
     let forward = Vec3::new(-p.yaw.sin(), 0.0, -p.yaw.cos());
     let right = Vec3::new(-forward.z, 0.0, forward.x);
     let mut wish = Vec3::ZERO;
-    if active {
-        if keys.pressed(KeyCode::KeyW) {
-            wish += forward;
-        }
-        if keys.pressed(KeyCode::KeyS) {
-            wish -= forward;
-        }
-        if keys.pressed(KeyCode::KeyD) {
-            wish += right;
-        }
-        if keys.pressed(KeyCode::KeyA) {
-            wish -= right;
+    if held(Action::Forward) {
+        wish += forward;
+    }
+    if held(Action::Back) {
+        wish -= forward;
+    }
+    if held(Action::Right) {
+        wish += right;
+    }
+    if held(Action::Left) {
+        wish -= right;
+    }
+    let wish = wish.normalize_or_zero();
+
+    p.slide_cd -= dt;
+    let crouch_held = held(Action::Crouch);
+    let speed = p.horizontal_speed();
+
+    // Start a slide: crouch while moving fast on the ground (also when landing
+    // with crouch held, so jump-slide-jump-slide chains work).
+    let want_slide = tapped(Action::Crouch) || (crouch_held && p.on_ground && p.sliding <= 0.0 && p.slide_cd <= 0.0 && speed > 7.5);
+    if want_slide && p.on_ground && speed > SLIDE_MIN_SPEED && p.slide_cd <= 0.0 && p.sliding <= 0.0 {
+        p.sliding = SLIDE_TIME;
+        p.slide_cd = 0.5;
+        let dir = p.vel.with_y(0.0).normalize_or_zero();
+        let boosted = ((speed + 3.0) * stamina).max(11.0 * stamina).min(16.0 * stamina);
+        p.vel = dir * boosted + Vec3::Y * p.vel.y;
+    }
+    if p.sliding > 0.0 {
+        p.sliding -= dt;
+        if !crouch_held || speed < 3.5 {
+            p.sliding = 0.0;
         }
     }
-    let speed = if keys.pressed(KeyCode::ShiftLeft) {
-        SPRINT_SPEED
+    p.crouching = crouch_held || p.sliding > 0.0;
+    p.sprinting = held(Action::Sprint) && !p.crouching && wish.dot(forward) > 0.5;
+
+    let max_speed = if p.crouching {
+        CROUCH_SPEED
+    } else if p.sprinting {
+        SPRINT_SPEED * stamina
     } else {
         WALK_SPEED
     };
 
-    let mut feet = tf.translation - Vec3::Y * EYE_HEIGHT;
-    feet += wish.normalize_or_zero() * speed * dt;
-
-    if active && p.on_ground && keys.just_pressed(KeyCode::Space) {
-        p.vertical_velocity = JUMP_SPEED;
+    // Jumping: holding the key keeps hopping as soon as you land (easy bunny
+    // hops). Jumping skips ground friction that frame, so speed is kept.
+    let mut jumped = false;
+    if p.on_ground && (held(Action::Jump) || tapped(Action::Jump)) {
+        // Take off at full running speed in the direction you're holding.
+        let mut v = p.vel;
+        accelerate(&mut v, wish, max_speed, GROUND_ACCEL, dt);
+        // Hopping again right as you land keeps building speed.
+        let chained = p.last_air > 0.3 && p.ground_time < 0.12;
+        let h = v.with_y(0.0);
+        let hs = h.length();
+        if chained && wish != Vec3::ZERO && hs > 1.0 {
+            let cap = BHOP_MAX * stamina;
+            let new = (hs + BHOP_GAIN).min(cap.max(hs));
+            v = h / hs * new + Vec3::Y * v.y;
+        }
+        p.vel = v;
+        p.vel.y = JUMP_SPEED;
         p.on_ground = false;
+        p.sliding = 0.0;
+        jumped = true;
     }
-    p.vertical_velocity -= GRAVITY * dt;
-    feet.y += p.vertical_velocity * dt;
 
+    if p.dash_time > 0.0 {
+        p.dash_time -= dt;
+        let dash = p.dash_dir * 22.0;
+        p.vel = Vec3::new(dash.x, p.vel.y.max(0.0), dash.z);
+        if p.dash_time <= 0.0 {
+            let keep = p.vel.with_y(0.0).normalize_or_zero() * 9.0;
+            p.vel = Vec3::new(keep.x, p.vel.y, keep.z);
+        }
+    } else if p.on_ground && !jumped {
+        let friction = if p.sliding > 0.0 { SLIDE_FRICTION } else { FRICTION };
+        let h = p.vel.with_y(0.0);
+        let hs = h.length();
+        if hs > 0.0 {
+            let drop = hs.max(1.0) * friction * dt;
+            let new = (hs - drop).max(0.0);
+            p.vel = h * (new / hs) + Vec3::Y * p.vel.y;
+        }
+        if p.sliding > 0.0 {
+            let mut v = p.vel;
+            accelerate(&mut v, wish, 2.0, 10.0, dt);
+            p.vel = v;
+        } else {
+            let mut v = p.vel;
+            accelerate(&mut v, wish, max_speed, GROUND_ACCEL, dt);
+            p.vel = v;
+        }
+    } else {
+        let mut v = p.vel;
+        accelerate(&mut v, wish, AIR_WISH, AIR_ACCEL, dt);
+        p.vel = v;
+    }
+
+    // Cap horizontal speed.
+    let h = p.vel.with_y(0.0);
+    if h.length() > MAX_SPEED {
+        let capped = h.normalize() * MAX_SPEED;
+        p.vel = capped + Vec3::Y * p.vel.y;
+    }
+
+    p.vel.y -= GRAVITY * dt;
+    let before = p.feet + p.vel * dt;
+    let mut feet = before;
     let feet_y = feet.y;
     resolve_collisions(&mut feet, PLAYER_RADIUS, feet_y, &boxes);
-    feet.x = feet.x.clamp(-ARENA_HALF + PLAYER_RADIUS, ARENA_HALF - PLAYER_RADIUS);
-    feet.z = feet.z.clamp(-ARENA_HALF + PLAYER_RADIUS, ARENA_HALF - PLAYER_RADIUS);
-
+    // Stop moving into walls we bumped (keeps sliding along them smooth).
+    let push = (feet - before).with_y(0.0);
+    if push.length_squared() > 1e-8 {
+        let n = push.normalize();
+        let into = p.vel.dot(n);
+        if into < 0.0 {
+            let v = p.vel - n * into;
+            p.vel = v;
+        }
+    }
     let ground = ground_height(feet, PLAYER_RADIUS, feet.y, &boxes);
     if feet.y <= ground {
         feet.y = ground;
-        p.vertical_velocity = 0.0;
+        p.vel.y = 0.0;
         p.on_ground = true;
     } else {
-        p.on_ground = feet.y - ground < 0.05;
+        p.on_ground = feet.y - ground < 0.05 && p.vel.y <= 0.0;
     }
-
-    tf.translation = feet + Vec3::Y * EYE_HEIGHT;
-}
-
-/// Copies our position into the roster so the host (and other players) see it.
-fn sync_to_roster(
-    session: Res<Session>,
-    mut roster: ResMut<Roster>,
-    player: Single<(&Transform, &LocalPlayer)>,
-) {
-    let (tf, p) = *player;
-    if let Some(me) = roster.0.get_mut(&session.my_id) {
-        me.pos = (tf.translation - Vec3::Y * EYE_HEIGHT).to_array();
-        me.yaw = p.yaw;
-        me.pitch = p.pitch;
-    }
-}
-
-fn shoot(
-    mouse: Res<ButtonInput<MouseButton>>,
-    time: Res<Time>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    session: Res<Session>,
-    roster: Res<Roster>,
-    state: Res<MatchState>,
-    mut weapon: ResMut<Weapon>,
-    mut tracers: ResMut<Tracers>,
-    mut shots: ResMut<ShotQueue>,
-    camera: Single<&Transform, With<LocalPlayer>>,
-    enemies: Query<(Entity, &Transform), With<Enemy>>,
-    colliders: Query<(&Transform, &Collider), Without<LocalPlayer>>,
-) {
-    weapon.fire_cooldown -= time.delta_secs();
-    if !cursor_locked(&window)
-        || !mouse.pressed(MouseButton::Left)
-        || !can_act(&session, &roster, &state)
-        || weapon.fire_cooldown > 0.0
-        || weapon.reload_timer > 0.0
-    {
-        return;
-    }
-    if weapon.ammo == 0 {
-        weapon.reload_timer = RELOAD_TIME;
-        return;
-    }
-    weapon.ammo -= 1;
-    weapon.fire_cooldown = FIRE_COOLDOWN;
-    weapon.recoil = 1.0;
-    weapon.flash_timer = 0.05;
-
-    let origin = camera.translation;
-    let dir = camera.forward().as_vec3();
-    let boxes = collect_boxes(colliders.iter());
-    let (dist, _) = trace_shot(
-        origin,
-        dir,
-        GUN_RANGE,
-        &boxes,
-        enemies.iter().map(|(e, t)| (e, t.translation)),
-    );
-    // Start the tracer at the gun muzzle rather than the eye.
-    let muzzle = origin + camera.rotation * Vec3::new(0.28, -0.2, -1.0);
-    tracers.0.push((muzzle, origin + dir * dist, 0.06));
-
-    // The host decides what was actually hit.
-    shots.0.push((session.my_id, origin, dir));
-}
-
-fn reload(time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, mut weapon: ResMut<Weapon>) {
-    if keys.just_pressed(KeyCode::KeyR) && weapon.reload_timer <= 0.0 && weapon.ammo < MAG_SIZE {
-        weapon.reload_timer = RELOAD_TIME;
-    }
-    if weapon.reload_timer > 0.0 {
-        weapon.reload_timer -= time.delta_secs();
-        if weapon.reload_timer <= 0.0 {
-            weapon.reload_timer = 0.0;
-            weapon.ammo = MAG_SIZE;
+    p.feet = feet;
+    if p.on_ground {
+        if p.air_time > 0.0 {
+            p.last_air = p.air_time;
+            p.air_time = 0.0;
+            p.ground_time = 0.0;
         }
+        p.ground_time += dt;
+    } else {
+        p.air_time += dt;
     }
+
+    // Camera.
+    let target_eye = if !alive {
+        0.4
+    } else if p.crouching {
+        CROUCH_EYE_HEIGHT
+    } else {
+        EYE_HEIGHT
+    };
+    p.eye += (target_eye - p.eye) * (1.0 - (-14.0 * dt).exp());
+    p.kick *= (-12.0 * dt).exp();
+    let roll = if p.sliding > 0.0 { 0.06 } else { 0.0 };
+    tf.translation = p.eye_pos();
+    tf.rotation = Quat::from_euler(EulerRot::YXZ, p.yaw, (p.pitch + p.kick).min(1.5), roll);
 }
 
-fn animate_gun(
-    time: Res<Time>,
-    session: Res<Session>,
-    roster: Res<Roster>,
-    mut weapon: ResMut<Weapon>,
-    mut gun: Single<(&mut Transform, &mut Visibility), With<Gun>>,
-    mut flash: Single<&mut PointLight, With<MuzzleFlash>>,
-) {
-    let dt = time.delta_secs();
-    weapon.recoil = (weapon.recoil - dt * 8.0).max(0.0);
-    weapon.flash_timer -= dt;
-
-    // Dip the gun down while reloading.
-    let reload_dip = if weapon.reload_timer > 0.0 {
-        (weapon.reload_timer / RELOAD_TIME * std::f32::consts::PI).sin() * 0.25
-    } else {
-        0.0
-    };
-    let (tf, vis) = &mut *gun;
-    tf.translation = Vec3::new(0.28, -0.24 - reload_dip, -0.55 + weapon.recoil * 0.08);
-    tf.rotation = Quat::from_rotation_x(weapon.recoil * 0.15 - reload_dip * 2.0);
-    let alive = roster.me(&session).is_none_or(|me| me.alive);
-    **vis = if alive {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-
-    flash.intensity = if weapon.flash_timer > 0.0 { 60_000.0 } else { 0.0 };
-}
-
-fn draw_tracers(time: Res<Time>, mut tracers: ResMut<Tracers>, mut gizmos: Gizmos) {
-    let dt = time.delta_secs();
-    for (a, b, life) in tracers.0.iter_mut() {
-        gizmos.line(*a, *b, Color::srgb(1.0, 0.9, 0.5));
-        *life -= dt;
+/// Copies our position into the roster so the host (and others) see it.
+fn sync_to_roster(session: Res<Session>, mut roster: ResMut<Roster>, player: Single<&LocalPlayer>) {
+    if let Some(me) = roster.0.get_mut(&session.my_id) {
+        me.pos = player.feet.to_array();
+        me.yaw = player.yaw;
+        me.pitch = player.pitch;
+        me.stance = player.stance();
     }
-    tracers.0.retain(|(_, _, life)| *life > 0.0);
 }

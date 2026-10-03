@@ -12,11 +12,13 @@ pub fn collect_boxes<'a>(iter: impl Iterator<Item = (&'a Transform, &'a Collider
 }
 
 /// Pushes a circle (in XZ) out of every box it overlaps, ignoring boxes whose
-/// top is below `feet_y` (so you can stand on crates).
+/// top is below `feet_y` (so you can stand on crates) and boxes overhead
+/// (crane beams, roofs).
 pub fn resolve_collisions(pos: &mut Vec3, radius: f32, feet_y: f32, colliders: &Boxes) {
     for (center, half) in colliders {
         let top = center.y + half.y;
-        if feet_y >= top - 0.05 {
+        let bottom = center.y - half.y;
+        if feet_y >= top - 0.05 || bottom > feet_y + 2.2 {
             continue;
         }
         let closest = Vec2::new(
@@ -84,12 +86,20 @@ pub fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<
     (t >= 0.0).then_some(t)
 }
 
-/// Enemies are capsules centered 1m above the floor; approximate with spheres.
-pub fn ray_enemy(origin: Vec3, dir: Vec3, enemy_center: Vec3) -> Option<f32> {
-    [0.55, 1.0, 1.45]
+/// Enemies are person-shaped with their origin at the feet. Returns the hit
+/// distance and whether it was a headshot.
+pub fn ray_enemy(origin: Vec3, dir: Vec3, feet: Vec3, scale: f32) -> Option<(f32, bool)> {
+    let head = ray_sphere(origin, dir, feet + Vec3::Y * 1.78 * scale, 0.24 * scale);
+    let body = [(1.3, 0.36), (0.95, 0.34), (0.45, 0.3)]
         .iter()
-        .filter_map(|y| ray_sphere(origin, dir, enemy_center + Vec3::Y * (y - 1.0), 0.52))
-        .min_by(|a, b| a.total_cmp(b))
+        .filter_map(|(y, r)| ray_sphere(origin, dir, feet + Vec3::Y * y * scale, r * scale))
+        .min_by(|a, b| a.total_cmp(b));
+    match (head, body) {
+        (Some(h), Some(b)) if b < h => Some((b, false)),
+        (Some(h), _) => Some((h, true)),
+        (None, Some(b)) => Some((b, false)),
+        (None, None) => None,
+    }
 }
 
 /// Distance to the first wall or floor hit along the ray.
@@ -106,20 +116,41 @@ pub fn ray_world(origin: Vec3, dir: Vec3, max: f32, colliders: &Boxes) -> f32 {
     nearest
 }
 
-/// Finds the closest enemy hit before any wall. Returns (distance, enemy).
+/// Clear line between two points?
+pub fn line_of_sight(a: Vec3, b: Vec3, colliders: &Boxes) -> bool {
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-3 {
+        return true;
+    }
+    ray_world(a, d / len, len, colliders) >= len - 0.05
+}
+
+pub struct ShotHit {
+    pub dist: f32,
+    pub enemy: Option<(Entity, bool)>,
+}
+
+/// Finds the closest enemy hit before any wall.
 pub fn trace_shot(
     origin: Vec3,
     dir: Vec3,
     max: f32,
     colliders: &Boxes,
-    enemies: impl Iterator<Item = (Entity, Vec3)>,
-) -> (f32, Option<Entity>) {
+    enemies: impl Iterator<Item = (Entity, Vec3, f32)>,
+) -> ShotHit {
     let wall = ray_world(origin, dir, max, colliders);
-    let mut best: (f32, Option<Entity>) = (wall, None);
-    for (e, center) in enemies {
-        if let Some(t) = ray_enemy(origin, dir, center) {
-            if t < best.0 {
-                best = (t, Some(e));
+    let mut best = ShotHit {
+        dist: wall,
+        enemy: None,
+    };
+    for (e, feet, scale) in enemies {
+        if let Some((t, head)) = ray_enemy(origin, dir, feet, scale) {
+            if t < best.dist {
+                best = ShotHit {
+                    dist: t,
+                    enemy: Some((e, head)),
+                };
             }
         }
     }

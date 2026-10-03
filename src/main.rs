@@ -1,45 +1,59 @@
-//! A small co-op wave-survival first-person shooter built with Bevy.
+//! Rust FPS: a co-op wave-survival shooter built with Bevy.
 //!
-//! Run with no arguments to play solo, `host` to host a game, or
-//! `join <address>` to join one. See README.md for details.
-//!
-//! Controls: mouse to look, WASD to move, Shift to sprint, Space to jump,
-//! left click to shoot, R to reload, Esc to release the mouse.
+//! Start the game and use the menus, or skip straight to a party from the
+//! command line with `host` or `join <address>`. See README.md.
 
+mod abilities;
 mod avatars;
+mod config;
+mod data;
+mod fx;
+mod game;
+mod humanoid;
 mod hud;
-mod level;
+mod maps;
+mod nav;
 mod net;
 mod physics;
 mod player;
 mod sim;
+mod ui;
+mod weapons;
 
 use bevy::prelude::*;
-use bevy::window::{CursorGrabMode, PrimaryWindow};
+use bevy::window::CursorGrabMode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use data::{Character, Upgrade, STARTER_GUN};
+
 // ---------------------------------------------------------------------------
-// Tuning
+// Constants
 // ---------------------------------------------------------------------------
 
 pub const EYE_HEIGHT: f32 = 1.6;
+pub const CROUCH_EYE_HEIGHT: f32 = 1.0;
 pub const PLAYER_RADIUS: f32 = 0.4;
-pub const MAX_HEALTH: f32 = 100.0;
-pub const ARENA_HALF: f32 = 30.0;
-pub const PLAYER_START: Vec3 = Vec3::new(0.0, 0.0, 12.0);
+pub const BASE_HEALTH: f32 = 100.0;
 pub const MAX_PLAYERS: usize = 8;
+pub const START_POINTS: u32 = 500;
 
-/// Where a player (re)spawns. Players are spread out in a line.
-pub fn spawn_point(id: u8) -> Vec3 {
-    let col = (id % 4) as f32;
-    let row = (id / 4) as f32;
-    PLAYER_START + Vec3::new(col * 2.0 - 3.0, 0.0, row * 2.0)
+// ---------------------------------------------------------------------------
+// App states
+// ---------------------------------------------------------------------------
+
+#[derive(States, Default, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AppState {
+    #[default]
+    Menu,
+    /// The party screen before a match.
+    Lobby,
+    InGame,
 }
 
-// ---------------------------------------------------------------------------
-// Shared state
-// ---------------------------------------------------------------------------
+/// Entities that only exist during a match; removed when it ends.
+#[derive(Component)]
+pub struct InGameEntity;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
@@ -55,55 +69,137 @@ pub enum Role {
 pub struct Session {
     pub role: Role,
     pub my_id: u8,
-    pub my_name: String,
-    /// Connection info shown at the top of the screen.
+    /// Connection info shown in the lobby and HUD.
     pub status: String,
     /// True once a client has been accepted by the host.
     pub connected: bool,
+    /// Start the match as soon as the lobby opens (command line `--start`).
+    pub autostart: bool,
 }
 
 impl Session {
-    /// The host (or solo player) owns enemies, damage, score and waves.
     pub fn is_authority(&self) -> bool {
         self.role != Role::Client
     }
 }
 
-/// Everything about a player that the whole game needs to know.
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            role: Role::Solo,
+            my_id: 0,
+            status: String::new(),
+            connected: true,
+            autostart: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared game state (replicated from the host)
+// ---------------------------------------------------------------------------
+
+/// Everything about a player that the whole party needs to know.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerInfo {
     pub id: u8,
     pub name: String,
+    pub character: Character,
+    pub skin: u8,
+    pub ready: bool,
+
     /// Feet position.
     pub pos: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
+    /// 0 standing, 1 crouching, 2 sliding.
+    pub stance: u8,
+
     pub health: f32,
-    pub score: u32,
-    pub kills: u32,
     pub alive: bool,
     /// Bumped by the host whenever this player should teleport to spawn.
     pub spawn_seq: u32,
+
+    pub points: u32,
+    pub score: u32,
+    pub kills: u32,
+
+    pub guns: [Option<u8>; 2],
+    pub active_slot: u8,
+    pub perks: u8,
+
+    pub level: u32,
+    pub xp: u32,
+    /// Level-up rewards waiting to be picked (one set of options at a time).
+    pub choices: Vec<Upgrade>,
+    pub pending_picks: u8,
+    pub tiers: [u8; 3],
+    pub gun_elements: u8,
+    pub ability_elements: u8,
+
+    pub cooldowns: [f32; 2],
+    pub ult_charge: f32,
+    pub overdrive: f32,
+    /// Highest action number the host has handled (for resending).
+    pub action_ack: u32,
 }
 
 impl PlayerInfo {
-    pub fn new(id: u8, name: String) -> Self {
+    pub fn new(id: u8, name: String, character: Character, skin: u8) -> Self {
         Self {
             id,
             name,
-            pos: spawn_point(id).to_array(),
+            character,
+            skin,
+            ready: false,
+            pos: [0.0; 3],
             yaw: 0.0,
             pitch: 0.0,
-            health: MAX_HEALTH,
-            score: 0,
-            kills: 0,
+            stance: 0,
+            health: BASE_HEALTH,
             alive: true,
             spawn_seq: 0,
+            points: START_POINTS,
+            score: 0,
+            kills: 0,
+            guns: [Some(STARTER_GUN), None],
+            active_slot: 0,
+            perks: 0,
+            level: 1,
+            xp: 0,
+            choices: Vec::new(),
+            pending_picks: 0,
+            tiers: [0; 3],
+            gun_elements: 0,
+            ability_elements: 0,
+            cooldowns: [0.0; 2],
+            ult_charge: 0.0,
+            overdrive: 0.0,
+            action_ack: 0,
         }
+    }
+
+    /// Back to a fresh start for a new match (keeps name and loadout picks).
+    pub fn reset_for_match(&mut self) {
+        let keep = PlayerInfo::new(self.id, self.name.clone(), self.character, self.skin);
+        let seq = self.spawn_seq;
+        let ack = self.action_ack;
+        *self = keep;
+        self.spawn_seq = seq + 1;
+        self.action_ack = ack;
+        self.ready = false;
     }
 
     pub fn feet(&self) -> Vec3 {
         Vec3::from_array(self.pos)
+    }
+
+    pub fn max_health(&self) -> f32 {
+        if data::has_perk(self.perks, data::Perk::Juggernaut) {
+            200.0
+        } else {
+            BASE_HEALTH
+        }
     }
 
     pub fn damage(&mut self, amount: f32) {
@@ -114,12 +210,15 @@ impl PlayerInfo {
         if self.health <= 0.0 {
             self.health = 0.0;
             self.alive = false;
+            // Perks are lost when you go down.
+            self.perks = 0;
+            self.overdrive = 0.0;
         }
     }
 }
 
-/// All players in the game, keyed by id. On the host this is the truth; on
-/// clients it is a copy received from the host.
+/// All players, keyed by id. On the host this is the truth; on clients it
+/// is a copy received from the host.
 #[derive(Resource, Default)]
 pub struct Roster(pub BTreeMap<u8, PlayerInfo>);
 
@@ -129,30 +228,81 @@ impl Roster {
     }
 }
 
-#[derive(Resource, Default)]
-pub struct MatchState {
-    pub wave: u32,
-    /// Waves begin once the host clicks into the game.
-    pub started: bool,
-    pub game_over: bool,
-    // Host-only bookkeeping
-    pub to_spawn: u32,
-    pub spawn_timer: f32,
-    pub intermission: f32,
-    pub next_net_id: u32,
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum BoxState {
+    #[default]
+    Idle,
+    Rolling { player: u8, time: f32 },
+    Offer { player: u8, gun: u8, time: f32 },
+    Moving { time: f32 },
 }
 
-/// Shots fired this frame: (shooter id, origin, direction). The host resolves
-/// them; clients send them to the host.
-#[derive(Resource, Default)]
-pub struct ShotQueue(pub Vec<(u8, Vec3, Vec3)>);
+#[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MatchState {
+    pub map: u8,
+    pub round: u32,
+    pub started: bool,
+    pub game_over: bool,
+    pub extracted: bool,
+    pub intermission: f32,
+    pub to_spawn: u32,
+    pub spawn_timer: f32,
+    pub next_net_id: u32,
 
-/// Short-lived bullet tracers drawn with gizmos: (start, end, time left).
+    pub insta_kill: f32,
+    pub double_points: f32,
+    pub max_ammo_seq: u32,
+    /// Last power-up grabbed, for the on-screen banner.
+    pub powerup_seq: u32,
+    pub last_powerup: Option<data::PowerUp>,
+
+    pub box_spot: u8,
+    pub box_state: BoxState,
+    pub box_uses: u32,
+    pub box_move_after: u32,
+
+    /// Seconds left to extract (0 = extraction not available).
+    pub extraction: f32,
+    /// How long the whole team has been standing in the zone.
+    pub extract_hold: f32,
+}
+
+impl MatchState {
+    pub fn new(map: u8) -> Self {
+        Self {
+            map,
+            intermission: 3.0,
+            box_move_after: 6,
+            ..default()
+        }
+    }
+}
+
+/// A shot fired by a player: the host decides what it hit.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct Shot {
+    pub origin: [f32; 3],
+    pub dir: [f32; 3],
+    pub gun: u8,
+}
+
 #[derive(Resource, Default)]
-pub struct Tracers(pub Vec<(Vec3, Vec3, f32)>);
+pub struct ShotQueue(pub Vec<(u8, Shot)>);
+
+/// Things a player asks the host to do.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum PlayerAction {
+    Interact,
+    Ability { slot: u8, origin: [f32; 3], dir: [f32; 3] },
+    Choose(u8),
+}
+
+/// Actions waiting for the host: (player, sequence number, action).
+#[derive(Resource, Default)]
+pub struct ActionQueue(pub Vec<(u8, u32, PlayerAction)>);
 
 /// Axis-aligned box collider for static level geometry (half extents).
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Collider {
     pub half: Vec3,
 }
@@ -161,10 +311,13 @@ pub struct Collider {
 pub enum NetKind {
     Grunt,
     Shooter,
-    Projectile,
+    Brute,
+    Fireball,
+    Grenade,
+    PowerUp(data::PowerUp),
 }
 
-/// An entity the host replicates to clients (enemies and projectiles).
+/// An entity the host replicates to clients (enemies, projectiles, pickups).
 #[derive(Component)]
 pub struct Replicated {
     pub id: u32,
@@ -175,15 +328,16 @@ pub struct Replicated {
 #[derive(Component)]
 pub struct Enemy;
 
-/// Enemy appearance; `flash` > 0 makes it flash white after being hit.
-#[derive(Component)]
-pub struct EnemyLook {
-    pub base_color: Color,
+/// Visual status shown on enemies: hit flash, burning, slowed.
+#[derive(Component, Default)]
+pub struct EnemyStatus {
     pub flash: f32,
+    pub burning: bool,
+    pub slowed: bool,
 }
 
 // ---------------------------------------------------------------------------
-// App
+// Scheduling
 // ---------------------------------------------------------------------------
 
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -204,70 +358,58 @@ pub fn cursor_locked(window: &Window) -> bool {
     window.cursor_options.grab_mode != CursorGrabMode::None
 }
 
-fn is_authority(session: Res<Session>) -> bool {
-    session.is_authority()
+pub fn set_cursor_lock(window: &mut Window, locked: bool) {
+    window.cursor_options.grab_mode = if locked {
+        CursorGrabMode::Locked
+    } else {
+        CursorGrabMode::None
+    };
+    window.cursor_options.visible = !locked;
 }
 
-/// The simulation always runs when hosting (other people are playing), but
-/// pauses in solo mode while the mouse is released.
-fn sim_running(session: Res<Session>, window: Single<&Window, With<PrimaryWindow>>) -> bool {
-    match session.role {
-        Role::Solo => cursor_locked(&window),
-        Role::Host => true,
-        Role::Client => false,
-    }
+/// Solo games pause while a menu is open; hosted games keep running.
+fn sim_running(
+    session: Res<Session>,
+    paused: Res<game::Paused>,
+    state: Res<State<AppState>>,
+) -> bool {
+    *state.get() == AppState::InGame
+        && match session.role {
+            Role::Solo => !paused.0,
+            Role::Host => true,
+            Role::Client => false,
+        }
 }
 
 fn main() {
-    let (session, net) = match net::from_args() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("error: {e}\n");
-            eprintln!("usage:");
-            eprintln!("  rust-fps                         play solo");
-            eprintln!("  rust-fps host [port] [--name N]   host a co-op game (default port {})", net::DEFAULT_PORT);
-            eprintln!("  rust-fps join <address> [--name N] join a game, e.g. join 192.168.1.20");
-            std::process::exit(1);
-        }
-    };
-    let title = match session.role {
-        Role::Solo => "Rust FPS".to_string(),
-        Role::Host => "Rust FPS (host)".to_string(),
-        Role::Client => "Rust FPS (client)".to_string(),
-    };
-
-    let mut roster = Roster::default();
-    if session.is_authority() {
-        roster.0.insert(0, PlayerInfo::new(0, session.my_name.clone()));
-    }
+    let launch = net::parse_args();
 
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title,
+            title: "Rust FPS".into(),
             ..default()
         }),
         ..default()
     }))
-    .insert_resource(ClearColor(Color::srgb(0.45, 0.62, 0.85)))
+    .init_state::<AppState>()
+    .insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.09)))
     .insert_resource(AmbientLight {
         color: Color::WHITE,
         brightness: 350.0,
         ..default()
     })
-    .insert_resource(session)
-    .insert_resource(roster)
-    .insert_resource(MatchState {
-        intermission: 1.5,
-        ..default()
-    })
+    .insert_resource(launch)
+    .init_resource::<Session>()
+    .init_resource::<Roster>()
+    .insert_resource(MatchState::new(0))
     .init_resource::<ShotQueue>()
-    .init_resource::<Tracers>()
+    .init_resource::<ActionQueue>()
     .configure_sets(
         Update,
         (
             Phase::NetIn,
-            Phase::Local,
+            Phase::Local.run_if(in_state(AppState::InGame)),
             Phase::Sim.run_if(sim_running),
             Phase::NetOut,
             Phase::Present,
@@ -275,16 +417,18 @@ fn main() {
             .chain(),
     )
     .add_plugins((
-        level::LevelPlugin,
+        config::ConfigPlugin,
+        ui::UiPlugin,
+        net::NetPlugin,
+        game::GamePlugin,
         player::PlayerPlugin,
+        weapons::WeaponPlugin,
+        abilities::AbilityPlugin,
         sim::SimPlugin,
         avatars::AvatarPlugin,
+        humanoid::HumanoidPlugin,
+        fx::FxPlugin,
         hud::HudPlugin,
     ))
-    .add_systems(Update, sim::restart.run_if(is_authority));
-
-    if let Some(net) = net {
-        app.insert_resource(net).add_plugins(net::NetPlugin);
-    }
-    app.run();
+    .run();
 }

@@ -1,46 +1,134 @@
 //! Co-op networking over plain UDP.
 //!
-//! The host runs the whole simulation. Clients send their position, aim and
-//! the shots they fire; the host sends back a snapshot of every player, enemy
-//! and projectile about 30 times a second. Clients move their own character
-//! locally, so movement feels instant even with some lag.
+//! The host runs the whole simulation. Clients send their position, aim, the
+//! shots they fire and their actions (buy, abilities, upgrade picks); the
+//! host sends back a snapshot of the party, the match and every enemy about
+//! 30 times a second. Clients move their own character locally, so movement
+//! feels instant even with some lag. Actions are numbered and resent until
+//! the host confirms them, so a dropped packet never loses a purchase.
 
 use bevy::prelude::*;
 use bincode::Options;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
 
-use crate::level::{spawn_replicated, GameAssets};
-use crate::player::LocalPlayer;
-use crate::sim::TracerEvents;
+use crate::avatars::{spawn_replicated, ReplicatedAssets};
+use crate::config::Profile;
+use crate::data::Character;
+use crate::fx::{Fx, FxOutbox, FxQueue};
+use crate::humanoid::HumanoidMeshes;
 use crate::{
-    EnemyLook, MatchState, NetKind, Phase, PlayerInfo, Replicated, Role, Roster, Session,
-    ShotQueue, Tracers, EYE_HEIGHT, MAX_PLAYERS,
+    ActionQueue, AppState, EnemyStatus, MatchState, NetKind, Phase, PlayerAction, PlayerInfo,
+    Replicated, Role, Roster, Session, Shot, ShotQueue, MAX_PLAYERS,
 };
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 1;
+const PROTOCOL_VERSION: u32 = 3;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
-const TIMEOUT_SECS: f64 = 5.0;
+const SEND_INTERVAL: f32 = 1.0 / 60.0;
+const TIMEOUT_SECS: f64 = 10.0;
+const CONNECT_SECS: f64 = 8.0;
 const MAX_PACKET: u64 = 60_000;
-const MAX_NAME_LEN: usize = 16;
+pub const MAX_NAME_LEN: usize = 16;
+
+// ---------------------------------------------------------------------------
+// Command line
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LaunchMode {
+    Menu,
+    Solo,
+    Host(u16),
+    Join(String),
+}
+
+/// What the command line asked for (see README): `solo`, `host [port]`,
+/// `join <address>`, plus `--name <name>`, `--map <0-2>` and `--start`.
+#[derive(Resource, Clone, Debug)]
+pub struct Launch {
+    pub mode: LaunchMode,
+    pub name: Option<String>,
+    pub map: Option<u8>,
+    pub start: bool,
+    pub error: Option<String>,
+}
+
+pub fn parse_args() -> Launch {
+    let mut launch = Launch {
+        mode: LaunchMode::Menu,
+        name: None,
+        map: None,
+        start: false,
+        error: None,
+    };
+    let mut args = std::env::args().skip(1).peekable();
+    let mut positional = Vec::new();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--name" => launch.name = args.next(),
+            "--map" => launch.map = args.next().and_then(|m| m.parse().ok()).map(|m: u8| m.min(2)),
+            "--start" => launch.start = true,
+            _ => positional.push(a),
+        }
+    }
+    launch.mode = match positional.first().map(String::as_str) {
+        None => LaunchMode::Menu,
+        Some("solo") => LaunchMode::Solo,
+        Some("host") => match positional.get(1).map(|p| p.parse::<u16>()) {
+            None => LaunchMode::Host(DEFAULT_PORT),
+            Some(Ok(p)) => LaunchMode::Host(p),
+            Some(Err(_)) => {
+                launch.error = Some(format!("Bad port: {}", positional[1]));
+                LaunchMode::Menu
+            }
+        },
+        Some("join") => match positional.get(1) {
+            Some(addr) => LaunchMode::Join(addr.clone()),
+            None => {
+                launch.error = Some("join needs an address, e.g. join 192.168.1.20".into());
+                LaunchMode::Menu
+            }
+        },
+        Some(other) => {
+            launch.error = Some(format!("Unknown command: {other}"));
+            LaunchMode::Menu
+        }
+    };
+    launch
+}
+
+// ---------------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
 enum ClientMsg {
     Hello {
         version: u32,
         name: String,
+        character: Character,
+        skin: u8,
     },
-    Input {
-        pos: [f32; 3],
-        yaw: f32,
-        pitch: f32,
-        shots: Vec<([f32; 3], [f32; 3])>,
-    },
+    Update(ClientUpdate),
     Bye,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ClientUpdate {
+    pos: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+    stance: u8,
+    active_slot: u8,
+    character: Character,
+    skin: u8,
+    ready: bool,
+    shots: Vec<Shot>,
+    actions: Vec<(u32, PlayerAction)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,17 +136,16 @@ enum ServerMsg {
     Welcome { id: u8 },
     Reject { reason: String },
     Snapshot(Snapshot),
+    Closed,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
     tick: u32,
-    wave: u32,
-    game_over: bool,
-    started: bool,
+    state: MatchState,
     players: Vec<PlayerInfo>,
     entities: Vec<NetEntity>,
-    tracers: Vec<(u8, [f32; 3], [f32; 3])>,
+    fx: Vec<Fx>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -67,7 +154,8 @@ struct NetEntity {
     kind: NetKind,
     pos: [f32; 3],
     yaw: f32,
-    flash: bool,
+    /// 1 = hit flash, 2 = burning, 4 = slowed.
+    flags: u8,
 }
 
 /// Size-limited encoding so a bad packet can't make us allocate gigabytes.
@@ -76,12 +164,16 @@ fn codec() -> impl Options {
 }
 
 fn encode<T: Serialize>(msg: &T) -> Vec<u8> {
-    codec().serialize(msg).expect("message encodes")
+    codec().serialize(msg).unwrap_or_default()
 }
 
 fn decode<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Option<T> {
     codec().deserialize(bytes).ok()
 }
+
+// ---------------------------------------------------------------------------
+// Connection state
+// ---------------------------------------------------------------------------
 
 struct Conn {
     id: u8,
@@ -95,10 +187,14 @@ pub struct Net {
     server: Option<SocketAddr>,
     /// Host only: connected players by address.
     clients: HashMap<SocketAddr, Conn>,
+    started_at: Option<f64>,
     last_heard: f64,
     timer: f32,
     tick: u32,
     last_tick: u32,
+    /// Client only: actions not yet confirmed by the host.
+    pending: Vec<(u32, PlayerAction)>,
+    shots: Vec<Shot>,
 }
 
 impl Net {
@@ -108,10 +204,13 @@ impl Net {
             socket,
             server,
             clients: HashMap::new(),
+            started_at: None,
             last_heard: 0.0,
             timer: 0.0,
             tick: 0,
             last_tick: 0,
+            pending: Vec::new(),
+            shots: Vec::new(),
         })
     }
 
@@ -136,72 +235,29 @@ impl Net {
     }
 }
 
-/// Parses the command line into a session and, for host/join, a socket.
-pub fn from_args() -> Result<(Session, Option<Net>), String> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mut name = None;
-    if let Some(i) = args.iter().position(|a| a == "--name") {
-        if i + 1 >= args.len() {
-            return Err("--name needs a value".into());
-        }
-        name = Some(args.remove(i + 1));
-        args.remove(i);
-    }
-    let name: String = name
-        .unwrap_or_else(|| "Player".into())
-        .chars()
-        .take(MAX_NAME_LEN)
-        .collect();
-
-    let session = |role, status: String| Session {
-        role,
-        my_id: 0,
-        my_name: name.clone(),
-        status,
-        connected: role != Role::Client,
-    };
-
-    match args.first().map(String::as_str) {
-        None | Some("solo") => Ok((session(Role::Solo, String::new()), None)),
-        Some("host") => {
-            let port = match args.get(1) {
-                Some(p) => p.parse().map_err(|_| format!("bad port: {p}"))?,
-                None => DEFAULT_PORT,
-            };
-            let socket = UdpSocket::bind(("0.0.0.0", port))
-                .map_err(|e| format!("can't listen on port {port}: {e}"))?;
-            let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<your IP>".into());
-            let status = format!("Hosting - friends join with: join {ip}:{port}");
-            println!("{status}");
-            let net = Net::new(socket, None).map_err(|e| e.to_string())?;
-            Ok((session(Role::Host, status), Some(net)))
-        }
-        Some("join") => {
-            let target = args.get(1).ok_or("join needs an address, e.g. join 192.168.1.20")?;
-            let with_port = if target.contains(':') {
-                target.clone()
-            } else {
-                format!("{target}:{DEFAULT_PORT}")
-            };
-            let addr = with_port
-                .to_socket_addrs()
-                .map_err(|e| format!("can't resolve {with_port}: {e}"))?
-                .find(SocketAddr::is_ipv4)
-                .ok_or_else(|| format!("no IPv4 address for {with_port}"))?;
-            let socket =
-                UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("can't open socket: {e}"))?;
-            let net = Net::new(socket, Some(addr)).map_err(|e| e.to_string())?;
-            Ok((session(Role::Client, format!("Connecting to {addr}...")), Some(net)))
-        }
-        Some(other) => Err(format!("unknown command: {other}")),
-    }
-}
-
 /// Best guess at this machine's LAN address (no packets are actually sent).
-fn lan_ip() -> Option<IpAddr> {
+pub fn lan_ip() -> Option<IpAddr> {
     let s = UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("8.8.8.8:80").ok()?;
     Some(s.local_addr().ok()?.ip())
+}
+
+/// A message for the main menu (why a connection ended, errors).
+#[derive(Resource, Default)]
+pub struct Notice(pub String);
+
+/// Whether this player has pressed Ready in the party screen.
+#[derive(Resource, Default)]
+pub struct LocalReady(pub bool);
+
+/// Requests from the menus.
+#[derive(Event, Clone, Debug)]
+pub enum PartyRequest {
+    Solo,
+    Host(u16),
+    Join(String),
+    /// Leave the party (or solo game) and go back to the main menu.
+    Leave(Option<String>),
 }
 
 pub struct NetPlugin;
@@ -209,15 +265,36 @@ pub struct NetPlugin;
 impl Plugin for NetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Puppets>()
-            .add_systems(Update, host_receive.in_set(Phase::NetIn).run_if(is_host))
-            .add_systems(Update, host_send.in_set(Phase::NetOut).run_if(is_host))
-            .add_systems(Update, client_receive.in_set(Phase::NetIn).run_if(is_client))
-            .add_systems(Update, client_send.in_set(Phase::NetOut).run_if(is_client))
+            .init_resource::<Notice>()
+            .init_resource::<LocalReady>()
+            .add_event::<PartyRequest>()
+            .add_systems(Startup, apply_launch)
+            .add_systems(Update, handle_requests.before(Phase::NetIn))
             .add_systems(
                 Update,
-                move_puppets.in_set(Phase::Present).run_if(is_client),
+                (host_receive.run_if(is_host), client_receive.run_if(is_client))
+                    .in_set(Phase::NetIn)
+                    .run_if(resource_exists::<Net>),
             )
-            .add_systems(Last, say_goodbye.run_if(is_client));
+            .add_systems(
+                Update,
+                (
+                    sync_own_choices,
+                    host_send.run_if(is_host.and(resource_exists::<Net>)),
+                    client_send.run_if(is_client.and(resource_exists::<Net>)),
+                    clear_outbox.run_if(not(is_host)),
+                )
+                    .chain()
+                    .in_set(Phase::NetOut),
+            )
+            .add_systems(
+                Update,
+                move_puppets
+                    .in_set(Phase::Present)
+                    .run_if(is_client.and(in_state(AppState::InGame))),
+            )
+            .add_systems(OnExit(AppState::InGame), forget_puppets)
+            .add_systems(Last, say_goodbye.run_if(resource_exists::<Net>));
     }
 }
 
@@ -229,6 +306,203 @@ fn is_client(session: Res<Session>) -> bool {
     session.role == Role::Client
 }
 
+fn apply_launch(
+    launch: Res<crate::net::Launch>,
+    mut profile: ResMut<Profile>,
+    mut session: ResMut<Session>,
+    mut state: ResMut<MatchState>,
+    mut notice: ResMut<Notice>,
+    mut requests: EventWriter<PartyRequest>,
+) {
+    if let Some(name) = &launch.name {
+        let name: String = name.chars().take(MAX_NAME_LEN).collect();
+        if !name.trim().is_empty() {
+            profile.name = name;
+        }
+    }
+    if let Some(e) = &launch.error {
+        notice.0 = e.clone();
+    }
+    session.autostart = launch.start;
+    match &launch.mode {
+        LaunchMode::Menu => {}
+        LaunchMode::Solo => {
+            requests.write(PartyRequest::Solo);
+        }
+        LaunchMode::Host(port) => {
+            requests.write(PartyRequest::Host(*port));
+        }
+        LaunchMode::Join(addr) => {
+            requests.write(PartyRequest::Join(addr.clone()));
+        }
+    }
+    if let Some(map) = launch.map {
+        state.map = map;
+    }
+}
+
+fn resolve(target: &str) -> Result<SocketAddr, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("Type the host's address first".into());
+    }
+    let with_port = if target.contains(':') {
+        target.to_string()
+    } else {
+        format!("{target}:{DEFAULT_PORT}")
+    };
+    with_port
+        .to_socket_addrs()
+        .map_err(|e| format!("Can't find {with_port}: {e}"))?
+        .find(SocketAddr::is_ipv4)
+        .ok_or_else(|| format!("No IPv4 address for {with_port}"))
+}
+
+fn handle_requests(
+    mut commands: Commands,
+    mut requests: EventReader<PartyRequest>,
+    time: Res<Time>,
+    net: Option<Res<Net>>,
+    profile: Res<Profile>,
+    mut session: ResMut<Session>,
+    mut roster: ResMut<Roster>,
+    mut state: ResMut<MatchState>,
+    mut ready: ResMut<LocalReady>,
+    mut notice: ResMut<Notice>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    for req in requests.read() {
+        let map = state.map;
+        let me = || PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin);
+        ready.0 = false;
+        match req {
+            PartyRequest::Solo => {
+                *session = Session {
+                    role: Role::Solo,
+                    autostart: session.autostart,
+                    ..default()
+                };
+                roster.0 = [(0, me())].into();
+                *state = MatchState::new(map);
+                notice.0.clear();
+                next.set(AppState::Lobby);
+            }
+            PartyRequest::Host(port) => {
+                let socket = match UdpSocket::bind(("0.0.0.0", *port)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        notice.0 = format!("Can't host on port {port}: {e}");
+                        continue;
+                    }
+                };
+                let Ok(n) = Net::new(socket, None) else {
+                    notice.0 = "Couldn't set up networking".into();
+                    continue;
+                };
+                let ip = lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "<your IP>".into());
+                let address = if *port == DEFAULT_PORT {
+                    ip
+                } else {
+                    format!("{ip}:{port}")
+                };
+                *session = Session {
+                    role: Role::Host,
+                    status: format!("Hosting - friends join with address {address}"),
+                    autostart: session.autostart,
+                    ..default()
+                };
+                info!("{}", session.status);
+                commands.insert_resource(n);
+                roster.0 = [(0, me())].into();
+                *state = MatchState::new(map);
+                notice.0.clear();
+                next.set(AppState::Lobby);
+            }
+            PartyRequest::Join(target) => {
+                let addr = match resolve(target) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        notice.0 = e;
+                        continue;
+                    }
+                };
+                let socket = match UdpSocket::bind("0.0.0.0:0") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        notice.0 = format!("Can't open a network socket: {e}");
+                        continue;
+                    }
+                };
+                let Ok(mut n) = Net::new(socket, Some(addr)) else {
+                    notice.0 = "Couldn't set up networking".into();
+                    continue;
+                };
+                n.started_at = Some(time.elapsed_secs_f64());
+                commands.insert_resource(n);
+                *session = Session {
+                    role: Role::Client,
+                    my_id: 0,
+                    status: format!("Connecting to {addr}..."),
+                    connected: false,
+                    autostart: false,
+                };
+                roster.0.clear();
+                *state = MatchState::new(map);
+                notice.0.clear();
+                next.set(AppState::Lobby);
+            }
+            PartyRequest::Leave(reason) => {
+                if let Some(net) = &net {
+                    if let Some(server) = net.server {
+                        net.send_to(&ClientMsg::Bye, server);
+                    }
+                    for addr in net.clients.keys() {
+                        for _ in 0..3 {
+                            net.send_to(&ServerMsg::Closed, *addr);
+                        }
+                    }
+                }
+                commands.remove_resource::<Net>();
+                *session = Session::default();
+                roster.0.clear();
+                *state = MatchState::new(map);
+                notice.0 = reason.clone().unwrap_or_default();
+                next.set(AppState::Menu);
+            }
+        }
+    }
+}
+
+/// Before a match, your character, skin and Ready flag come from the menus.
+fn sync_own_choices(
+    session: Res<Session>,
+    profile: Res<Profile>,
+    ready: Res<LocalReady>,
+    state: Res<MatchState>,
+    mut roster: ResMut<Roster>,
+) {
+    if state.started || session.role == Role::Client {
+        return;
+    }
+    if let Some(me) = roster.0.get_mut(&session.my_id) {
+        if me.character != profile.character {
+            me.character = profile.character;
+        }
+        if me.skin != profile.skin {
+            me.skin = profile.skin;
+        }
+        if me.name != profile.name {
+            me.name = profile.name.clone();
+        }
+        me.ready = ready.0 || session.role == Role::Host;
+    }
+}
+
+/// Effects only need to be kept for clients when hosting.
+fn clear_outbox(mut out: ResMut<FxOutbox>) {
+    out.0.clear();
+}
+
 // ---------------------------------------------------------------------------
 // Host
 // ---------------------------------------------------------------------------
@@ -237,7 +511,9 @@ fn host_receive(
     time: Res<Time>,
     mut net: ResMut<Net>,
     mut roster: ResMut<Roster>,
+    state: Res<MatchState>,
     mut shots: ResMut<ShotQueue>,
+    mut actions: ResMut<ActionQueue>,
 ) {
     let now = time.elapsed_secs_f64();
     for (bytes, addr) in net.drain() {
@@ -245,7 +521,12 @@ fn host_receive(
             continue;
         };
         match msg {
-            ClientMsg::Hello { version, name } => {
+            ClientMsg::Hello {
+                version,
+                name,
+                character,
+                skin,
+            } => {
                 if version != PROTOCOL_VERSION {
                     let reason = "Version mismatch - make sure everyone runs the same build".into();
                     net.send_to(&ServerMsg::Reject { reason }, addr);
@@ -257,23 +538,24 @@ fn host_receive(
                     continue;
                 }
                 if roster.0.len() >= MAX_PLAYERS {
-                    let reason = "The game is full".into();
+                    let reason = "The party is full".into();
                     net.send_to(&ServerMsg::Reject { reason }, addr);
                     continue;
                 }
-                let id = (1..=u8::MAX).find(|id| !roster.0.contains_key(id)).unwrap();
-                let name: String = name.chars().take(MAX_NAME_LEN).collect();
+                let Some(id) = (1..=u8::MAX).find(|id| !roster.0.contains_key(id)) else {
+                    continue;
+                };
+                let mut name: String = name.chars().take(MAX_NAME_LEN).collect();
+                if name.trim().is_empty() {
+                    name = format!("Player {id}");
+                }
                 info!("{name} joined from {addr} as player {id}");
-                roster.0.insert(id, PlayerInfo::new(id, name));
+                let skin = skin.min(crate::data::SKINS.len() as u8 - 1);
+                roster.0.insert(id, PlayerInfo::new(id, name, character, skin));
                 net.clients.insert(addr, Conn { id, last_heard: now });
                 net.send_to(&ServerMsg::Welcome { id }, addr);
             }
-            ClientMsg::Input {
-                pos,
-                yaw,
-                pitch,
-                shots: fired,
-            } => {
+            ClientMsg::Update(u) => {
                 let Some(conn) = net.clients.get_mut(&addr) else {
                     continue;
                 };
@@ -282,20 +564,24 @@ fn host_receive(
                 let Some(p) = roster.0.get_mut(&id) else {
                     continue;
                 };
-                if pos.iter().chain([yaw, pitch].iter()).any(|v| !v.is_finite()) {
-                    continue;
+                if !state.started {
+                    p.character = u.character;
+                    p.skin = u.skin.min(crate::data::SKINS.len() as u8 - 1);
+                    p.ready = u.ready;
                 }
-                p.pos = pos;
-                p.yaw = yaw;
-                p.pitch = pitch;
-                if p.alive {
-                    // Cap per packet so a client can't fire faster than the gun allows.
-                    for (origin, dir) in fired.into_iter().take(4) {
-                        let (o, d) = (Vec3::from_array(origin), Vec3::from_array(dir));
-                        if o.is_finite() && d.is_finite() {
-                            shots.0.push((id, o, d));
-                        }
-                    }
+                if u.pos.iter().chain([u.yaw, u.pitch].iter()).all(|v| v.is_finite()) {
+                    p.pos = u.pos;
+                    p.yaw = u.yaw;
+                    p.pitch = u.pitch;
+                }
+                p.stance = u.stance.min(2);
+                p.active_slot = u.active_slot.min(1);
+                // Cap per packet so a client can't fire faster than any gun allows.
+                for shot in u.shots.into_iter().take(32) {
+                    shots.0.push((id, shot));
+                }
+                for (seq, action) in u.actions.into_iter().take(32) {
+                    actions.0.push((id, seq, action));
                 }
             }
             ClientMsg::Bye => {
@@ -327,36 +613,36 @@ fn host_send(
     mut net: ResMut<Net>,
     roster: Res<Roster>,
     state: Res<MatchState>,
-    mut events: ResMut<TracerEvents>,
-    things: Query<(&Replicated, &Transform, Option<&EnemyLook>)>,
+    mut out: ResMut<FxOutbox>,
+    things: Query<(&Replicated, &Transform, Option<&EnemyStatus>)>,
 ) {
     net.timer += time.delta_secs();
     if net.timer < SNAPSHOT_INTERVAL {
         return;
     }
     net.timer = 0.0;
-    let tracers = std::mem::take(&mut events.0);
+    let fx = std::mem::take(&mut out.0);
     if net.clients.is_empty() {
         return;
     }
     net.tick += 1;
     let snapshot = ServerMsg::Snapshot(Snapshot {
         tick: net.tick,
-        wave: state.wave,
-        game_over: state.game_over,
-        started: state.started,
+        state: state.clone(),
         players: roster.0.values().cloned().collect(),
         entities: things
             .iter()
-            .map(|(r, t, look)| NetEntity {
+            .map(|(r, t, status)| NetEntity {
                 id: r.id,
                 kind: r.kind,
                 pos: t.translation.to_array(),
                 yaw: t.rotation.to_euler(EulerRot::YXZ).0,
-                flash: look.is_some_and(|l| l.flash > 0.0),
+                flags: status.map_or(0, |s| {
+                    (s.flash > 0.0) as u8 | (s.burning as u8) << 1 | (s.slowed as u8) << 2
+                }),
             })
             .collect(),
-        tracers,
+        fx,
     });
     let bytes = encode(&snapshot);
     for addr in net.clients.keys() {
@@ -379,40 +665,62 @@ struct Puppet {
     yaw: f32,
 }
 
+fn forget_puppets(mut puppets: ResMut<Puppets>) {
+    puppets.0.clear();
+}
+
 fn client_send(
     time: Res<Time>,
     mut net: ResMut<Net>,
     session: Res<Session>,
+    profile: Res<Profile>,
+    ready: Res<LocalReady>,
+    roster: Res<Roster>,
     mut shots: ResMut<ShotQueue>,
-    player: Single<(&Transform, &LocalPlayer)>,
+    mut actions: ResMut<ActionQueue>,
 ) {
     let Some(server) = net.server else { return };
-    if !session.connected {
-        // Keep knocking until the host answers.
-        net.timer -= time.delta_secs();
-        if net.timer <= 0.0 {
-            net.timer = 0.5;
-            let hello = ClientMsg::Hello {
-                version: PROTOCOL_VERSION,
-                name: session.my_name.clone(),
-            };
-            net.send_to(&hello, server);
-        }
-        shots.0.clear();
+    // Collect everything fired or done since the last packet.
+    net.shots.extend(shots.0.drain(..).map(|(_, s)| s));
+    net.pending.extend(actions.0.drain(..).map(|(_, seq, a)| (seq, a)));
+
+    net.timer -= time.delta_secs();
+    if net.timer > 0.0 {
         return;
     }
-    let (tf, p) = *player;
-    let input = ClientMsg::Input {
-        pos: (tf.translation - Vec3::Y * EYE_HEIGHT).to_array(),
-        yaw: p.yaw,
-        pitch: p.pitch,
-        shots: shots
-            .0
-            .drain(..)
-            .map(|(_, o, d)| (o.to_array(), d.to_array()))
-            .collect(),
+    if !session.connected {
+        // Keep knocking until the host answers.
+        net.timer = 0.5;
+        net.shots.clear();
+        net.pending.clear();
+        let hello = ClientMsg::Hello {
+            version: PROTOCOL_VERSION,
+            name: profile.name.clone(),
+            character: profile.character,
+            skin: profile.skin,
+        };
+        net.send_to(&hello, server);
+        return;
+    }
+    net.timer = SEND_INTERVAL;
+    let Some(me) = roster.me(&session) else {
+        return;
     };
-    net.send_to(&input, server);
+    let ack = me.action_ack;
+    net.pending.retain(|(seq, _)| *seq > ack);
+    let update = ClientMsg::Update(ClientUpdate {
+        pos: me.pos,
+        yaw: me.yaw,
+        pitch: me.pitch,
+        stance: me.stance,
+        active_slot: me.active_slot,
+        character: profile.character,
+        skin: profile.skin,
+        ready: ready.0,
+        shots: std::mem::take(&mut net.shots),
+        actions: net.pending.iter().take(16).copied().collect(),
+    });
+    net.send_to(&update, server);
 }
 
 fn client_receive(
@@ -422,11 +730,15 @@ fn client_receive(
     mut session: ResMut<Session>,
     mut roster: ResMut<Roster>,
     mut state: ResMut<MatchState>,
-    mut tracers: ResMut<Tracers>,
+    mut fx: ResMut<FxQueue>,
     mut puppets: ResMut<Puppets>,
-    assets: Res<GameAssets>,
+    app_state: Res<State<AppState>>,
+    mut next: ResMut<NextState<AppState>>,
+    mut requests: EventWriter<PartyRequest>,
+    assets: Res<ReplicatedAssets>,
+    meshes: Res<HumanoidMeshes>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut existing: Query<(&mut Puppet, Option<&mut EnemyLook>)>,
+    mut existing: Query<(&mut Puppet, Option<&mut EnemyStatus>)>,
 ) {
     let now = time.elapsed_secs_f64();
     let server = net.server;
@@ -445,10 +757,16 @@ fn client_receive(
                     session.connected = true;
                     session.status = format!("Connected to {}", server.unwrap());
                     net.last_heard = now;
+                    net.timer = 0.0;
                 }
             }
             ServerMsg::Reject { reason } => {
-                session.status = format!("Can't join: {reason}");
+                requests.write(PartyRequest::Leave(Some(format!("Can't join: {reason}"))));
+                return;
+            }
+            ServerMsg::Closed => {
+                requests.write(PartyRequest::Leave(Some("The host closed the party.".into())));
+                return;
             }
             ServerMsg::Snapshot(s) => {
                 if !session.connected {
@@ -463,48 +781,80 @@ fn client_receive(
         }
     }
 
-    if session.connected && now - net.last_heard > TIMEOUT_SECS {
-        session.status = "Lost connection to the host".into();
-    } else if session.connected && session.status.starts_with("Lost") {
-        session.status = format!("Connected to {}", server.unwrap());
+    if !session.connected {
+        if net.started_at.is_some_and(|t| now - t > CONNECT_SECS) {
+            let addr = server.map(|s| s.to_string()).unwrap_or_default();
+            requests.write(PartyRequest::Leave(Some(format!(
+                "Couldn't reach a host at {addr}. Check the address, that they are hosting, and their firewall."
+            ))));
+        }
+        return;
+    }
+    if now - net.last_heard > TIMEOUT_SECS {
+        requests.write(PartyRequest::Leave(Some("Lost connection to the host.".into())));
+        return;
     }
 
     let Some(snap) = latest else { return };
     net.last_tick = snap.tick;
-    state.wave = snap.wave;
-    state.game_over = snap.game_over;
-    state.started = snap.started;
 
     // Take the host's word on everything except where we are standing.
-    let mine = roster.0.get(&session.my_id).map(|p| (p.pos, p.yaw, p.pitch));
+    let mine = roster
+        .0
+        .get(&session.my_id)
+        .map(|p| (p.pos, p.yaw, p.pitch, p.stance, p.active_slot));
     roster.0 = snap.players.into_iter().map(|p| (p.id, p)).collect();
-    if let (Some((pos, yaw, pitch)), Some(me)) = (mine, roster.0.get_mut(&session.my_id)) {
+    if let (Some((pos, yaw, pitch, stance, slot)), Some(me)) = (mine, roster.0.get_mut(&session.my_id)) {
         me.pos = pos;
         me.yaw = yaw;
         me.pitch = pitch;
+        me.stance = stance;
+        me.active_slot = slot;
+    }
+    *state = snap.state;
+
+    // Follow the host between the party screen and the match.
+    let in_game = *app_state.get() == AppState::InGame;
+    if *app_state.get() == AppState::Lobby && state.started && !state.game_over && !state.extracted {
+        next.set(AppState::InGame);
+        return;
+    }
+    if in_game && !state.started {
+        next.set(AppState::Lobby);
+        return;
+    }
+    if !in_game {
+        return;
     }
 
-    for (shooter, start, end) in snap.tracers {
-        if shooter != session.my_id {
-            let start = Vec3::from_array(start) - Vec3::Y * 0.2;
-            tracers.0.push((start, Vec3::from_array(end), 0.06));
+    for f in snap.fx {
+        if let Fx::Tracer { shooter, .. } = &f {
+            if *shooter == session.my_id {
+                continue;
+            }
         }
+        fx.0.push(f);
     }
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for ent in snap.entities {
         seen.insert(ent.id);
         let pos = Vec3::from_array(ent.pos);
         if let Some(&entity) = puppets.0.get(&ent.id) {
-            if let Ok((mut puppet, look)) = existing.get_mut(entity) {
+            if let Ok((mut puppet, status)) = existing.get_mut(entity) {
                 puppet.target = pos;
                 puppet.yaw = ent.yaw;
-                if let (true, Some(mut look)) = (ent.flash, look) {
-                    look.flash = look.flash.max(0.05);
+                if let Some(mut status) = status {
+                    if ent.flags & 1 != 0 {
+                        status.flash = status.flash.max(0.06);
+                    }
+                    status.burning = ent.flags & 2 != 0;
+                    status.slowed = ent.flags & 4 != 0;
                 }
             }
         } else {
-            let entity = spawn_replicated(&mut commands, &assets, &mut materials, ent.id, ent.kind, pos);
+            let entity =
+                spawn_replicated(&mut commands, &assets, &meshes, &mut materials, ent.id, ent.kind, pos);
             commands.entity(entity).insert(Puppet {
                 target: pos,
                 yaw: ent.yaw,
@@ -515,7 +865,9 @@ fn client_receive(
     puppets.0.retain(|id, entity| {
         let keep = seen.contains(id);
         if !keep {
-            commands.entity(*entity).despawn();
+            if let Ok(mut e) = commands.get_entity(*entity) {
+                e.try_despawn();
+            }
         }
         keep
     });
@@ -534,11 +886,14 @@ fn move_puppets(time: Res<Time>, mut puppets: Query<(&Puppet, &mut Transform)>) 
     }
 }
 
-/// Tell the host we're leaving so our character disappears right away.
+/// Tell the others we're leaving so nobody waits for a timeout.
 fn say_goodbye(net: Res<Net>, mut exit: EventReader<AppExit>) {
     if exit.read().next().is_some() {
         if let Some(server) = net.server {
             net.send_to(&ClientMsg::Bye, server);
+        }
+        for addr in net.clients.keys() {
+            net.send_to(&ServerMsg::Closed, *addr);
         }
     }
 }

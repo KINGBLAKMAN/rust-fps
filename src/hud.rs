@@ -1,66 +1,100 @@
-//! Health, ammo, score, scoreboard, messages and the game-over screen.
+//! The in-game HUD: crosshair, health, level and XP, points, ammo, ability
+//! cooldowns, perks, prompts for the box and perk machines, power-up and
+//! round banners, the scoreboard, the level-up picker and the end screen.
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 
-use crate::player::{Weapon, MAG_SIZE};
-use crate::{cursor_locked, MatchState, Phase, Role, Roster, Session};
+use crate::config::{key_name, Action, Settings};
+use crate::data::{elements_in, gun_def, has_perk, skin_def, xp_to_next, Perk, BOX_COST, MAX_LEVEL};
+use crate::game::{match_ended, MatchResult, Overlay};
+use crate::maps::{map_name, CurrentMap};
+use crate::ui::{button, UiAction, ACCENT, PANEL};
+use crate::weapons::Loadout;
+use crate::{AppState, BoxState, Enemy, InGameEntity, MatchState, Phase, Roster, Session};
+
+const INTERACT_RANGE: f32 = 2.4;
 
 pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HudState>()
-            .add_systems(Startup, setup_hud)
-            .add_systems(Update, update_hud.in_set(Phase::Present));
+        app.add_systems(OnEnter(AppState::InGame), spawn_hud).add_systems(
+            Update,
+            (
+                update_hud,
+                update_prompt,
+                update_banner,
+                update_scoreboard,
+                upgrade_panel,
+                end_screen,
+            )
+                .in_set(Phase::Present)
+                .run_if(in_state(AppState::InGame)),
+        );
     }
 }
 
-#[derive(Resource, Default)]
-struct HudState {
-    last_health: f32,
-    damage_flash: f32,
-    last_wave: u32,
-    banner_timer: f32,
+/// Which HUD text a node shows.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum HudText {
+    Round,
+    Info,
+    Health,
+    Level,
+    Perks,
+    Points,
+    Gun,
+    Ammo,
+    OtherGun,
+    Ability(usize),
+}
+
+/// Which bar a node fills.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+enum HudFill {
+    Health,
+    Xp,
+    Ability(usize),
 }
 
 #[derive(Component)]
-struct HealthText;
+struct AbilityBox(usize);
 #[derive(Component)]
-struct AmmoText;
+struct Hitmarker;
 #[derive(Component)]
-struct ScoreText;
+struct PromptText;
 #[derive(Component)]
-struct BoardText;
+struct BannerText;
 #[derive(Component)]
-struct StatusText;
+struct HurtFlash;
 #[derive(Component)]
-struct CenterText;
+struct Scoreboard;
 #[derive(Component)]
-struct DamageOverlay;
+struct ScoreboardText;
 #[derive(Component)]
-struct GameOverScreen;
+struct UpgradePanel;
 #[derive(Component)]
-struct GameOverText;
+struct EndPanel;
 
-fn font(size: f32) -> TextFont {
-    TextFont {
-        font_size: size,
-        ..default()
-    }
+fn text(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
+    (
+        Text::new(value),
+        TextFont {
+            font_size: size,
+            ..default()
+        },
+        TextColor(color),
+    )
 }
 
-fn absolute() -> Node {
-    Node {
-        position_type: PositionType::Absolute,
-        ..default()
-    }
-}
+fn spawn_hud(mut commands: Commands) {
+    let white = Color::WHITE;
+    let dim = Color::srgb(0.75, 0.78, 0.85);
 
-fn setup_hud(mut commands: Commands) {
-    // Red damage vignette (full screen)
+    // Red flash when you get hurt.
     commands.spawn((
-        DamageOverlay,
+        InGameEntity,
+        HurtFlash,
         Node {
             position_type: PositionType::Absolute,
             width: Val::Percent(100.0),
@@ -68,264 +102,806 @@ fn setup_hud(mut commands: Commands) {
             ..default()
         },
         BackgroundColor(Color::srgba(0.8, 0.0, 0.0, 0.0)),
+        Pickable::IGNORE,
     ));
 
-    // Crosshair
-    commands
-        .spawn(Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|p| {
-            for (w, h) in [(18.0, 2.0), (2.0, 18.0)] {
-                p.spawn((
-                    Node {
-                        width: Val::Px(w),
-                        height: Val::Px(h),
-                        position_type: PositionType::Absolute,
-                        ..default()
-                    },
-                    BackgroundColor(Color::WHITE),
-                ));
-            }
-        });
-
-    commands.spawn((
-        HealthText,
-        Text::new(""),
-        font(32.0),
-        TextColor(Color::srgb(0.4, 1.0, 0.4)),
-        Node {
-            left: Val::Px(20.0),
-            bottom: Val::Px(16.0),
-            ..absolute()
-        },
-    ));
-    commands.spawn((
-        AmmoText,
-        Text::new(""),
-        font(32.0),
-        TextColor(Color::WHITE),
-        Node {
-            right: Val::Px(20.0),
-            bottom: Val::Px(16.0),
-            ..absolute()
-        },
-    ));
-    commands.spawn((
-        ScoreText,
-        Text::new(""),
-        font(26.0),
-        TextColor(Color::WHITE),
-        Node {
-            left: Val::Px(20.0),
-            top: Val::Px(14.0),
-            ..absolute()
-        },
-    ));
-    commands.spawn((
-        BoardText,
-        Text::new(""),
-        font(18.0),
-        TextColor(Color::srgb(0.9, 0.9, 0.9)),
-        TextLayout::new_with_justify(JustifyText::Right),
-        Node {
-            right: Val::Px(20.0),
-            top: Val::Px(14.0),
-            ..absolute()
-        },
-    ));
-    commands.spawn((
-        StatusText,
-        Text::new(""),
-        font(16.0),
-        TextColor(Color::srgb(0.85, 0.9, 1.0)),
-        Node {
-            left: Val::Px(20.0),
-            top: Val::Px(48.0),
-            ..absolute()
-        },
-    ));
-    commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            top: Val::Percent(30.0),
-            justify_content: JustifyContent::Center,
-            ..absolute()
-        })
-        .with_children(|p| {
-            p.spawn((
-                CenterText,
-                Text::new(""),
-                font(40.0),
-                TextColor(Color::srgb(1.0, 0.9, 0.4)),
-                TextLayout::new_with_justify(JustifyText::Center),
-            ));
-        });
-
+    // Crosshair and hit marker.
     commands
         .spawn((
-            GameOverScreen,
+            InGameEntity,
             Node {
                 position_type: PositionType::Absolute,
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
-                flex_direction: FlexDirection::Column,
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                row_gap: Val::Px(16.0),
-                display: Display::None,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.7)),
+            Pickable::IGNORE,
         ))
-        .with_children(|p| {
-            p.spawn((
-                Text::new("GAME OVER"),
-                font(72.0),
-                TextColor(Color::srgb(0.9, 0.15, 0.15)),
+        .with_children(|c| {
+            for (w, h, x, y) in [
+                (2.0, 7.0, 0.0, -9.0),
+                (2.0, 7.0, 0.0, 9.0),
+                (7.0, 2.0, -9.0, 0.0),
+                (7.0, 2.0, 9.0, 0.0),
+                (2.0, 2.0, 0.0, 0.0),
+            ] {
+                c.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        width: Val::Px(w),
+                        height: Val::Px(h),
+                        margin: UiRect {
+                            left: Val::Px(x * 2.0),
+                            top: Val::Px(y * 2.0),
+                            ..default()
+                        },
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
+                ));
+            }
+            c.spawn((
+                Hitmarker,
+                text("X", 26.0, Color::WHITE),
+                Node {
+                    position_type: PositionType::Absolute,
+                    ..default()
+                },
+                Visibility::Hidden,
             ));
-            p.spawn((
-                GameOverText,
-                Text::new(""),
-                font(28.0),
+        });
+
+    // Top left: round and info.
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(18.0),
+                top: Val::Px(12.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            c.spawn((HudText::Round, text("", 44.0, Color::srgb(0.85, 0.12, 0.1))));
+            c.spawn((HudText::Info, text("", 17.0, dim)));
+        });
+
+    // Top centre banner and centre prompt.
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                top: Val::Px(70.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                BannerText,
+                text("", 30.0, ACCENT),
                 TextLayout::new_with_justify(JustifyText::Center),
             ));
         });
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                top: Val::Percent(58.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                PromptText,
+                text("", 20.0, white),
+                TextLayout::new_with_justify(JustifyText::Center),
+            ));
+        });
+
+    // Bottom left: health, level, perks.
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(18.0),
+                bottom: Val::Px(16.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            c.spawn((HudText::Perks, text("", 15.0, white)));
+            c.spawn((HudText::Level, text("", 16.0, dim)));
+            bar(c, 240.0, 6.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
+            c.spawn((HudText::Health, text("", 18.0, white)));
+            bar(c, 240.0, 14.0, Color::srgb(0.25, 0.85, 0.35), HudFill::Health);
+        });
+
+    // Bottom centre: abilities.
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                bottom: Val::Px(16.0),
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(10.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|c| {
+            for i in 0..3 {
+                c.spawn((
+                    AbilityBox(i),
+                    Node {
+                        width: Val::Px(165.0),
+                        height: Val::Px(46.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.05, 0.06, 0.1, 0.75)),
+                    BorderColor(Color::srgba(1.0, 1.0, 1.0, 0.3)),
+                    BorderRadius::all(Val::Px(6.0)),
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        HudFill::Ability(i),
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(0.0),
+                            bottom: Val::Px(0.0),
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(0.0),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.3, 0.6, 1.0, 0.35)),
+                    ));
+                    b.spawn((
+                        HudText::Ability(i),
+                        text("", 13.0, white),
+                        TextLayout::new_with_justify(JustifyText::Center),
+                    ));
+                });
+            }
+        });
+
+    // Bottom right: points and guns.
+    commands
+        .spawn((
+            InGameEntity,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(18.0),
+                bottom: Val::Px(16.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+        ))
+        .with_children(|c| {
+            c.spawn((HudText::Points, text("", 30.0, Color::srgb(1.0, 0.85, 0.3))));
+            c.spawn((HudText::OtherGun, text("", 15.0, dim)));
+            c.spawn((HudText::Gun, text("", 18.0, white)));
+            c.spawn((HudText::Ammo, text("", 34.0, white)));
+        });
+
+    // Scoreboard (hold Tab).
+    commands
+        .spawn((
+            InGameEntity,
+            Scoreboard,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                top: Val::Px(120.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            Visibility::Hidden,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Node {
+                    padding: UiRect::all(Val::Px(16.0)),
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+                BorderRadius::all(Val::Px(8.0)),
+            ))
+            .with_children(|p| {
+                p.spawn((ScoreboardText, text("", 17.0, white)));
+            });
+        });
 }
 
+fn bar(c: &mut ChildSpawnerCommands, width: f32, height: f32, color: Color, marker: impl Component) {
+    c.spawn((
+        Node {
+            width: Val::Px(width),
+            height: Val::Px(height),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+        BorderRadius::all(Val::Px(3.0)),
+    ))
+    .with_children(|b| {
+        b.spawn((
+            marker,
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            BackgroundColor(color),
+            BorderRadius::all(Val::Px(3.0)),
+        ));
+    });
+}
+
+fn set(text: &mut Text, value: String) {
+    if text.0 != value {
+        text.0 = value;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn update_hud(
     time: Res<Time>,
-    mut hud: ResMut<HudState>,
     session: Res<Session>,
     roster: Res<Roster>,
     state: Res<MatchState>,
-    weapon: Res<Weapon>,
-    window: Single<&Window, With<PrimaryWindow>>,
-    mut texts: ParamSet<(
-        Single<(&mut Text, &mut TextColor), With<HealthText>>,
-        Single<&mut Text, With<AmmoText>>,
-        Single<&mut Text, With<ScoreText>>,
-        Single<&mut Text, With<BoardText>>,
-        Single<&mut Text, With<StatusText>>,
-        Single<&mut Text, With<CenterText>>,
-        Single<&mut Text, With<GameOverText>>,
-    )>,
-    mut overlay: Single<&mut BackgroundColor, With<DamageOverlay>>,
-    mut game_over: Single<&mut Node, With<GameOverScreen>>,
+    loadout: Res<Loadout>,
+    settings: Res<Settings>,
+    enemies: Query<(), With<Enemy>>,
+    mut texts: Query<(&HudText, &mut Text)>,
+    mut fills: Query<(&HudFill, &mut Node, &mut BackgroundColor)>,
+    mut ability_box: Query<(&AbilityBox, &mut BorderColor)>,
+    hitmarker: Single<(&mut Visibility, &mut TextColor), With<Hitmarker>>,
+    mut hurt: Single<&mut BackgroundColor, (With<HurtFlash>, Without<HudFill>)>,
+    mut last_health: Local<f32>,
+    mut flash: Local<f32>,
 ) {
-    let dt = time.delta_secs();
-    let me = roster.me(&session);
-    let hp = me.map(|m| m.health).unwrap_or(0.0);
-    let alive = me.is_none_or(|m| m.alive);
+    let Some(me) = roster.me(&session) else {
+        return;
+    };
+    let enemy_count = enemies.iter().count() as u32;
+    let max = me.max_health();
+    let abilities = me.character.abilities();
+    let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
+    let ready = |i: usize| {
+        if i == 2 {
+            me.ult_charge >= 100.0
+        } else {
+            me.cooldowns[i] <= 0.0
+        }
+    };
 
-    // Flash red whenever our health drops.
-    if hp < hud.last_health {
-        hud.damage_flash = 0.4;
+    for (kind, mut t) in &mut texts {
+        let value = match *kind {
+            HudText::Round => {
+                if state.round == 0 {
+                    String::new()
+                } else {
+                    format!("{}", state.round)
+                }
+            }
+            HudText::Info => {
+                let mut info = map_name(state.map).to_string();
+                if state.round > 0 {
+                    info += &format!("\nEnemies left: {}", enemy_count + state.to_spawn);
+                }
+                if state.insta_kill > 0.0 {
+                    info += &format!("\nINSTA KILL {:.0}s", state.insta_kill);
+                }
+                if state.double_points > 0.0 {
+                    info += &format!("\nDOUBLE POINTS {:.0}s", state.double_points);
+                }
+                if me.overdrive > 0.0 {
+                    info += &format!("\nOVERDRIVE {:.0}s", me.overdrive);
+                }
+                if !session.status.is_empty() && session.role == crate::Role::Host {
+                    info += &format!("\n{}", session.status);
+                }
+                info
+            }
+            HudText::Health => format!("{}  {:.0} / {:.0}", me.name, me.health.max(0.0), max),
+            HudText::Level => {
+                if me.level >= MAX_LEVEL {
+                    format!("Level {} (max)", me.level)
+                } else {
+                    format!("Level {}  -  {} / {} XP", me.level, me.xp, xp_to_next(me.level))
+                }
+            }
+            HudText::Perks => {
+                let perks: Vec<&str> = Perk::ALL
+                    .iter()
+                    .filter(|p| has_perk(me.perks, **p))
+                    .map(|p| p.name())
+                    .collect();
+                let mut lines = Vec::new();
+                if !perks.is_empty() {
+                    lines.push(format!("Perks: {}", perks.join(", ")));
+                }
+                let guns: Vec<&str> = elements_in(me.gun_elements).map(|e| e.name()).collect();
+                if !guns.is_empty() {
+                    lines.push(format!("Gun elements: {}", guns.join(", ")));
+                }
+                let abil: Vec<&str> = elements_in(me.ability_elements).map(|e| e.name()).collect();
+                if !abil.is_empty() {
+                    lines.push(format!("Ability elements: {}", abil.join(", ")));
+                }
+                lines.join("\n")
+            }
+            HudText::Points => format!("{} pts", me.points),
+            HudText::Gun => loadout
+                .current()
+                .map(|g| format!("{}  ({})", gun_def(g.id).name, skin_def(me.skin).name))
+                .unwrap_or_default(),
+            HudText::Ammo => match loadout.current() {
+                Some(_) if me.overdrive > 0.0 => "INFINITE".to_string(),
+                Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
+                Some(g) => format!("{} / {}", g.mag, g.reserve),
+                None => String::new(),
+            },
+            HudText::OtherGun => loadout.slots[1 - loadout.active]
+                .map(|g| {
+                    format!(
+                        "[{}] {}",
+                        key_name(settings.key(Action::SwapWeapon)),
+                        gun_def(g.id).name
+                    )
+                })
+                .unwrap_or_else(|| "Second slot empty - get a gun from the mystery box".into()),
+            HudText::Ability(i) => {
+                let status = if i == 2 {
+                    if ready(2) {
+                        "READY".to_string()
+                    } else {
+                        format!("{:.0}%", me.ult_charge)
+                    }
+                } else if ready(i) {
+                    "READY".to_string()
+                } else {
+                    format!("{:.1}s", me.cooldowns[i])
+                };
+                format!(
+                    "{} {}\n[{}] {}",
+                    abilities[i].0,
+                    "I".repeat(me.tiers[i] as usize + 1),
+                    key_name(settings.key(keys[i])),
+                    status
+                )
+            }
+        };
+        set(&mut t, value);
     }
-    hud.last_health = hp;
-    hud.damage_flash = (hud.damage_flash - dt).max(0.0);
-    overlay.0 = Color::srgba(0.8, 0.0, 0.0, hud.damage_flash * 0.8);
 
-    if state.wave != hud.last_wave {
-        hud.last_wave = state.wave;
-        if state.wave > 0 {
-            hud.banner_timer = 2.5;
+    for (kind, mut node, mut bg) in &mut fills {
+        match *kind {
+            HudFill::Health => {
+                node.width = Val::Percent((me.health / max * 100.0).clamp(0.0, 100.0));
+            }
+            HudFill::Xp => {
+                node.width = Val::Percent(if me.level >= MAX_LEVEL {
+                    100.0
+                } else {
+                    (me.xp as f32 / xp_to_next(me.level) as f32 * 100.0).clamp(0.0, 100.0)
+                });
+            }
+            HudFill::Ability(i) => {
+                let frac = if i == 2 {
+                    me.ult_charge / 100.0
+                } else {
+                    let cd = crate::data::ability_cooldown(me.character, i, me.tiers[i]);
+                    1.0 - me.cooldowns[i] / cd
+                };
+                node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
+                bg.0 = if ready(i) {
+                    Color::srgba(0.3, 0.9, 0.5, 0.35)
+                } else {
+                    Color::srgba(0.3, 0.6, 1.0, 0.3)
+                };
+            }
         }
     }
-    hud.banner_timer -= dt;
-
-    {
-        let mut health = texts.p0();
-        let (text, color) = &mut *health;
-        text.0 = format!("HP {:.0}", hp);
-        color.0 = if hp > 60.0 {
-            Color::srgb(0.4, 1.0, 0.4)
-        } else if hp > 30.0 {
-            Color::srgb(1.0, 0.85, 0.3)
+    for (AbilityBox(i), mut border) in &mut ability_box {
+        border.0 = if ready(*i) {
+            Color::srgba(0.4, 1.0, 0.6, 0.8)
         } else {
-            Color::srgb(1.0, 0.3, 0.3)
+            Color::srgba(1.0, 1.0, 1.0, 0.25)
         };
     }
 
-    texts.p1().0 = if weapon.reload_timer > 0.0 {
-        "RELOADING...".into()
+    let (mut vis, mut color) = hitmarker.into_inner();
+    *vis = if loadout.hitmarker > 0.0 {
+        Visibility::Inherited
     } else {
-        format!("{} / {}", weapon.ammo, MAG_SIZE)
+        Visibility::Hidden
+    };
+    color.0 = if loadout.headshot {
+        Color::srgb(1.0, 0.25, 0.2)
+    } else {
+        Color::WHITE
     };
 
-    let (score, kills) = me.map(|m| (m.score, m.kills)).unwrap_or_default();
-    texts.p2().0 = format!("Score {score}   Kills {kills}   Wave {}", state.wave);
-
-    // Scoreboard, only interesting with company.
-    texts.p3().0 = if roster.0.len() > 1 {
-        let mut players: Vec<_> = roster.0.values().collect();
-        players.sort_by(|a, b| b.score.cmp(&a.score));
-        players
-            .iter()
-            .map(|p| {
-                let hp = if p.alive {
-                    format!("{:>3.0} HP", p.health)
-                } else {
-                    "DOWN".into()
-                };
-                let you = if p.id == session.my_id { " (you)" } else { "" };
-                format!("{}{}  {}  {} kills  {}", p.name, you, hp, p.kills, p.score)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        String::new()
-    };
-
-    texts.p4().0 = session.status.clone();
-
-    texts.p5().0 = if state.game_over {
-        String::new()
-    } else if !session.connected {
-        session.status.clone()
-    } else if !cursor_locked(&window) {
-        match (session.role, state.started) {
-            (Role::Solo, true) => "PAUSED - click to play".into(),
-            (Role::Host, false) => "Click to start\nFriends can join now".into(),
-            _ => "Click to play".into(),
-        }
-    } else if !state.started {
-        "Waiting for the host to start...".into()
-    } else if !alive {
-        "YOU'RE DOWN\nYou'll respawn next wave".into()
-    } else if hud.banner_timer > 0.0 {
-        format!("WAVE {}", state.wave)
-    } else if weapon.ammo == 0 && weapon.reload_timer <= 0.0 {
-        "Press R to reload".into()
-    } else {
-        String::new()
-    };
-
-    game_over.display = if state.game_over {
-        Display::Flex
-    } else {
-        Display::None
-    };
-    if state.game_over {
-        let mut players: Vec<_> = roster.0.values().collect();
-        players.sort_by(|a, b| b.score.cmp(&a.score));
-        let mut lines: Vec<String> = vec![format!("Your team reached wave {}", state.wave), String::new()];
-        lines.extend(
-            players
-                .iter()
-                .map(|p| format!("{}   {} kills   {} pts", p.name, p.kills, p.score)),
-        );
-        lines.push(String::new());
-        lines.push(if session.is_authority() {
-            "Press Enter to play again".into()
-        } else {
-            "Waiting for the host to restart...".into()
-        });
-        texts.p6().0 = lines.join("\n");
+    if me.health < *last_health - 0.5 {
+        *flash = 0.35;
     }
+    *last_health = me.health;
+    *flash = (*flash - time.delta_secs()).max(0.0);
+    let downed = if me.alive { 0.0 } else { 0.25 };
+    hurt.0 = Color::srgba(0.8, 0.0, 0.0, (*flash).max(downed));
+}
+
+fn update_prompt(
+    session: Res<Session>,
+    roster: Res<Roster>,
+    state: Res<MatchState>,
+    settings: Res<Settings>,
+    map: Option<Res<CurrentMap>>,
+    overlay: Res<Overlay>,
+    window: Single<&Window, With<bevy::window::PrimaryWindow>>,
+    mut prompt: Single<&mut Text, With<PromptText>>,
+) {
+    let (Some(me), Some(map)) = (roster.me(&session), map) else {
+        return;
+    };
+    let key = key_name(settings.key(Action::Interact));
+    let mut msg = String::new();
+    if match_ended(&state) {
+        // The end screen says it all.
+    } else if *overlay == Overlay::None && !crate::cursor_locked(&window) {
+        msg = if session.role == crate::Role::Solo {
+            "Paused - click to play".into()
+        } else {
+            "Click to play".into()
+        };
+    } else if !me.alive {
+        msg = "You are down! You'll get back up next round if a teammate survives.".into();
+    } else {
+        let feet = me.feet().with_y(0.0);
+        let box_pos = map.0.box_spots[(state.box_spot as usize).min(4)];
+        if feet.distance(box_pos) < INTERACT_RANGE {
+            msg = match state.box_state {
+                BoxState::Idle => {
+                    if me.points >= BOX_COST {
+                        format!("[{key}] Mystery Box - random gun ({BOX_COST} pts)")
+                    } else {
+                        format!("Mystery Box - need {BOX_COST} pts")
+                    }
+                }
+                BoxState::Rolling { player, .. } => {
+                    if player == me.id {
+                        "Rolling...".into()
+                    } else {
+                        "Someone is using the box".into()
+                    }
+                }
+                BoxState::Offer { player, gun, .. } => {
+                    let def = gun_def(gun);
+                    let rare = if def.rare { "RARE! " } else { "" };
+                    if player == me.id {
+                        let slot = if me.guns[1].is_none() {
+                            "into your empty slot".to_string()
+                        } else {
+                            let cur = me.guns[me.active_slot as usize].map(|g| gun_def(g).name).unwrap_or("");
+                            format!("replacing your {cur}")
+                        };
+                        format!("[{key}] Take {rare}{} ({slot})", def.name)
+                    } else {
+                        format!("{rare}{} - not yours", def.name)
+                    }
+                }
+                BoxState::Moving { .. } => "The box flew away! Find where it landed.".into(),
+            };
+        }
+        for (spot, perk) in map.0.perk_spots.iter().zip(Perk::ALL) {
+            if feet.distance(*spot) < INTERACT_RANGE {
+                msg = if has_perk(me.perks, perk) {
+                    format!("{} - you already have it", perk.name())
+                } else if me.points >= perk.cost() {
+                    format!(
+                        "[{key}] Buy {} ({} pts)\n{}",
+                        perk.name(),
+                        perk.cost(),
+                        perk.description()
+                    )
+                } else {
+                    format!(
+                        "{} - need {} pts\n{}",
+                        perk.name(),
+                        perk.cost(),
+                        perk.description()
+                    )
+                };
+            }
+        }
+        if msg.is_empty() && !me.choices.is_empty() {
+            msg = format!(
+                "LEVEL UP! Press [{}] to pick an upgrade",
+                key_name(settings.key(Action::Upgrades))
+            );
+        }
+    }
+    set(&mut prompt, msg);
+}
+
+fn update_banner(
+    time: Res<Time>,
+    state: Res<MatchState>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    map: Option<Res<CurrentMap>>,
+    banner: Single<(&mut Text, &mut TextColor), With<BannerText>>,
+    mut last_seq: Local<Option<u32>>,
+    mut show: Local<f32>,
+) {
+    let (mut text, mut color) = banner.into_inner();
+    if *last_seq != Some(state.powerup_seq) {
+        if last_seq.is_some() && state.last_powerup.is_some() {
+            *show = 2.5;
+        }
+        *last_seq = Some(state.powerup_seq);
+    }
+    *show -= time.delta_secs();
+
+    if match_ended(&state) {
+        set(&mut text, String::new());
+        return;
+    }
+    if *show > 0.0 {
+        if let Some(p) = state.last_powerup {
+            set(&mut text, format!("{}!", p.name().to_uppercase()));
+            color.0 = p.color();
+            return;
+        }
+    }
+    if state.extraction > 0.0 {
+        let dist = match (roster.me(&session), &map) {
+            (Some(me), Some(map)) => me.feet().with_y(0.0).distance(map.0.extraction),
+            _ => 0.0,
+        };
+        let hold = if state.extract_hold > 0.0 {
+            format!("\nExtracting... {:.1} / 5.0", state.extract_hold)
+        } else {
+            String::new()
+        };
+        set(
+            &mut text,
+            format!(
+                "EXTRACTION OPEN {:.0}s - whole team to the green beam ({:.0}m)\nor stay and keep fighting{hold}",
+                state.extraction, dist
+            ),
+        );
+        color.0 = Color::srgb(0.3, 1.0, 0.5);
+        return;
+    }
+    if state.round == 0 {
+        set(&mut text, format!("Get ready... {:.0}", state.intermission.max(0.0).ceil()));
+        color.0 = ACCENT;
+        return;
+    }
+    if state.to_spawn == 0 && state.intermission > 0.0 && state.intermission < 4.5 {
+        set(&mut text, format!("Round {} cleared!", state.round));
+        color.0 = ACCENT;
+        return;
+    }
+    set(&mut text, String::new());
+}
+
+fn update_scoreboard(
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
+    state: Res<MatchState>,
+    roster: Res<Roster>,
+    mut board: Single<&mut Visibility, With<Scoreboard>>,
+    mut text: Single<&mut Text, With<ScoreboardText>>,
+) {
+    let show = keys.pressed(settings.key(Action::Scoreboard)) && !match_ended(&state);
+    **board = if show { Visibility::Inherited } else { Visibility::Hidden };
+    if !show {
+        return;
+    }
+    let mut s = format!(
+        "{:<16} {:<8} {:>5} {:>6} {:>7} {:>7}\n",
+        "Player", "Class", "Level", "Kills", "Score", "Points"
+    );
+    let mut players: Vec<_> = roster.0.values().collect();
+    players.sort_by_key(|p| std::cmp::Reverse(p.score));
+    for p in players {
+        let down = if p.alive { "" } else { " (down)" };
+        s += &format!(
+            "{:<16} {:<8} {:>5} {:>6} {:>7} {:>7}{down}\n",
+            p.name,
+            p.character.name(),
+            p.level,
+            p.kills,
+            p.score,
+            p.points
+        );
+    }
+    set(&mut text, s);
+}
+
+/// The level-up picker: three choices as buttons. Rebuilt when they change.
+fn upgrade_panel(
+    mut commands: Commands,
+    overlay: Res<Overlay>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    panels: Query<Entity, With<UpgradePanel>>,
+    mut shown: Local<Option<Vec<crate::data::Upgrade>>>,
+) {
+    let me = roster.me(&session);
+    let want = (*overlay == Overlay::Upgrades)
+        .then(|| me.map(|m| m.choices.clone()))
+        .flatten()
+        .filter(|c| !c.is_empty());
+    if *shown == want {
+        return;
+    }
+    *shown = want.clone();
+    for e in &panels {
+        commands.entity(e).despawn();
+    }
+    let (Some(choices), Some(me)) = (want, me) else {
+        return;
+    };
+    commands
+        .spawn((
+            InGameEntity,
+            UpgradePanel,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(10.0),
+                    padding: UiRect::all(Val::Px(24.0)),
+                    min_width: Val::Px(520.0),
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+                BorderRadius::all(Val::Px(10.0)),
+            ))
+            .with_children(|p| {
+                p.spawn(text(format!("LEVEL {} - PICK AN UPGRADE", me.level), 28.0, ACCENT));
+                let left = if me.pending_picks > 1 {
+                    format!("{} picks waiting", me.pending_picks)
+                } else {
+                    "Every 5 levels you get a pick. Levels also add damage.".into()
+                };
+                p.spawn(text(left, 16.0, Color::srgb(0.7, 0.75, 0.85)));
+                for (i, c) in choices.iter().enumerate() {
+                    button(p, c.label(me.character, me.tiers), UiAction::ChooseUpgrade(i as u8));
+                }
+                p.spawn(text("Esc or B to close (you can pick later)", 14.0, Color::srgb(0.6, 0.6, 0.7)));
+            });
+        });
+}
+
+fn end_screen(
+    mut commands: Commands,
+    state: Res<MatchState>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    result: Res<MatchResult>,
+    profile: Res<crate::config::Profile>,
+    panels: Query<Entity, With<EndPanel>>,
+    mut shown: Local<bool>,
+) {
+    let want = match_ended(&state) && result.awarded;
+    if want == *shown {
+        return;
+    }
+    *shown = want;
+    for e in &panels {
+        commands.entity(e).despawn();
+    }
+    if !want {
+        return;
+    }
+    let me = roster.me(&session);
+    let (title, color) = if state.extracted {
+        ("EXTRACTED!", Color::srgb(0.3, 1.0, 0.5))
+    } else {
+        ("GAME OVER", Color::srgb(0.95, 0.2, 0.15))
+    };
+    commands
+        .spawn((
+            InGameEntity,
+            EndPanel,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(10.0),
+                    padding: UiRect::all(Val::Px(28.0)),
+                    min_width: Val::Px(460.0),
+                    ..default()
+                },
+                BackgroundColor(PANEL),
+                BorderRadius::all(Val::Px(10.0)),
+            ))
+            .with_children(|p| {
+                p.spawn(text(title, 54.0, color));
+                p.spawn(text(
+                    format!("Rounds survived: {}", result.round),
+                    22.0,
+                    Color::WHITE,
+                ));
+                if let Some(me) = me {
+                    p.spawn(text(
+                        format!(
+                            "Kills {}   Score {}   Level {}",
+                            me.kills, me.score, me.level
+                        ),
+                        18.0,
+                        Color::srgb(0.8, 0.82, 0.9),
+                    ));
+                }
+                if result.new_best {
+                    p.spawn(text("New personal best!", 18.0, ACCENT));
+                }
+                let spins = if result.spins > 0 {
+                    let bonus = if result.extracted { " (doubled for extracting)" } else { "" };
+                    format!("+{} gacha spins{bonus}", result.spins)
+                } else {
+                    "No spins this time - reach round 5 to earn spins".into()
+                };
+                p.spawn(text(spins, 22.0, Color::srgb(1.0, 0.8, 0.3)));
+                p.spawn(text(
+                    format!("You have {} spins. Use them in Gun Skins on the main menu.", profile.spins),
+                    15.0,
+                    Color::srgb(0.7, 0.72, 0.8),
+                ));
+                if session.is_authority() {
+                    button(p, "Play again", UiAction::BackToLobby);
+                } else {
+                    p.spawn(text("Waiting for the host to start again...", 16.0, Color::srgb(0.7, 0.75, 0.85)));
+                }
+                button(p, "Quit to main menu", UiAction::Leave);
+            });
+        });
 }
