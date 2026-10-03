@@ -455,7 +455,7 @@ fn update_hud(
             HudText::Points => format!("{} pts", me.points),
             HudText::Gun => loadout
                 .current()
-                .map(|g| format!("{}  ({})", gun_def(g.id).name, skin_def(me.skin).name))
+                .map(|g| format!("{}  ({})", gun_def(g.id).name, skin_def(me.skin_for(g.id)).name))
                 .unwrap_or_default(),
             HudText::Ammo => match loadout.current() {
                 Some(_) if me.overdrive > 0.0 => "INFINITE".to_string(),
@@ -885,14 +885,24 @@ fn end_screen(
                     p.spawn(text("New personal best!", 18.0, ACCENT));
                 }
                 let spins = if result.spins > 0 {
-                    let bonus = if result.extracted { " (doubled for extracting)" } else { "" };
-                    format!("+{} gacha spins{bonus}", result.spins)
+                    format!("+{} gacha spins", result.spins)
                 } else {
                     "No spins this time - reach round 5 to earn spins".into()
                 };
                 p.spawn(text(spins, 22.0, Color::srgb(1.0, 0.8, 0.3)));
+                if result.premium_quarters > 0 {
+                    p.spawn(text(
+                        format!("+{} premium spin", crate::config::quarters_text(result.premium_quarters)),
+                        20.0,
+                        Color::srgb(1.0, 0.55, 0.9),
+                    ));
+                }
                 p.spawn(text(
-                    format!("You have {} spins. Use them in Gun Skins on the main menu.", profile.spins),
+                    format!(
+                        "You have {} spins and {} premium spins. Open crates in Gun Skins on the main menu.",
+                        profile.spins,
+                        crate::config::quarters_text(profile.premium_quarters)
+                    ),
                     15.0,
                     Color::srgb(0.7, 0.72, 0.8),
                 ));

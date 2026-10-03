@@ -9,15 +9,21 @@ mod config;
 mod data;
 mod fx;
 mod game;
+mod gunmodels;
+mod hands;
 mod humanoid;
+mod kit;
 mod hud;
 mod maps;
 mod nav;
 mod net;
 mod physics;
 mod player;
+mod props;
 mod sim;
+mod skins;
 mod ui;
+mod viewmodel;
 mod weapons;
 
 use bevy::prelude::*;
@@ -106,6 +112,8 @@ pub struct PlayerInfo {
     pub name: String,
     pub character: Character,
     pub skin: u8,
+    /// Gun-specific skins per gun id (255 for none).
+    pub gun_skins: Vec<u8>,
     pub ready: bool,
 
     /// Feet position.
@@ -145,12 +153,18 @@ pub struct PlayerInfo {
 }
 
 impl PlayerInfo {
+    /// The skin this player shows on `gun`.
+    pub fn skin_for(&self, gun: u8) -> u8 {
+        crate::data::skin_for(self.skin, &self.gun_skins, gun)
+    }
+
     pub fn new(id: u8, name: String, character: Character, skin: u8) -> Self {
         Self {
             id,
             name,
             character,
             skin,
+            gun_skins: Vec::new(),
             ready: false,
             pos: [0.0; 3],
             yaw: 0.0,
@@ -181,7 +195,8 @@ impl PlayerInfo {
 
     /// Back to a fresh start for a new match (keeps name and loadout picks).
     pub fn reset_for_match(&mut self) {
-        let keep = PlayerInfo::new(self.id, self.name.clone(), self.character, self.skin);
+        let mut keep = PlayerInfo::new(self.id, self.name.clone(), self.character, self.skin);
+        keep.gun_skins = std::mem::take(&mut self.gun_skins);
         let seq = self.spawn_seq;
         let ack = self.action_ack;
         *self = keep;
@@ -293,7 +308,8 @@ pub struct ShotQueue(pub Vec<(u8, Shot)>);
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum PlayerAction {
     Interact,
-    Ability { slot: u8, origin: [f32; 3], dir: [f32; 3] },
+    /// `cook`: seconds a grenade was held before the throw.
+    Ability { slot: u8, origin: [f32; 3], dir: [f32; 3], cook: f32 },
     Choose(u8),
 }
 
@@ -429,6 +445,8 @@ fn main() {
         humanoid::HumanoidPlugin,
         fx::FxPlugin,
         hud::HudPlugin,
+        gunmodels::GunModelPlugin,
+        viewmodel::ViewModelPlugin,
     ))
     .run();
 }

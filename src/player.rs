@@ -93,7 +93,7 @@ impl LocalPlayer {
     }
 }
 
-fn spawn_camera(mut commands: Commands) {
+pub fn spawn_camera(mut commands: Commands) {
     commands.spawn((
         LocalPlayer {
             yaw: 0.0,

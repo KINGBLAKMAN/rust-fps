@@ -4,7 +4,7 @@
 use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
-use crate::data::{skin_material, Character, PowerUp};
+use crate::data::{Character, PowerUp};
 use crate::humanoid::{self, HumanoidMeshes, Look, Pose};
 use crate::player::LocalPlayer;
 use crate::sim::enemy_scale;
@@ -17,7 +17,7 @@ impl Plugin for AvatarPlugin {
         app.add_systems(Startup, setup)
             .add_systems(
                 Update,
-                (sync_avatars, place_name_tags, enemy_colors, spin)
+                (sync_avatars, place_name_tags, enemy_colors, spin, tumble)
                     .chain()
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
@@ -34,8 +34,10 @@ pub struct ReplicatedAssets {
     ball: Handle<Mesh>,
     fireball: Handle<StandardMaterial>,
     grenade: Handle<StandardMaterial>,
-    pickup: Handle<Mesh>,
-    pickups: [Handle<StandardMaterial>; 4],
+    grenade_mesh: Handle<Mesh>,
+    spark: Handle<StandardMaterial>,
+    pickup_meshes: [Handle<Mesh>; 4],
+    pickup_mat: Handle<StandardMaterial>,
     eyes: Handle<StandardMaterial>,
     skin: Handle<StandardMaterial>,
 }
@@ -53,7 +55,6 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let pickups = PowerUp::ALL.map(|p| glow(&mut materials, p.color(), 4.0));
     commands.insert_resource(ReplicatedAssets {
         // Grunt, Shooter, Brute.
         zombie_skin: [
@@ -70,13 +71,18 @@ fn setup(
         zombie_eyes: glow(&mut materials, Color::srgb(1.0, 0.2, 0.1), 8.0),
         ball: meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()),
         fireball: glow(&mut materials, Color::srgb(1.0, 0.45, 0.1), 10.0),
-        grenade: materials.add(StandardMaterial {
-            base_color: Color::srgb(0.2, 0.3, 0.15),
-            perceptual_roughness: 0.5,
-            ..default()
+        grenade: materials.add(crate::kit::vertex_material(0.5, 0.2)),
+        grenade_mesh: meshes.add({
+            let mut k = crate::kit::Kit::new();
+            crate::gunmodels::grenade_kit(&mut k, Vec3::ZERO);
+            k.build_or_empty()
         }),
-        pickup: meshes.add(Cuboid::new(0.6, 0.6, 0.6)),
-        pickups,
+        spark: glow(&mut materials, Color::srgb(1.0, 0.7, 0.2), 12.0),
+        pickup_meshes: PowerUp::ALL.map(|p| meshes.add(powerup_kit(p).build_or_empty())),
+        pickup_mat: materials.add(StandardMaterial {
+            emissive: LinearRgba::rgb(0.25, 0.25, 0.25),
+            ..crate::kit::vertex_material(0.4, 0.3)
+        }),
         eyes: glow(&mut materials, Color::srgb(0.6, 0.9, 1.0), 4.0),
         skin: materials.add(Color::srgb(0.85, 0.66, 0.52)),
     });
@@ -93,6 +99,86 @@ struct EnemyLook {
 
 #[derive(Component)]
 struct Spin;
+
+/// Thrown things tumble through the air.
+#[derive(Component)]
+struct Tumble;
+
+/// Power-up models: a nuke bomb, a skull, a big "x2" and an ammo crate.
+fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
+    use crate::kit::c;
+    use std::f32::consts::FRAC_PI_2;
+    let mut k = crate::kit::Kit::new();
+    let v = Vec3::new;
+    match kind {
+        PowerUp::Nuke => {
+            let body = c(0.25, 0.28, 0.22);
+            k.blob(v(0.0, 0.0, 0.0), v(0.22, 0.22, 0.38), body);
+            k.cyl_z(v(0.0, 0.0, 0.0), 0.225, 0.08, c(0.95, 0.75, 0.1));
+            k.cone(v(0.0, 0.0, 0.42), 0.12, 0.14, Quat::from_rotation_x(FRAC_PI_2), body);
+            for i in 0..4 {
+                let r = Quat::from_rotation_z(i as f32 * FRAC_PI_2);
+                k.cuboid_rot(r * v(0.0, 0.16, 0.42), v(0.02, 0.18, 0.16), r, c(0.2, 0.2, 0.2));
+            }
+            // Radiation trefoil on each side.
+            for s in [-1.0, 1.0] {
+                k.cyl(v(s * 0.2, 0.0, -0.08), 0.1, 0.02, Quat::from_rotation_z(FRAC_PI_2), c(0.95, 0.8, 0.1));
+                for i in 0..3 {
+                    let a = i as f32 * 2.094 + 0.52;
+                    k.cuboid_rot(
+                        v(s * 0.212, a.sin() * 0.05, -0.08 + a.cos() * 0.05),
+                        v(0.01, 0.06, 0.05),
+                        Quat::from_rotation_x(-a),
+                        c(0.08, 0.08, 0.08),
+                    );
+                }
+            }
+        }
+        PowerUp::InstaKill => {
+            let bone = c(0.92, 0.9, 0.82);
+            k.blob(v(0.0, 0.08, 0.0), v(0.24, 0.24, 0.26), bone);
+            k.cuboid(v(0.0, -0.12, -0.08), v(0.24, 0.14, 0.16), bone);
+            for s in [-1.0, 1.0] {
+                k.blob(v(s * 0.09, 0.05, -0.2), v(0.06, 0.07, 0.04), c(0.05, 0.02, 0.02));
+            }
+            k.cone(v(0.0, -0.04, -0.235), 0.03, 0.05, Quat::from_rotation_x(FRAC_PI_2), c(0.05, 0.02, 0.02));
+            for i in 0..5 {
+                k.cuboid(v(-0.08 + i as f32 * 0.04, -0.14, -0.165), v(0.03, 0.05, 0.01), c(0.98, 0.97, 0.9));
+            }
+        }
+        PowerUp::DoublePoints => {
+            let g = c(0.25, 0.95, 0.35);
+            let t = Vec2::new(0.06, 0.06);
+            k.beam(v(-0.32, -0.15, 0.0), v(-0.12, 0.15, 0.0), t, g);
+            k.beam(v(-0.32, 0.15, 0.0), v(-0.12, -0.15, 0.0), t, g);
+            k.beam(v(0.02, 0.12, 0.0), v(0.1, 0.17, 0.0), t, g);
+            k.beam(v(0.1, 0.17, 0.0), v(0.24, 0.12, 0.0), t, g);
+            k.beam(v(0.24, 0.12, 0.0), v(0.24, 0.03, 0.0), t, g);
+            k.beam(v(0.24, 0.03, 0.0), v(0.02, -0.15, 0.0), t, g);
+            k.beam(v(0.0, -0.15, 0.0), v(0.28, -0.15, 0.0), t, g);
+        }
+        PowerUp::MaxAmmo => {
+            let olive = c(0.3, 0.36, 0.22);
+            k.cuboid(v(0.0, -0.08, 0.0), v(0.5, 0.26, 0.3), olive);
+            k.cuboid(v(0.0, 0.06, 0.0), v(0.52, 0.04, 0.32), c(0.22, 0.27, 0.16));
+            k.cuboid(v(0.0, -0.08, -0.152), v(0.3, 0.08, 0.01), c(0.95, 0.8, 0.2));
+            k.cuboid(v(0.0, 0.1, 0.0), v(0.16, 0.03, 0.05), c(0.1, 0.1, 0.1));
+            for i in 0..5 {
+                let x = -0.16 + i as f32 * 0.08;
+                k.cyl(v(x, 0.16, 0.0), 0.022, 0.16, Quat::IDENTITY, c(0.8, 0.62, 0.25));
+                k.cone(v(x, 0.27, 0.0), 0.022, 0.06, Quat::IDENTITY, c(0.75, 0.45, 0.25));
+            }
+        }
+    }
+    k
+}
+
+fn tumble(time: Res<Time>, mut q: Query<&mut Transform, With<Tumble>>) {
+    let dt = time.delta_secs();
+    for mut tf in &mut q {
+        tf.rotate(Quat::from_euler(EulerRot::XYZ, dt * 9.0, dt * 4.0, 0.0));
+    }
+}
 
 /// Spawns the visible model for something the host replicates. Used by the
 /// host's simulation and by clients when a new entity appears.
@@ -142,7 +228,7 @@ pub fn spawn_replicated(
                 },
                 Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
             ));
-            humanoid::build(
+            let _ = humanoid::build(
                 commands,
                 root,
                 meshes,
@@ -169,9 +255,27 @@ pub fn spawn_replicated(
         NetKind::Grenade => {
             commands.entity(root).with_children(|p| {
                 p.spawn((
-                    Mesh3d(assets.ball.clone()),
+                    Tumble,
+                    Mesh3d(assets.grenade_mesh.clone()),
                     MeshMaterial3d(assets.grenade.clone()),
-                    Transform::from_scale(Vec3::splat(0.14)),
+                    Transform::from_scale(Vec3::splat(1.8)),
+                ))
+                .with_children(|g| {
+                    // Burning fuse.
+                    g.spawn((
+                        Mesh3d(assets.ball.clone()),
+                        MeshMaterial3d(assets.spark.clone()),
+                        Transform::from_xyz(0.0, 0.058, 0.0).with_scale(Vec3::splat(0.008)),
+                    ));
+                });
+                p.spawn((
+                    PointLight {
+                        intensity: 8_000.0,
+                        color: Color::srgb(1.0, 0.6, 0.2),
+                        range: 3.0,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.15, 0.0),
                 ));
             });
         }
@@ -180,8 +284,8 @@ pub fn spawn_replicated(
             commands.entity(root).with_children(|p| {
                 p.spawn((
                     Spin,
-                    Mesh3d(assets.pickup.clone()),
-                    MeshMaterial3d(assets.pickups[i].clone()),
+                    Mesh3d(assets.pickup_meshes[i].clone()),
+                    MeshMaterial3d(assets.pickup_mat.clone()),
                     Transform::default(),
                 ));
                 p.spawn((
@@ -243,6 +347,7 @@ struct Avatar {
     tag: Entity,
     character: Character,
     skin: u8,
+    mount: Option<Entity>,
 }
 
 #[derive(Component)]
@@ -256,10 +361,11 @@ pub fn spawn_person(
     assets: &ReplicatedAssets,
     character: Character,
     skin: u8,
+    gun: u8,
     transform: Transform,
-) -> Entity {
+) -> (Entity, Option<Entity>) {
     let root = commands.spawn((transform, Visibility::default())).id();
-    humanoid::build(
+    let mount = humanoid::build(
         commands,
         root,
         meshes,
@@ -276,12 +382,12 @@ pub fn spawn_person(
                 ..default()
             }),
             eyes: assets.eyes.clone(),
-            gun: Some(materials.add(skin_material(skin))),
+            gun: Some((gun, skin)),
             visor: character == Character::Striker,
             pose: Pose::Rifle,
         },
     );
-    root
+    (root, mount)
 }
 
 fn sync_avatars(
@@ -294,6 +400,7 @@ fn sync_avatars(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut avatars: Query<(Entity, &Avatar, &mut Transform)>,
     mut tags: Query<&mut Text, With<NameTag>>,
+    mut mounts: Query<&mut humanoid::GunMount>,
 ) {
     let blend = 1.0 - (-15.0 * time.delta_secs()).exp();
     let mut have = Vec::new();
@@ -309,6 +416,16 @@ fn sync_avatars(
             continue;
         };
         have.push(avatar.id);
+        if let Some(mut m) = avatar.mount.and_then(|e| mounts.get_mut(e).ok()) {
+            let gun = p.guns[(p.active_slot as usize).min(1)].or(p.guns[0]);
+            if m.want != gun {
+                m.want = gun;
+            }
+            let skin = gun.map_or(p.skin, |g| p.skin_for(g));
+            if m.skin != skin {
+                m.skin = skin;
+            }
+        }
         // The model faces -Z, the same as yaw 0.
         let (target_pos, target_rot) = if p.alive {
             (p.feet(), Quat::from_rotation_y(p.yaw))
@@ -360,13 +477,14 @@ fn sync_avatars(
                 Visibility::Hidden,
             ))
             .id();
-        let root = spawn_person(
+        let (root, mount) = spawn_person(
             &mut commands,
             &meshes,
             &mut materials,
             &assets,
             p.character,
             p.skin,
+            p.guns[0].unwrap_or(0),
             Transform::from_translation(p.feet()),
         );
         commands.entity(root).insert((
@@ -376,6 +494,7 @@ fn sync_avatars(
                 tag,
                 character: p.character,
                 skin: p.skin,
+                mount,
             },
         ));
     }

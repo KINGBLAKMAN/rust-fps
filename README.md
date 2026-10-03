@@ -23,7 +23,7 @@ Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the
 
 - **Play Solo**, **Host a Party** or **Join a Party** (type the host's address).
 - **Characters**: pick Striker or Warden.
-- **Gun Skins**: spend gacha spins and equip skins.
+- **Gun Skins**: open crates with your spins and equip skins.
 - **Settings**: field of view, mouse sensitivity, volume, windowed / borderless / fullscreen, resolution and key remapping.
 
 Before a match you're on the party screen: pick your character, the host picks the map, friends press Ready and the host presses Start. Friends can also join a match that's already running.
@@ -43,12 +43,26 @@ Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rus
 | C | Crouch. Press while running to slide; hold it as you land from a jump to chain jump-slides |
 | R | Reload |
 | F | Buy / use (mystery box, perk machines, take a gun from the box) |
-| Q / E | Abilities 1 and 2 |
+| Q / E | Abilities 1 and 2 (see casting below) |
 | X | Ultimate |
 | V, 1 / 2, mouse wheel | Swap between your two guns |
 | B | Pick a level-up upgrade |
 | Tab | Scoreboard |
 | Esc | Menu (pauses solo games) |
+
+## Casting abilities
+
+Each ability can use its own cast mode (Settings > Casting):
+
+- **Instant:** casts the moment you press the key.
+- **Quick** (default): hold the key to aim with a preview (grenade arc and landing ring, dash arrow, blast radius, orbital target), release to cast.
+- **Confirm:** press the key to aim, left-click to cast, right-click or the key again to cancel.
+
+The frag grenade is held in your hand while you aim, and its fuse is already burning: hold it longer to cook it so it blows up sooner after landing. Held too long, you throw it automatically.
+
+## What you see
+
+Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The mystery box opens its lid and spins through the guns, and flies away when it moves; perk machines are vending machines; power-ups are little models. The three maps are built from detailed props (containers, cranes, forklifts and a ship; trees, a fountain, a bandstand and a playground; houses, fences, cars and street lights).
 
 ## Gameplay
 
@@ -63,7 +77,7 @@ Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rus
 - **Extraction:** after clearing round 15, and every 10 rounds after that (25, 35...), a green extraction beam opens for 45 seconds. Get every living teammate into it for 5 seconds to extract, or ignore it and keep fighting.
 - **Maps:** Shipping Yard, Central Park and The Neighborhood.
 
-## Gacha spins and skins
+## Gacha spins, crates and skins
 
 Spins are earned by how far you get, so restarting round 1 over and over earns nothing:
 
@@ -76,7 +90,23 @@ Spins are earned by how far you get, so restarting round 1 over and over earns n
 | 20 | 10 |
 | 25 | 15 |
 
-Extracting doubles them. There are 12 gun skins: Common 55%, Rare 30%, Epic 12%, Legendary 3%. Every 3 duplicate pulls give a free spin. Your profile and settings are saved in `%APPDATA%\RustFPS` on Windows (`~/.config/rust-fps` on Linux).
+Extracting gives the same spins as reaching that round; it doesn't double them.
+
+There are 35 skins in 5 crates. 12 are finishes that fit every gun; the other 23 are patterned skins made for one gun each (camo, tiger stripes, carbon fibre, damascus, marble, dragon scales, glowing lava, circuits, starfields...). A gun skin only shows on its own gun, so you can give every gun its own look; click an equipped gun skin again to take it off.
+
+| Crate | Cost | Inside |
+|---|---|---|
+| Field Crate | 1 spin | 4 finishes + 5 gun skins |
+| Street Crate | 1 spin | 4 finishes + 5 gun skins |
+| Forge Crate | 1 spin | 3 finishes + 5 gun skins |
+| Inferno Crate | 1 premium spin | 4 gun skins, Epic or Legendary only |
+| Cosmos Crate | 1 premium spin | 4 gun skins, Epic or Legendary only |
+
+Each crate's odds are Common 55%, Rare 30%, Epic 12%, Legendary 3%, shared out over the rarities that crate holds (premium crates: Epic 80%, Legendary 20%). Every 3 duplicate regular pulls give a free spin; a premium duplicate gives back a quarter of a premium spin.
+
+**Premium spins:** trade 5 regular spins for 1 premium spin, or earn a quarter of a premium spin for every 20 rounds you survive (added up over all your matches).
+
+Your profile and settings are saved in `%APPDATA%\RustFPS` on Windows (`~/.config/rust-fps` on Linux).
 
 ## How the multiplayer works
 
@@ -87,13 +117,19 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | File | What's in it |
 |---|---|
 | `src/main.rs` | App setup, shared state (players, match state) and system ordering |
-| `src/data.rs` | Guns, skins, characters, abilities, perks, power-ups, elements, XP |
+| `src/data.rs` | Guns, skins, crates, characters, abilities, perks, power-ups, elements, XP |
 | `src/config.rs` | Settings, key bindings and the saved profile |
 | `src/ui.rs` | Main menu, characters, skins, settings, party screen, pause menu |
 | `src/game.rs` | Match start and end, in-game menus, cursor, box visuals, spin rewards |
 | `src/player.rs` | Camera and movement (sprint, slide, crouch, bunny hop) |
-| `src/weapons.rs` | Two gun slots, firing, reloading, the first-person gun |
-| `src/abilities.rs` | Ability and buy input |
+| `src/weapons.rs` | Two gun slots, firing, reloading |
+| `src/abilities.rs` | Ability and buy input, cast modes, aiming previews |
+| `src/kit.rs` | Modelling kit: merges boxes, cylinders and spheres into one coloured mesh |
+| `src/gunmodels.rs` | The 23 gun models and where the hands go on each |
+| `src/hands.rs` | Gloved hand and forearm models |
+| `src/viewmodel.rs` | First-person gun and hands, with all their animations |
+| `src/skins.rs` | Patterned skin textures |
+| `src/props.rs` | Map props (containers, trees, houses, cars...) |
 | `src/sim.rs` | Host-only simulation: rounds, zombie AI, damage, elements, XP, box, perks, power-ups, extraction |
 | `src/maps.rs` | The three maps |
 | `src/nav.rs` | Zombie pathfinding |

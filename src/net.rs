@@ -26,7 +26,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 3;
+const PROTOCOL_VERSION: u32 = 5;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -126,6 +126,7 @@ struct ClientUpdate {
     active_slot: u8,
     character: Character,
     skin: u8,
+    gun_skins: Vec<u8>,
     ready: bool,
     shots: Vec<Shot>,
     actions: Vec<(u32, PlayerAction)>,
@@ -373,7 +374,10 @@ fn handle_requests(
 ) {
     for req in requests.read() {
         let map = state.map;
-        let me = || PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin);
+        let me = || PlayerInfo {
+            gun_skins: profile.gun_skins.clone(),
+            ..PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin)
+        };
         ready.0 = false;
         match req {
             PartyRequest::Solo => {
@@ -491,6 +495,9 @@ fn sync_own_choices(
         if me.skin != profile.skin {
             me.skin = profile.skin;
         }
+        if me.gun_skins != profile.gun_skins {
+            me.gun_skins = profile.gun_skins.clone();
+        }
         if me.name != profile.name {
             me.name = profile.name.clone();
         }
@@ -567,6 +574,7 @@ fn host_receive(
                 if !state.started {
                     p.character = u.character;
                     p.skin = u.skin.min(crate::data::SKINS.len() as u8 - 1);
+                    p.gun_skins = u.gun_skins.into_iter().take(crate::data::GUNS.len()).collect();
                     p.ready = u.ready;
                 }
                 if u.pos.iter().chain([u.yaw, u.pitch].iter()).all(|v| v.is_finite()) {
@@ -716,6 +724,7 @@ fn client_send(
         active_slot: me.active_slot,
         character: profile.character,
         skin: profile.skin,
+        gun_skins: profile.gun_skins.clone(),
         ready: ready.0,
         shots: std::mem::take(&mut net.shots),
         actions: net.pending.iter().take(16).copied().collect(),
@@ -828,10 +837,11 @@ fn client_receive(
     }
 
     for f in snap.fx {
-        if let Fx::Tracer { shooter, .. } = &f {
-            if *shooter == session.my_id {
+        match &f {
+            Fx::Tracer { shooter: who, .. } | Fx::Dash { player: who, .. } if *who == session.my_id => {
                 continue;
             }
+            _ => {}
         }
         fx.0.push(f);
     }

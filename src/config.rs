@@ -144,6 +144,36 @@ impl DisplayMode {
     }
 }
 
+/// How an ability key casts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum CastMode {
+    /// Casts the moment you press the key.
+    Instant,
+    /// Hold the key to aim, release to cast.
+    #[default]
+    Quick,
+    /// Press to aim, left-click to cast, right-click to cancel.
+    Confirm,
+}
+
+impl CastMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            CastMode::Instant => "Instant",
+            CastMode::Quick => "Quick",
+            CastMode::Confirm => "Confirm",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            CastMode::Instant => CastMode::Quick,
+            CastMode::Quick => CastMode::Confirm,
+            CastMode::Confirm => CastMode::Instant,
+        }
+    }
+}
+
 pub const RESOLUTIONS: [(u32, u32); 6] = [
     (1280, 720),
     (1366, 768),
@@ -162,6 +192,8 @@ pub struct Settings {
     pub display: DisplayMode,
     pub resolution: usize,
     pub keys: Vec<(Action, KeyCode)>,
+    /// Cast mode for ability 1, ability 2 and the ultimate.
+    pub cast_modes: [CastMode; 3],
 }
 
 impl Default for Settings {
@@ -173,6 +205,7 @@ impl Default for Settings {
             display: DisplayMode::Windowed,
             resolution: 0,
             keys: Action::ALL.iter().map(|a| (*a, a.default_key())).collect(),
+            cast_modes: [CastMode::Quick; 3],
         }
     }
 }
@@ -230,6 +263,12 @@ pub struct Profile {
     /// Duplicate pulls; three make a free spin.
     pub shards: u32,
     pub skin: u8,
+    /// Equipped gun-specific skin per gun id (255 for none).
+    pub gun_skins: Vec<u8>,
+    /// Premium spins, counted in quarters (4 = one spin).
+    pub premium_quarters: u32,
+    /// Rounds survived towards the next quarter premium spin.
+    pub round_bank: u32,
     pub best_round: u32,
     pub extractions: u32,
     pub last_address: String,
@@ -244,10 +283,32 @@ impl Default for Profile {
             owned_skins: vec![0],
             shards: 0,
             skin: 0,
+            gun_skins: Vec::new(),
+            premium_quarters: 0,
+            round_bank: 0,
             best_round: 0,
             extractions: 0,
             last_address: String::new(),
         }
+    }
+}
+
+impl Profile {
+    /// The skin this player shows on `gun`.
+    pub fn skin_for(&self, gun: u8) -> u8 {
+        crate::data::skin_for(self.skin, &self.gun_skins, gun)
+    }
+}
+
+/// "1 3/4" style text for a count of quarters.
+pub fn quarters_text(q: u32) -> String {
+    let (whole, part) = (q / 4, q % 4);
+    let frac = ["", "1/4", "1/2", "3/4"][part as usize];
+    match (whole, part) {
+        (0, 0) => "0".into(),
+        (0, _) => frac.into(),
+        (_, 0) => whole.to_string(),
+        _ => format!("{whole} {frac}"),
     }
 }
 

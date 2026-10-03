@@ -10,7 +10,7 @@ pub struct HumanoidPlugin;
 impl Plugin for HumanoidPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PreStartup, setup_meshes)
-            .add_systems(Update, animate.in_set(Phase::Present));
+            .add_systems(Update, (animate.in_set(Phase::Present), fill_gun_mounts));
     }
 }
 
@@ -21,7 +21,6 @@ pub struct HumanoidMeshes {
     arm: Handle<Mesh>,
     head: Handle<Mesh>,
     eye: Handle<Mesh>,
-    gun: Handle<Mesh>,
     visor: Handle<Mesh>,
 }
 
@@ -32,7 +31,6 @@ fn setup_meshes(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
         arm: meshes.add(Cuboid::new(0.17, 0.7, 0.2)),
         head: meshes.add(Cuboid::new(0.34, 0.36, 0.34)),
         eye: meshes.add(Cuboid::new(0.08, 0.05, 0.02)),
-        gun: meshes.add(Cuboid::new(0.09, 0.12, 0.6)),
         visor: meshes.add(Cuboid::new(0.3, 0.1, 0.04)),
     });
 }
@@ -53,7 +51,8 @@ pub struct Look {
     pub shirt: Handle<StandardMaterial>,
     pub pants: Handle<StandardMaterial>,
     pub eyes: Handle<StandardMaterial>,
-    pub gun: Option<Handle<StandardMaterial>>,
+    /// (gun id, skin) held in the right hand.
+    pub gun: Option<(u8, u8)>,
     pub visor: bool,
     pub pose: Pose,
 }
@@ -77,7 +76,39 @@ struct Limb {
 }
 
 /// Adds the body parts as children of `root`.
-pub fn build(commands: &mut Commands, root: Entity, meshes: &HumanoidMeshes, look: Look) {
+/// Where a model holds its gun. Set `want` and the gun model appears.
+#[derive(Component)]
+pub struct GunMount {
+    pub want: Option<u8>,
+    pub skin: u8,
+    shown: Option<(u8, u8)>,
+}
+
+fn fill_gun_mounts(
+    mut commands: Commands,
+    guns: Option<Res<crate::gunmodels::GunAssets>>,
+    mut mounts: Query<(Entity, &mut GunMount)>,
+) {
+    let Some(guns) = guns else { return };
+    for (e, mut m) in &mut mounts {
+        let want = m.want.map(|g| (g, m.skin));
+        if m.shown == want {
+            continue;
+        }
+        m.shown = want;
+        commands.entity(e).despawn_related::<Children>();
+        if let Some((gun, skin)) = want {
+            commands
+                .entity(e)
+                .with_children(|p| crate::gunmodels::spawn_gun(p, &guns, gun, guns.skin(skin), false));
+        }
+    }
+}
+
+/// Adds the body parts as children of `root`. Returns the gun mount, if
+/// the model holds a gun.
+pub fn build(commands: &mut Commands, root: Entity, meshes: &HumanoidMeshes, look: Look) -> Option<Entity> {
+    let mut mount = None;
     commands.entity(root).insert(Walker {
         phase: 0.0,
         last: Vec3::ZERO,
@@ -126,13 +157,21 @@ pub fn build(commands: &mut Commands, root: Entity, meshes: &HumanoidMeshes, loo
                     Transform::from_xyz(0.0, -0.66, 0.0).with_scale(Vec3::new(2.0, 2.0, 8.0)),
                 ));
                 if side > 0.0 {
-                    if let Some(gun) = &look.gun {
-                        sh.spawn((
-                            Mesh3d(meshes.gun.clone()),
-                            MeshMaterial3d(gun.clone()),
-                            Transform::from_xyz(0.0, -0.8, 0.0)
-                                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-                        ));
+                    if let Some((gun, skin)) = look.gun {
+                        mount = Some(
+                            sh.spawn((
+                                GunMount {
+                                    want: Some(gun),
+                                    skin,
+                                    shown: None,
+                                },
+                                Transform::from_xyz(-0.02, -0.68, 0.0)
+                                    .with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2))
+                                    .with_scale(Vec3::splat(1.25)),
+                                Visibility::default(),
+                            ))
+                            .id(),
+                        );
                     }
                 }
             });
@@ -163,6 +202,7 @@ pub fn build(commands: &mut Commands, root: Entity, meshes: &HumanoidMeshes, loo
             }
         }
     });
+    mount
 }
 
 fn animate(

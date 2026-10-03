@@ -198,12 +198,45 @@ impl Rarity {
     }
 }
 
+/// Surface pattern of a gun-specific skin, painted over the base colour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pattern {
+    Plain,
+    Camo,
+    Digital,
+    Tiger,
+    Zebra,
+    Carbon,
+    Hex,
+    Scales,
+    Damascus,
+    Marble,
+    Splatter,
+    Woodgrain,
+    /// Glowing patterns: the accent colour lights up.
+    Circuit,
+    Lava,
+    Stars,
+}
+
+impl Pattern {
+    /// Whether the accent colour of this pattern glows.
+    pub fn glows(self) -> bool {
+        matches!(self, Pattern::Circuit | Pattern::Lava | Pattern::Stars)
+    }
+}
+
 pub struct SkinDef {
     pub name: &'static str,
     pub rarity: Rarity,
     pub color: [f32; 3],
     pub metallic: f32,
     pub glow: f32,
+    /// `Some(gun)` for a skin made for one gun; `None` fits every gun.
+    pub gun: Option<u8>,
+    pub pattern: Pattern,
+    /// Second colour of the pattern.
+    pub accent: [f32; 3],
 }
 
 const fn skin(name: &'static str, rarity: Rarity, color: [f32; 3], metallic: f32, glow: f32) -> SkinDef {
@@ -213,69 +246,208 @@ const fn skin(name: &'static str, rarity: Rarity, color: [f32; 3], metallic: f32
         color,
         metallic,
         glow,
+        gun: None,
+        pattern: Pattern::Plain,
+        accent: color,
     }
 }
 
-pub const SKINS: [SkinDef; 12] = [
-    skin("Factory", Rarity::Common, [0.12, 0.12, 0.14], 0.6, 0.0),
-    skin("Desert", Rarity::Common, [0.76, 0.64, 0.42], 0.1, 0.0),
-    skin("Forest", Rarity::Common, [0.22, 0.36, 0.2], 0.1, 0.0),
-    skin("Arctic", Rarity::Common, [0.88, 0.9, 0.95], 0.1, 0.0),
-    skin("Crimson", Rarity::Rare, [0.65, 0.05, 0.08], 0.4, 0.0),
-    skin("Cobalt", Rarity::Rare, [0.1, 0.25, 0.75], 0.5, 0.0),
-    skin("Hazard", Rarity::Rare, [0.95, 0.75, 0.05], 0.2, 0.0),
-    skin("Toxic", Rarity::Epic, [0.2, 0.9, 0.2], 0.0, 2.0),
-    skin("Chrome", Rarity::Epic, [0.9, 0.9, 0.95], 1.0, 0.0),
-    skin("Neon", Rarity::Epic, [1.0, 0.2, 0.7], 0.0, 2.5),
-    skin("Gold", Rarity::Legendary, [1.0, 0.75, 0.2], 1.0, 0.3),
-    skin("Galaxy", Rarity::Legendary, [0.45, 0.15, 0.9], 0.3, 3.0),
+const fn gun_skin(
+    name: &'static str,
+    gun: u8,
+    rarity: Rarity,
+    pattern: Pattern,
+    color: [f32; 3],
+    accent: [f32; 3],
+    metallic: f32,
+    glow: f32,
+) -> SkinDef {
+    SkinDef {
+        name,
+        rarity,
+        color,
+        metallic,
+        glow,
+        gun: Some(gun),
+        pattern,
+        accent,
+    }
+}
+
+use Pattern::*;
+use Rarity::*;
+
+/// Skins 0-11 fit every gun; 12 onwards are made for one gun each.
+pub const SKINS: [SkinDef; 35] = [
+    skin("Factory", Common, [0.12, 0.12, 0.14], 0.6, 0.0),
+    skin("Desert", Common, [0.76, 0.64, 0.42], 0.1, 0.0),
+    skin("Forest", Common, [0.22, 0.36, 0.2], 0.1, 0.0),
+    skin("Arctic", Common, [0.88, 0.9, 0.95], 0.1, 0.0),
+    skin("Crimson", Rare, [0.65, 0.05, 0.08], 0.4, 0.0),
+    skin("Cobalt", Rare, [0.1, 0.25, 0.75], 0.5, 0.0),
+    skin("Hazard", Rare, [0.95, 0.75, 0.05], 0.2, 0.0),
+    skin("Toxic", Epic, [0.2, 0.9, 0.2], 0.0, 2.0),
+    skin("Chrome", Epic, [0.9, 0.9, 0.95], 1.0, 0.0),
+    skin("Neon", Epic, [1.0, 0.2, 0.7], 0.0, 2.5),
+    skin("Gold", Legendary, [1.0, 0.75, 0.2], 1.0, 0.3),
+    skin("Galaxy", Legendary, [0.45, 0.15, 0.9], 0.3, 3.0),
+    // 12: Field crate
+    gun_skin("Woodland", 0, Common, Camo, [0.3, 0.36, 0.2], [0.16, 0.13, 0.08], 0.1, 0.0),
+    gun_skin("Urban Pixel", 2, Common, Digital, [0.45, 0.47, 0.5], [0.18, 0.19, 0.22], 0.1, 0.0),
+    gun_skin("Jungle Tiger", 6, Rare, Tiger, [0.85, 0.5, 0.12], [0.08, 0.07, 0.05], 0.2, 0.0),
+    gun_skin("Rust Belt", 10, Common, Splatter, [0.45, 0.3, 0.2], [0.62, 0.3, 0.1], 0.5, 0.0),
+    gun_skin("Sandstorm", 13, Rare, Digital, [0.78, 0.66, 0.45], [0.5, 0.4, 0.26], 0.1, 0.0),
+    // 17: Street crate
+    gun_skin("Carbon Fibre", 1, Rare, Carbon, [0.16, 0.16, 0.18], [0.04, 0.04, 0.05], 0.5, 0.0),
+    gun_skin("Zebra", 3, Common, Zebra, [0.92, 0.92, 0.9], [0.06, 0.06, 0.06], 0.1, 0.0),
+    gun_skin("Snowdrift", 7, Common, Camo, [0.9, 0.92, 0.96], [0.55, 0.6, 0.66], 0.1, 0.0),
+    gun_skin("Graffiti", 11, Rare, Splatter, [0.15, 0.15, 0.2], [1.0, 0.3, 0.6], 0.2, 0.0),
+    gun_skin("White Marble", 17, Epic, Marble, [0.95, 0.94, 0.92], [0.35, 0.33, 0.35], 0.3, 0.0),
+    // 22: Forge crate
+    gun_skin("Hex Plate", 4, Rare, Hex, [0.3, 0.33, 0.38], [0.1, 0.11, 0.13], 0.8, 0.0),
+    gun_skin("Python", 5, Epic, Scales, [0.4, 0.6, 0.2], [0.12, 0.18, 0.06], 0.3, 0.0),
+    gun_skin("Damascus", 8, Epic, Damascus, [0.6, 0.62, 0.66], [0.22, 0.23, 0.26], 1.0, 0.0),
+    gun_skin("Bengal", 9, Common, Tiger, [0.95, 0.6, 0.2], [0.1, 0.06, 0.03], 0.1, 0.0),
+    gun_skin("Walnut Inlay", 12, Rare, Woodgrain, [0.45, 0.27, 0.13], [0.25, 0.13, 0.05], 0.1, 0.0),
+    // 27: Inferno crate (premium)
+    gun_skin("Molten Core", 14, Legendary, Lava, [0.12, 0.08, 0.07], [1.0, 0.4, 0.05], 0.2, 1.6),
+    gun_skin("Dragonscale", 19, Epic, Scales, [0.6, 0.08, 0.06], [1.0, 0.72, 0.2], 0.8, 0.0),
+    gun_skin("Hellfire", 18, Epic, Lava, [0.2, 0.05, 0.04], [1.0, 0.2, 0.05], 0.4, 1.3),
+    gun_skin("Stormcaller", 22, Legendary, Circuit, [0.1, 0.12, 0.2], [0.3, 0.8, 1.0], 0.6, 2.0),
+    // 31: Cosmos crate (premium)
+    gun_skin("Nebula", 15, Legendary, Stars, [0.2, 0.06, 0.35], [0.9, 0.85, 1.0], 0.3, 3.0),
+    gun_skin("Mainframe", 16, Epic, Circuit, [0.04, 0.12, 0.06], [0.2, 1.0, 0.4], 0.4, 1.8),
+    gun_skin("Void Hex", 20, Epic, Hex, [0.08, 0.04, 0.14], [0.7, 0.2, 1.0], 0.6, 0.0),
+    gun_skin("Supernova", 21, Legendary, Stars, [0.05, 0.08, 0.25], [1.0, 0.9, 0.5], 0.3, 3.5),
 ];
 
 pub fn skin_def(id: u8) -> &'static SkinDef {
     &SKINS[(id as usize).min(SKINS.len() - 1)]
 }
 
+/// The material for a skin, without its pattern texture.
 pub fn skin_material(id: u8) -> StandardMaterial {
     let s = skin_def(id);
     let base = Color::srgb(s.color[0], s.color[1], s.color[2]);
+    let glow_color = if s.pattern == Plain { base } else { Color::BLACK };
     StandardMaterial {
         base_color: base,
         metallic: s.metallic,
         perceptual_roughness: if s.metallic > 0.8 { 0.15 } else { 0.45 },
-        emissive: LinearRgba::from(base) * s.glow,
+        emissive: LinearRgba::from(glow_color) * s.glow,
         ..default()
     }
 }
 
-/// One gacha pull: Common 55%, Rare 30%, Epic 12%, Legendary 3%.
-pub fn roll_skin(rng: &mut impl rand::Rng) -> u8 {
-    let r: f32 = rng.gen_range(0.0..100.0);
-    let rarity = if r < 3.0 {
-        Rarity::Legendary
-    } else if r < 15.0 {
-        Rarity::Epic
-    } else if r < 45.0 {
-        Rarity::Rare
-    } else {
-        Rarity::Common
-    };
-    let pool: Vec<u8> = (0..SKINS.len() as u8)
-        .filter(|i| SKINS[*i as usize].rarity == rarity)
-        .collect();
+/// Which skin a gun shows: its own equipped skin if it has one, else the
+/// finish that fits every gun. `gun_skins[gun]` is 255 for none.
+pub fn skin_for(default: u8, gun_skins: &[u8], gun: u8) -> u8 {
+    match gun_skins.get(gun as usize) {
+        Some(&s) if (s as usize) < SKINS.len() && SKINS[s as usize].gun == Some(gun) => s,
+        _ => default,
+    }
+}
+
+/// A gacha crate: what's inside and what it costs to open.
+pub struct CrateDef {
+    pub name: &'static str,
+    pub blurb: &'static str,
+    /// Premium crates cost a premium spin instead of a regular one.
+    pub premium: bool,
+    pub skins: &'static [u8],
+}
+
+pub const CRATES: [CrateDef; 5] = [
+    CrateDef {
+        name: "Field Crate",
+        blurb: "Camo and outdoor finishes.",
+        premium: false,
+        skins: &[1, 2, 4, 7, 12, 13, 14, 15, 16],
+    },
+    CrateDef {
+        name: "Street Crate",
+        blurb: "City colours, carbon and marble.",
+        premium: false,
+        skins: &[3, 5, 6, 9, 17, 18, 19, 20, 21],
+    },
+    CrateDef {
+        name: "Forge Crate",
+        blurb: "Metalwork, scales and precious finishes.",
+        premium: false,
+        skins: &[8, 10, 11, 22, 23, 24, 25, 26],
+    },
+    CrateDef {
+        name: "Inferno Crate",
+        blurb: "PREMIUM: molten, burning and electric skins. Epic or better.",
+        premium: true,
+        skins: &[27, 28, 29, 30],
+    },
+    CrateDef {
+        name: "Cosmos Crate",
+        blurb: "PREMIUM: starfields, circuits and void. Epic or better.",
+        premium: true,
+        skins: &[31, 32, 33, 34],
+    },
+];
+
+/// Regular spins it takes to make one premium spin.
+pub const PREMIUM_TRADE_COST: u32 = 5;
+/// Every this many rounds survived (added up over all matches) earns a
+/// quarter of a premium spin.
+pub const ROUNDS_PER_PREMIUM_QUARTER: u32 = 20;
+
+/// Base odds of each rarity, in percent.
+pub fn rarity_odds(r: Rarity) -> f32 {
+    match r {
+        Common => 55.0,
+        Rare => 30.0,
+        Epic => 12.0,
+        Legendary => 3.0,
+    }
+}
+
+/// The odds of each rarity in a crate: the base odds, shared out over the
+/// rarities the crate actually holds.
+pub fn crate_odds(crate_id: usize) -> Vec<(Rarity, f32)> {
+    let c = &CRATES[crate_id.min(CRATES.len() - 1)];
+    let mut held: Vec<Rarity> = Vec::new();
+    for &s in c.skins {
+        let r = SKINS[s as usize].rarity;
+        if !held.contains(&r) {
+            held.push(r);
+        }
+    }
+    let total: f32 = held.iter().map(|r| rarity_odds(*r)).sum();
+    [Common, Rare, Epic, Legendary]
+        .into_iter()
+        .filter(|r| held.contains(r))
+        .map(|r| (r, rarity_odds(r) / total * 100.0))
+        .collect()
+}
+
+/// One pull from a crate.
+pub fn roll_crate(crate_id: usize, rng: &mut impl rand::Rng) -> u8 {
+    let c = &CRATES[crate_id.min(CRATES.len() - 1)];
+    let odds = crate_odds(crate_id);
+    let mut r: f32 = rng.gen_range(0.0..100.0);
+    let mut rarity = odds[0].0;
+    for (rar, pct) in odds {
+        rarity = rar;
+        if r < pct {
+            break;
+        }
+        r -= pct;
+    }
+    let pool: Vec<u8> = c.skins.iter().copied().filter(|i| SKINS[*i as usize].rarity == rarity).collect();
     pool[rng.gen_range(0..pool.len())]
 }
 
 /// Gacha spins for reaching a round: round 5 gives 1, round 10 gives 2 more,
 /// round 15 gives 3 more, and so on. Nothing below round 5, so restarting
-/// early rounds never pays. Extracting doubles it.
-pub fn spins_for_round(round: u32, extracted: bool) -> u32 {
+/// early rounds never pays. Extracting gives the same as dying on that round.
+pub fn spins_for_round(round: u32) -> u32 {
     let milestones = round / 5;
-    let spins = milestones * (milestones + 1) / 2;
-    if extracted {
-        spins * 2
-    } else {
-        spins
-    }
+    milestones * (milestones + 1) / 2
 }
 
 // ---------------------------------------------------------------------------

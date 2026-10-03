@@ -332,7 +332,7 @@ fn process_actions(
                     }
                 }
             }
-            PlayerAction::Ability { slot, origin, dir } => {
+            PlayerAction::Ability { slot, origin, dir, cook } => {
                 if !p.alive || slot > 2 {
                     continue;
                 }
@@ -358,7 +358,17 @@ fn process_actions(
                 let elements = p.ability_elements;
                 let feet = p.feet();
                 match (p.character, slot) {
-                    (Character::Striker, 0) => {} // Dash is movement, done locally.
+                    (Character::Striker, 0) => {
+                        // Dash is movement, done locally; everyone else sees
+                        // the streak.
+                        let flat = dir.with_y(0.0).normalize_or_zero();
+                        let dash = Fx::Dash {
+                            player: id,
+                            a: feet.to_array(),
+                            b: (feet + flat * 22.0 * (0.18 + 0.03 * tier)).to_array(),
+                        };
+                        out.0.push(dash);
+                    }
                     (Character::Striker, 1) => {
                         let id_net = state.next_net_id;
                         state.next_net_id += 1;
@@ -370,8 +380,11 @@ fn process_actions(
                             },
                             GrenadeBrain {
                                 owner: id,
-                                velocity: dir * 16.0 + Vec3::Y * 3.0,
-                                fuse: 1.4,
+                                velocity: dir * crate::abilities::GRENADE_SPEED
+                                    + Vec3::Y * crate::abilities::GRENADE_LIFT,
+                                fuse: (crate::abilities::GRENADE_FUSE
+                                    - cook.clamp(0.0, crate::abilities::MAX_COOK))
+                                .max(0.15),
                                 damage: (150.0 + 60.0 * tier) * mult,
                                 radius: 4.0 + 0.5 * tier,
                                 elements,
@@ -393,10 +406,9 @@ fn process_actions(
                         emit(
                             &mut fx,
                             &mut out,
-                            Fx::Ring {
+                            Fx::Heal {
                                 pos: center.to_array(),
                                 radius: 8.0,
-                                color: [0.3, 1.0, 0.5],
                             },
                         );
                     }
@@ -417,10 +429,9 @@ fn process_actions(
                         emit(
                             &mut fx,
                             &mut out,
-                            Fx::Ring {
+                            Fx::Nova {
                                 pos: feet.to_array(),
                                 radius: 7.0,
-                                color: [0.5, 0.85, 1.0],
                             },
                         );
                     }
@@ -1020,7 +1031,7 @@ fn grenades(
     let enemy_list: Vec<(Entity, Vec3)> = enemies.iter().map(|(e, t)| (e, t.translation)).collect();
     for (e, mut tf, mut g) in &mut nades {
         g.fuse -= dt;
-        g.velocity.y -= 18.0 * dt;
+        g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
         let next = tf.translation + g.velocity * dt;
         // Bounce off the floor and stop at walls.
         if next.y < 0.1 {

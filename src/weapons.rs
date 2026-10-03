@@ -1,5 +1,5 @@
 //! The local player's guns: two weapon slots, ammo, reloading, firing modes,
-//! the first-person gun model (in your equipped skin) and hit markers.
+//! and hit markers. The first-person model is in viewmodel.rs.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
@@ -7,7 +7,7 @@ use bevy::window::PrimaryWindow;
 use rand::Rng;
 
 use crate::config::{Action, InputExt, Settings};
-use crate::data::{gun_def, has_perk, skin_material, FireMode, GunClass, Perk};
+use crate::data::{gun_def, has_perk, FireMode, GunClass, Perk};
 use crate::fx::{Fx, FxQueue};
 use crate::game::Paused;
 use crate::physics::{collect_boxes, trace_shot};
@@ -23,7 +23,6 @@ pub struct WeaponPlugin;
 impl Plugin for WeaponPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Loadout>()
-            .add_systems(Startup, spawn_viewmodel)
             .add_systems(
                 Update,
                 (sync_loadout, switch_weapon, reload, fire)
@@ -31,7 +30,6 @@ impl Plugin for WeaponPlugin {
                     .after(crate::player::movement)
                     .in_set(Phase::Local),
             )
-            .add_systems(Update, update_viewmodel.in_set(Phase::Present))
             .add_systems(OnEnter(AppState::InGame), reset_loadout);
     }
 }
@@ -62,15 +60,18 @@ pub struct Loadout {
     pub reload: f32,
     burst_left: u32,
     switch_cd: f32,
-    recoil: f32,
-    flash: f32,
+    pub recoil: f32,
+    pub flash: f32,
+    /// Length of the reload in progress (for the animation).
+    pub reload_total: f32,
+    /// Counts shots fired (the viewmodel animates each one).
+    pub shots: u32,
     last_ammo_seq: u32,
     last_spawn_seq: u32,
     last_round: u32,
     /// Seconds left to show the hit marker, and whether it was a headshot.
     pub hitmarker: f32,
     pub headshot: bool,
-    shown: Option<(u8, u8)>,
 }
 
 impl Loadout {
@@ -81,37 +82,6 @@ impl Loadout {
 
 fn reset_loadout(mut loadout: ResMut<Loadout>) {
     *loadout = Loadout::default();
-}
-
-#[derive(Component)]
-struct ViewModel;
-
-#[derive(Component)]
-struct MuzzleFlash;
-
-#[derive(Component)]
-struct GunPart;
-
-fn spawn_viewmodel(mut commands: Commands, camera: Single<Entity, With<LocalPlayer>>) {
-    commands.entity(*camera).with_children(|cam| {
-        cam.spawn((
-            ViewModel,
-            Transform::from_xyz(0.25, -0.22, -0.45),
-            Visibility::Hidden,
-        ))
-        .with_children(|v| {
-            v.spawn((
-                MuzzleFlash,
-                PointLight {
-                    intensity: 0.0,
-                    color: Color::srgb(1.0, 0.8, 0.4),
-                    range: 12.0,
-                    ..default()
-                },
-                Transform::from_xyz(0.0, 0.03, -0.6),
-            ));
-        });
-    });
 }
 
 /// Keeps our guns in step with what the host says we hold (mystery box,
@@ -217,6 +187,7 @@ fn reload(
         && gun.reserve > 0
     {
         loadout.reload = def.reload / speed;
+        loadout.reload_total = loadout.reload;
     }
     if loadout.reload > 0.0 {
         loadout.reload -= time.delta_secs();
@@ -231,7 +202,7 @@ fn reload(
     }
 }
 
-fn fire(
+pub fn fire(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -239,6 +210,8 @@ fn fire(
     roster: Res<Roster>,
     state: Res<MatchState>,
     paused: Res<Paused>,
+    cast: Res<crate::abilities::CastState>,
+    view_muzzle: Res<crate::viewmodel::ViewMuzzle>,
     mut loadout: ResMut<Loadout>,
     mut shots: ResMut<ShotQueue>,
     mut fx: ResMut<FxQueue>,
@@ -271,7 +244,7 @@ fn fire(
         FireMode::Semi => mouse.just_pressed(MouseButton::Left),
         FireMode::Burst => mouse.just_pressed(MouseButton::Left) || loadout.burst_left > 0,
     };
-    if !wants || loadout.fire_cd > 0.0 || loadout.reload > 0.0 {
+    if !wants || loadout.fire_cd > 0.0 || loadout.reload > 0.0 || cast.blocks_fire {
         return;
     }
     if gun.mag == 0 && !overdrive {
@@ -279,6 +252,7 @@ fn fire(
         if gun.reserve > 0 {
             let speed = if has_perk(me.perks, Perk::QuickHands) { 2.0 } else { 1.0 };
             loadout.reload = def.reload / speed;
+            loadout.reload_total = loadout.reload;
         }
         return;
     }
@@ -306,6 +280,7 @@ fn fire(
     }
     loadout.recoil = 1.0;
     loadout.flash = 0.05;
+    loadout.shots += 1;
 
     let (cam, mut p) = player.into_inner();
     let origin = cam.translation;
@@ -333,7 +308,7 @@ fn fire(
     p.kick += kick;
 
     let boxes = collect_boxes(colliders.iter());
-    let muzzle = origin + cam.rotation * Vec3::new(0.25, -0.18, -0.9);
+    let muzzle = origin + cam.rotation * view_muzzle.0;
     let mut rng = rand::thread_rng();
     let mut any_hit = false;
     let mut head = false;
@@ -372,142 +347,4 @@ fn fire(
         loadout.hitmarker = 0.12;
         loadout.headshot = head;
     }
-}
-
-/// Rebuilds the first-person gun when you switch guns or skins, and animates
-/// recoil, reload and the muzzle flash.
-fn update_viewmodel(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    time: Res<Time>,
-    session: Res<Session>,
-    roster: Res<Roster>,
-    state: Res<State<AppState>>,
-    mut loadout: ResMut<Loadout>,
-    view: Single<(Entity, &mut Transform, &mut Visibility), With<ViewModel>>,
-    parts: Query<Entity, With<GunPart>>,
-    mut flash: Single<&mut PointLight, With<MuzzleFlash>>,
-    player: Single<&LocalPlayer>,
-) {
-    let (view_entity, mut tf, mut vis) = view.into_inner();
-    let me = roster.me(&session);
-    let in_game = *state.get() == AppState::InGame;
-    let alive = me.is_some_and(|m| m.alive);
-    let gun = loadout.current().map(|g| g.id);
-    *vis = if in_game && alive && gun.is_some() {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    let Some(gun) = gun else { return };
-    let skin = me.map(|m| m.skin).unwrap_or(0);
-
-    if loadout.shown != Some((gun, skin)) {
-        loadout.shown = Some((gun, skin));
-        for e in &parts {
-            commands.entity(e).despawn();
-        }
-        let body = materials.add(skin_material(skin));
-        let dark = materials.add(StandardMaterial {
-            base_color: Color::srgb(0.08, 0.08, 0.09),
-            perceptual_roughness: 0.6,
-            ..default()
-        });
-        let def = gun_def(gun);
-        let accent = if def.rare {
-            let c = if gun == 21 {
-                LinearRgba::rgb(0.3, 1.0, 0.4)
-            } else {
-                LinearRgba::rgb(0.5, 0.6, 1.0)
-            };
-            materials.add(StandardMaterial {
-                base_color: Color::from(c),
-                emissive: c * 6.0,
-                ..default()
-            })
-        } else {
-            dark.clone()
-        };
-        let mut part = |size: Vec3, pos: Vec3, mat: &Handle<StandardMaterial>| {
-            commands.entity(view_entity).with_children(|v| {
-                v.spawn((
-                    GunPart,
-                    Mesh3d(meshes.add(Cuboid::from_size(size))),
-                    MeshMaterial3d(mat.clone()),
-                    Transform::from_translation(pos),
-                ));
-            });
-        };
-        let (len, h) = match def.class {
-            GunClass::Pistol => (0.26, 0.12),
-            GunClass::Smg => (0.42, 0.13),
-            GunClass::Rifle => (0.55, 0.13),
-            GunClass::Shotgun => (0.55, 0.12),
-            GunClass::Lmg => (0.62, 0.16),
-            GunClass::Sniper => (0.7, 0.12),
-            GunClass::Wonder => (0.5, 0.18),
-        };
-        part(Vec3::new(0.09, h, len), Vec3::new(0.0, 0.0, -len / 2.0 + 0.1), &body);
-        // Barrel.
-        let barrel = match def.class {
-            GunClass::Pistol => 0.06,
-            GunClass::Sniper => 0.35,
-            GunClass::Shotgun => 0.25,
-            _ => 0.18,
-        };
-        let bw = if def.class == GunClass::Shotgun { 0.06 } else { 0.035 };
-        part(
-            Vec3::new(bw, bw, barrel),
-            Vec3::new(0.0, 0.02, -len + 0.1 - barrel / 2.0),
-            &dark,
-        );
-        // Grip.
-        part(Vec3::new(0.07, 0.15, 0.08), Vec3::new(0.0, -0.12, 0.02), &dark);
-        match def.class {
-            GunClass::Smg | GunClass::Rifle => {
-                part(Vec3::new(0.06, 0.18, 0.08), Vec3::new(0.0, -0.13, -0.18), &dark);
-                part(Vec3::new(0.07, 0.1, 0.22), Vec3::new(0.0, -0.02, 0.2), &body);
-            }
-            GunClass::Lmg => {
-                part(Vec3::new(0.14, 0.14, 0.16), Vec3::new(0.0, -0.13, -0.22), &dark);
-                part(Vec3::new(0.08, 0.12, 0.24), Vec3::new(0.0, -0.02, 0.2), &body);
-            }
-            GunClass::Shotgun => {
-                part(Vec3::new(0.09, 0.07, 0.16), Vec3::new(0.0, -0.08, -0.36), &dark);
-                part(Vec3::new(0.07, 0.11, 0.22), Vec3::new(0.0, -0.03, 0.2), &body);
-            }
-            GunClass::Sniper => {
-                part(Vec3::new(0.06, 0.06, 0.26), Vec3::new(0.0, 0.11, -0.25), &dark);
-                part(Vec3::new(0.07, 0.11, 0.24), Vec3::new(0.0, -0.02, 0.2), &body);
-            }
-            GunClass::Wonder => {
-                for z in [-0.12, -0.24, -0.36] {
-                    part(Vec3::new(0.14, 0.14, 0.04), Vec3::new(0.0, 0.0, z), &accent);
-                }
-            }
-            GunClass::Pistol => {}
-        }
-    }
-
-    // Animation.
-    let dip = if loadout.reload > 0.0 { 0.18 } else { 0.0 };
-    let bob = if player.on_ground {
-        (time.elapsed_secs() * 9.0).sin() * 0.008 * (player.horizontal_speed() / 6.0).min(1.5)
-    } else {
-        0.0
-    };
-    let sprint_tilt = if player.sprinting { 0.25 } else { 0.0 };
-    tf.translation = Vec3::new(
-        0.25,
-        -0.22 - dip + bob,
-        -0.45 + loadout.recoil * 0.06,
-    );
-    tf.rotation = Quat::from_euler(
-        EulerRot::YXZ,
-        sprint_tilt * 0.6,
-        loadout.recoil * 0.12 - dip * 2.0,
-        sprint_tilt * 0.3,
-    );
-    flash.intensity = if loadout.flash > 0.0 { 60_000.0 } else { 0.0 };
 }

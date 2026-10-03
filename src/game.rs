@@ -6,8 +6,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::config::{Action, InputExt, Profile, Settings};
-use crate::data::{gun_def, spins_for_round};
-use crate::maps::{spawn_map, BoxGlow, CurrentMap, ExtractionBeacon, MysteryBox, BOX_HALF};
+use crate::data::{spins_for_round, ROUNDS_PER_PREMIUM_QUARTER};
+use crate::maps::{spawn_map, BoxGlow, BoxLid, BoxPillar, CurrentMap, ExtractionBeacon, MysteryBox, BOX_HALF};
 use crate::nav::NavGrid;
 use crate::{
     cursor_locked, set_cursor_lock, AppState, BoxState, InGameEntity, MatchState, Phase, Roster,
@@ -59,8 +59,9 @@ pub enum Overlay {
 pub struct MatchResult {
     pub awarded: bool,
     pub spins: u32,
+    /// Quarter premium spins earned this match.
+    pub premium_quarters: u32,
     pub round: u32,
-    pub extracted: bool,
     pub new_best: bool,
 }
 
@@ -71,17 +72,24 @@ pub fn match_ended(state: &MatchState) -> bool {
 #[derive(Component)]
 struct BoxGun;
 
+/// One of the things that can float out of the box (a gun, or None for the
+/// teddy bear).
+#[derive(Component)]
+struct BoxGunModel(Option<u8>);
+
 fn start_match(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     state: Res<MatchState>,
     mut overlay: ResMut<Overlay>,
     mut paused: ResMut<Paused>,
     mut result: ResMut<MatchResult>,
     mut clear: ResMut<ClearColor>,
+    guns: Res<crate::gunmodels::GunAssets>,
 ) {
-    let layout = spawn_map(&mut commands, &mut meshes, &mut materials, state.map);
+    let layout = spawn_map(&mut commands, &mut meshes, &mut materials, &mut images, state.map);
     clear.0 = layout.sky;
     commands.insert_resource(NavGrid::new(layout.half));
     commands.insert_resource(CurrentMap(layout));
@@ -89,19 +97,53 @@ fn start_match(
     paused.0 = false;
     *result = MatchResult::default();
 
-    // The gun that floats out of the mystery box.
-    commands.spawn((
-        InGameEntity,
-        BoxGun,
-        Mesh3d(meshes.add(Cuboid::new(0.12, 0.18, 0.8))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.6, 0.85, 1.0),
-            emissive: LinearRgba::rgb(1.5, 3.0, 5.0),
-            ..default()
-        })),
-        Transform::default(),
-        Visibility::Hidden,
-    ));
+    // What floats out of the mystery box: every gun (one shown at a time)
+    // and a teddy bear for when the box flies away.
+    let glow = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.75, 0.9, 1.0),
+        emissive: LinearRgba::rgb(0.6, 1.2, 2.0),
+        ..default()
+    });
+    let teddy = meshes.add(teddy_kit().build_or_empty());
+    let teddy_mat = materials.add(crate::kit::vertex_material(0.95, 0.0));
+    commands
+        .spawn((InGameEntity, BoxGun, Transform::default(), Visibility::Hidden))
+        .with_children(|p| {
+            for id in 0..crate::data::GUNS.len() as u8 {
+                p.spawn((BoxGunModel(Some(id)), Transform::from_scale(Vec3::splat(1.3)), Visibility::Hidden))
+                    .with_children(|g| crate::gunmodels::spawn_gun(g, &guns, id, glow.clone(), false));
+            }
+            p.spawn((
+                BoxGunModel(None),
+                Mesh3d(teddy),
+                MeshMaterial3d(teddy_mat),
+                Transform::default(),
+                Visibility::Hidden,
+            ));
+        });
+}
+
+/// A teddy bear, shown when the box decides to fly away.
+fn teddy_kit() -> crate::kit::Kit {
+    use crate::kit::c;
+    let mut k = crate::kit::Kit::new();
+    let fur = c(0.55, 0.35, 0.18);
+    let light = c(0.8, 0.62, 0.42);
+    let v = Vec3::new;
+    k.blob(v(0.0, 0.0, 0.0), v(0.2, 0.24, 0.17), fur);
+    k.blob(v(0.0, 0.0, 0.12), v(0.12, 0.15, 0.07), light);
+    k.sphere(v(0.0, 0.33, 0.0), 0.15, fur);
+    k.blob(v(0.0, 0.3, 0.12), v(0.07, 0.055, 0.06), light);
+    k.sphere(v(0.0, 0.32, 0.18), 0.022, c(0.05, 0.03, 0.02));
+    for s in [-1.0f32, 1.0] {
+        k.sphere(v(s * 0.1, 0.45, 0.0), 0.06, fur);
+        k.sphere(v(s * 0.1, 0.45, 0.03), 0.035, light);
+        k.sphere(v(s * 0.055, 0.37, 0.13), 0.018, c(0.02, 0.02, 0.02));
+        k.capsule_between(v(s * 0.17, 0.1, 0.0), v(s * 0.28, -0.05, 0.08), 0.06, fur);
+        k.capsule_between(v(s * 0.1, -0.18, 0.02), v(s * 0.13, -0.3, 0.12), 0.07, fur);
+    }
+    k.cuboid(v(0.0, 0.2, 0.1), v(0.22, 0.04, 0.05), c(0.8, 0.1, 0.15));
+    k
 }
 
 fn end_match(
@@ -185,7 +227,8 @@ fn cursor_control(
 }
 
 /// Gacha spins are earned by how far you get: nothing below round 5, then
-/// more for every 5 rounds, doubled if the team extracts.
+/// more for every 5 rounds. Every 20 rounds survived (over all matches)
+/// also earns a quarter of a premium spin.
 fn award_spins(
     state: Res<MatchState>,
     mut result: ResMut<MatchResult>,
@@ -200,9 +243,13 @@ fn award_spins(
     } else {
         state.round.saturating_sub(1)
     };
-    let spins = spins_for_round(survived, state.extracted);
+    let spins = spins_for_round(survived);
     let new_best = survived > profile.best_round;
     profile.spins += spins;
+    profile.round_bank += survived;
+    let premium_quarters = profile.round_bank / ROUNDS_PER_PREMIUM_QUARTER;
+    profile.round_bank %= ROUNDS_PER_PREMIUM_QUARTER;
+    profile.premium_quarters += premium_quarters;
     if new_best {
         profile.best_round = survived;
     }
@@ -212,65 +259,88 @@ fn award_spins(
     *result = MatchResult {
         awarded: true,
         spins,
+        premium_quarters,
         round: survived,
-        extracted: state.extracted,
         new_best,
     };
 }
 
+#[allow(clippy::too_many_arguments)]
 fn box_visuals(
     time: Res<Time>,
     state: Res<MatchState>,
     map: Res<CurrentMap>,
-    mut boxes: Query<(&mut Transform, &mut Visibility), (With<MysteryBox>, Without<BoxGun>)>,
+    mut last_spot: Local<Option<Vec3>>,
+    mut lid_angle: Local<f32>,
+    mut boxes: Query<(&mut Transform, &mut Visibility), (With<MysteryBox>, Without<BoxGun>, Without<BoxLid>)>,
+    mut lids: Query<&mut Transform, (With<BoxLid>, Without<MysteryBox>, Without<BoxGun>, Without<BoxGunModel>)>,
     mut glow: Query<&mut PointLight, With<BoxGlow>>,
-    gun: Single<
-        (&mut Transform, &mut Visibility, &MeshMaterial3d<StandardMaterial>),
-        (With<BoxGun>, Without<MysteryBox>),
-    >,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    gun: Single<(&mut Transform, &mut Visibility), (With<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>)>,
+    mut models: Query<(&BoxGunModel, &mut Visibility), (Without<BoxGun>, Without<MysteryBox>)>,
+    mut pillars: Query<&mut Visibility, (With<BoxPillar>, Without<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>)>,
 ) {
     let spot = map.0.box_spots[(state.box_spot as usize).min(4)];
-    let moving = matches!(state.box_state, BoxState::Moving { .. });
-    for (mut tf, mut vis) in &mut boxes {
-        tf.translation = spot + Vec3::Y * BOX_HALF.y;
-        *vis = if moving { Visibility::Hidden } else { Visibility::Inherited };
-    }
     let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    // Flying away: rise and spin off the old spot, then drop onto the new.
+    let (pos, spin, show_box) = match state.box_state {
+        BoxState::Moving { time } => {
+            let from = last_spot.unwrap_or(spot);
+            if time > 2.0 {
+                let k = 4.0 - time;
+                (from + Vec3::Y * (BOX_HALF.y + k * k * 4.0), k * k * 3.0, true)
+            } else {
+                (spot + Vec3::Y * (BOX_HALF.y + time * time * 5.0), time * 4.0, time < 1.9)
+            }
+        }
+        _ => {
+            *last_spot = Some(spot);
+            (spot + Vec3::Y * BOX_HALF.y, 0.0, true)
+        }
+    };
+    for (mut tf, mut vis) in &mut boxes {
+        tf.translation = pos;
+        tf.rotation = Quat::from_rotation_y(spin);
+        *vis = if show_box { Visibility::Inherited } else { Visibility::Hidden };
+    }
+    let open = matches!(state.box_state, BoxState::Rolling { .. } | BoxState::Offer { .. });
+    for mut vis in &mut pillars {
+        *vis = if open || !matches!(state.box_state, BoxState::Idle) { Visibility::Hidden } else { Visibility::Inherited };
+    }
+    let target = if open { -1.25 } else { 0.0 };
+    *lid_angle += (target - *lid_angle) * (1.0 - (-8.0 * dt).exp());
+    for mut tf in &mut lids {
+        tf.rotation = Quat::from_rotation_x(*lid_angle);
+    }
     for mut light in &mut glow {
         light.color = match state.box_state {
             BoxState::Rolling { .. } => Color::srgb(1.0, 0.85, 0.3),
             BoxState::Offer { .. } => Color::srgb(0.4, 1.0, 0.5),
             _ => Color::srgb(0.4, 0.7, 1.0),
         };
-        light.intensity = 60_000.0 + 20_000.0 * (t * 3.0).sin();
+        light.intensity = 60_000.0 + 20_000.0 * (t * 3.0).sin() + if open { 80_000.0 } else { 0.0 };
     }
 
-    let (mut gtf, mut gvis, mat) = gun.into_inner();
-    let (show, height, color) = match state.box_state {
+    let (mut gtf, mut gvis) = gun.into_inner();
+    // Which model floats above the box, and how high.
+    let (shown, height) = match state.box_state {
         BoxState::Rolling { time, .. } => {
-            // Flicker through colours while it "decides".
-            let k = (t * 12.0).floor();
-            let c = Color::hsl((k * 47.0) % 360.0, 0.8, 0.6);
-            (true, 1.1 + (3.0 - time).clamp(0.0, 3.0) * 0.12, c)
+            // Cycles through guns, slowing down as it "decides".
+            let rate = 4.0 + time * 4.0;
+            let k = (t * rate).floor() as usize;
+            (Some(Some(((k * 7) % 23) as u8)), 0.9 + (3.0 - time).clamp(0.0, 3.0) * 0.15)
         }
-        BoxState::Offer { gun, .. } => {
-            let c = if gun_def(gun).rare {
-                Color::srgb(0.3, 1.0, 0.4)
-            } else {
-                Color::srgb(0.9, 0.9, 1.0)
-            };
-            (true, 1.5, c)
-        }
-        _ => (false, 0.0, Color::WHITE),
+        BoxState::Offer { gun, .. } => (Some(Some(gun)), 1.35),
+        BoxState::Moving { time } if time > 2.6 => (Some(None), 0.9 + (4.0 - time) * 0.5),
+        _ => (None, 0.0),
     };
-    *gvis = if show { Visibility::Inherited } else { Visibility::Hidden };
-    if show {
-        gtf.translation = spot + Vec3::Y * height;
-        gtf.rotation = Quat::from_rotation_y(t * 2.5);
-        if let Some(m) = materials.get_mut(&mat.0) {
-            m.base_color = color;
-            m.emissive = LinearRgba::from(color) * 3.0;
+    *gvis = if shown.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    if let Some(which) = shown {
+        let base = if matches!(state.box_state, BoxState::Moving { .. }) { last_spot.unwrap_or(spot) } else { spot };
+        gtf.translation = base + Vec3::Y * height;
+        gtf.rotation = Quat::from_rotation_y(t * 1.5);
+        for (model, mut vis) in &mut models {
+            *vis = if model.0 == which { Visibility::Inherited } else { Visibility::Hidden };
         }
     }
 }
@@ -287,3 +357,4 @@ fn extraction_visuals(
         };
     }
 }
+

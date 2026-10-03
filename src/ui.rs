@@ -11,7 +11,10 @@ use bevy::ui::RelativeCursorPosition;
 use crate::abilities::{queue_action, ActionCounter};
 use crate::avatars::{spawn_person, ReplicatedAssets};
 use crate::config::{key_name, Action, Profile, Settings, RESOLUTIONS};
-use crate::data::{roll_skin, skin_def, Character, SKINS};
+use crate::config::quarters_text;
+use crate::data::{
+    crate_odds, gun_def, roll_crate, skin_def, Character, CRATES, PREMIUM_TRADE_COST, ROUNDS_PER_PREMIUM_QUARTER,
+};
 use crate::game::Overlay;
 use crate::humanoid::HumanoidMeshes;
 use crate::maps::{map_name, MAP_NAMES};
@@ -26,6 +29,7 @@ const BUTTON_HOVER: Color = Color::srgb(0.24, 0.27, 0.38);
 const BUTTON_PRESS: Color = Color::srgb(0.34, 0.38, 0.52);
 const DIM: Color = Color::srgb(0.68, 0.72, 0.8);
 const WARN: Color = Color::srgb(1.0, 0.55, 0.35);
+const PREMIUM: Color = Color::srgb(1.0, 0.55, 0.9);
 
 pub struct UiPlugin;
 
@@ -34,7 +38,7 @@ impl Plugin for UiPlugin {
         app.init_resource::<Screen>()
             .init_resource::<Focus>()
             .init_resource::<Rebinding>()
-            .init_resource::<SpinResult>()
+            .init_resource::<SkinShop>()
             .add_systems(
                 Update,
                 (
@@ -78,9 +82,19 @@ enum Focus {
 #[derive(Resource, Default)]
 struct Rebinding(Option<Action>);
 
-/// The last gacha pull: (skin, was it new).
-#[derive(Resource, Default)]
-struct SpinResult(Option<(u8, bool)>);
+/// The gun skins screen: which crate is open, the last pull (skin, was it
+/// new), the skin being previewed on the right and any message.
+/// The big turning gun on the skins screen.
+#[derive(Component)]
+struct ShowcaseGun;
+
+#[derive(Resource, Default, Debug)]
+struct SkinShop {
+    crate_id: usize,
+    last: Option<(u8, bool)>,
+    preview: Option<u8>,
+    message: Option<String>,
+}
 
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
 pub enum UiAction {
@@ -96,11 +110,14 @@ pub enum UiAction {
     FocusName,
     FocusAddress,
     SelectCharacter(Character),
-    Spin,
+    SelectCrate(u8),
+    OpenCrate,
+    TradePremium,
     EquipSkin(u8),
     CycleDisplay,
     CycleResolution(i8),
     Rebind(Action),
+    CycleCast(u8),
     ResetKeys,
     SettingsBack,
     CycleMap(i8),
@@ -350,7 +367,7 @@ fn rebuild_ui(
     screen: Res<Screen>,
     focus: Res<Focus>,
     rebinding: Res<Rebinding>,
-    spin: Res<SpinResult>,
+    spin: Res<SkinShop>,
     overlay: Res<Overlay>,
     (profile, settings, notice, ready): (Res<Profile>, Res<Settings>, Res<Notice>, Res<LocalReady>),
     (session, roster, state): (Res<Session>, Res<Roster>, Res<MatchState>),
@@ -361,11 +378,11 @@ fn rebuild_ui(
     // Everything the current screen shows, so we only rebuild on changes.
     let sig = match app {
         AppState::Menu => format!(
-            "menu {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {:?} {} {} {} {:?}",
+            "menu {:?} {:?} {:?} {:?} {:?} {} {} {} {} {} {:?} {} {} {} {:?} {:?} {:?} {} {}",
             *screen,
             *focus,
             rebinding.0,
-            spin.0,
+            *spin,
             profile.character,
             profile.name,
             profile.last_address,
@@ -376,7 +393,11 @@ fn rebuild_ui(
             notice.0,
             settings.display.name(),
             settings.resolution,
-            settings.keys
+            settings.keys,
+            settings.cast_modes,
+            profile.gun_skins,
+            profile.premium_quarters,
+            profile.round_bank
         ),
         AppState::Lobby => {
             let players: Vec<_> = roster
@@ -397,12 +418,13 @@ fn rebuild_ui(
             )
         }
         AppState::InGame => format!(
-            "game {:?} {:?} {} {} {:?}",
+            "game {:?} {:?} {} {} {:?} {:?}",
             *overlay,
             rebinding.0,
             settings.display.name(),
             settings.resolution,
-            settings.keys
+            settings.keys,
+            settings.cast_modes
         ),
     };
     if *last == sig {
@@ -608,61 +630,132 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
     });
 }
 
-fn skins_screen(commands: &mut Commands, profile: &Profile, spin: &SpinResult) {
+fn skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
+    let c = &CRATES[shop.crate_id];
     panel(commands, false, |p| {
-        title(p, "Gun skins");
+        label(p, "GUN SKINS", 34.0, ACCENT);
         label(
             p,
             format!(
-                "Spins: {}    Duplicate shards: {}/3",
-                profile.spins, profile.shards
+                "Spins: {}    Premium spins: {}    Duplicate shards: {}/3",
+                profile.spins,
+                quarters_text(profile.premium_quarters),
+                profile.shards
             ),
-            20.0,
+            18.0,
             Color::WHITE,
         );
-        let all = profile.owned_skins.len() >= SKINS.len();
-        if all {
-            label(p, "You own every skin!", 16.0, ACCENT);
-        } else if profile.spins > 0 {
-            button(p, "Spin!", UiAction::Spin);
+        row(p, |r| {
+            button_sized(
+                r,
+                format!("Trade {PREMIUM_TRADE_COST} spins for 1 premium spin"),
+                UiAction::TradePremium,
+                Some(330.0),
+                false,
+            );
+            label(
+                r,
+                format!(
+                    "Also: +1/4 premium spin every\n{ROUNDS_PER_PREMIUM_QUARTER} rounds survived ({}/{ROUNDS_PER_PREMIUM_QUARTER})",
+                    profile.round_bank
+                ),
+                13.0,
+                DIM,
+            );
+        });
+        row(p, |r| {
+            for (i, cr) in CRATES.iter().enumerate() {
+                let selected = i == shop.crate_id;
+                r.spawn((
+                    Button,
+                    UiAction::SelectCrate(i as u8),
+                    Node {
+                        width: Val::Px(104.0),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(4.0), Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON),
+                    BorderColor(if selected {
+                        ACCENT
+                    } else if cr.premium {
+                        PREMIUM.with_alpha(0.6)
+                    } else {
+                        Color::NONE
+                    }),
+                    BorderRadius::all(Val::Px(6.0)),
+                ))
+                .with_children(|b| {
+                    label(b, cr.name, 14.0, Color::WHITE);
+                    let owned = cr.skins.iter().filter(|s| profile.owned_skins.contains(s)).count();
+                    let tag = if cr.premium { "PREMIUM" } else { "Regular" };
+                    label(b, format!("{tag}  {owned}/{}", cr.skins.len()), 11.0, if cr.premium { PREMIUM } else { DIM });
+                });
+            }
+        });
+        label(p, c.blurb, 14.0, if c.premium { PREMIUM } else { Color::WHITE });
+        let odds: Vec<String> = crate_odds(shop.crate_id)
+            .into_iter()
+            .map(|(r, pct)| format!("{} {:.0}%", r.name(), pct))
+            .collect();
+        label(p, format!("Odds: {}", odds.join(", ")), 13.0, DIM);
+        let all = c.skins.iter().all(|s| profile.owned_skins.contains(s));
+        let (cost, have) = if c.premium {
+            ("1 premium spin", profile.premium_quarters >= 4)
         } else {
-            label(p, "No spins left - earn more by surviving rounds.", 16.0, WARN);
+            ("1 spin", profile.spins > 0)
+        };
+        if all {
+            label(p, "You own everything in this crate!", 16.0, ACCENT);
+        } else if have {
+            button(p, format!("Open {} ({cost})", c.name), UiAction::OpenCrate);
+        } else if c.premium {
+            label(p, "No premium spins - trade spins for one or keep surviving rounds.", 15.0, WARN);
+        } else {
+            label(p, "No spins left - earn more by surviving rounds.", 15.0, WARN);
         }
-        if let Some((id, new)) = spin.0 {
+        if let Some((id, new)) = shop.last {
             let s = skin_def(id);
             let what = if new {
-                "NEW!".to_string()
+                "NEW!"
+            } else if c.premium {
+                "Duplicate (+1/4 premium spin)"
             } else {
-                "Duplicate (+1 shard)".to_string()
+                "Duplicate (+1 shard)"
             };
             label(
                 p,
                 format!("You got: {} ({}) {what}", s.name, s.rarity.name()),
-                20.0,
+                18.0,
                 s.rarity.color(),
             );
+        } else if let Some(msg) = &shop.message {
+            label(p, msg.clone(), 15.0, WARN);
         }
-        label(p, "Click a skin you own to equip it:", 15.0, DIM);
         p.spawn(Node {
             display: Display::Grid,
             grid_template_columns: RepeatedGridTrack::flex(3, 1.0),
-            column_gap: Val::Px(8.0),
-            row_gap: Val::Px(8.0),
+            column_gap: Val::Px(6.0),
+            row_gap: Val::Px(6.0),
             ..default()
         })
         .with_children(|g| {
-            for (i, s) in SKINS.iter().enumerate() {
-                let id = i as u8;
+            for &id in c.skins {
+                let s = skin_def(id);
                 let owned = profile.owned_skins.contains(&id);
-                let equipped = profile.skin == id;
-                let c = Color::srgb(s.color[0], s.color[1], s.color[2]);
+                let equipped = match s.gun {
+                    Some(gun) => profile.skin_for(gun) == id,
+                    None => profile.skin == id,
+                };
                 g.spawn((
                     Button,
                     UiAction::EquipSkin(id),
                     Node {
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
-                        padding: UiRect::all(Val::Px(6.0)),
+                        padding: UiRect::all(Val::Px(4.0)),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
@@ -671,25 +764,37 @@ fn skins_screen(commands: &mut Commands, profile: &Profile, spin: &SpinResult) {
                     BorderRadius::all(Val::Px(6.0)),
                 ))
                 .with_children(|b| {
-                    b.spawn((
-                        Node {
-                            width: Val::Px(60.0),
-                            height: Val::Px(18.0),
-                            ..default()
-                        },
-                        BackgroundColor(if owned { c } else { Color::srgb(0.2, 0.2, 0.22) }),
-                        BorderRadius::all(Val::Px(3.0)),
-                    ));
+                    // A two-tone swatch for patterned skins.
+                    b.spawn(Node {
+                        flex_direction: FlexDirection::Row,
+                        ..default()
+                    })
+                    .with_children(|sw| {
+                        let rgb = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
+                        let locked = Color::srgb(0.2, 0.2, 0.22);
+                        let parts = if s.gun.is_some() { [s.color, s.accent] } else { [s.color, s.color] };
+                        for part in parts {
+                            sw.spawn((
+                                Node {
+                                    width: Val::Px(28.0),
+                                    height: Val::Px(12.0),
+                                    ..default()
+                                },
+                                BackgroundColor(if owned { rgb(part) } else { locked }),
+                            ));
+                        }
+                    });
                     let name = if owned { s.name.to_string() } else { "???".to_string() };
-                    label(b, name, 15.0, if owned { Color::WHITE } else { DIM });
-                    label(b, s.rarity.name(), 12.0, s.rarity.color());
+                    let fits = s.gun.map_or("All guns", |g| gun_def(g).name);
+                    label(b, name, 13.0, if owned { Color::WHITE } else { DIM });
+                    label(b, format!("{} - {fits}", s.rarity.name()), 10.0, s.rarity.color());
                 });
             }
         });
         label(
             p,
-            "Earn spins by how far you get: round 5 = 1 spin, round 10 = 3,\nround 15 = 6, round 20 = 10... Extracting doubles them.\nOdds: Common 55%, Rare 30%, Epic 12%, Legendary 3%.",
-            14.0,
+            "Click a skin you own to equip it and see it on the right. Gun skins only\nshow on their gun; click one again to take it off. Round 5 = 1 spin,\nround 10 = 3, round 15 = 6, round 20 = 10.",
+            12.0,
             DIM,
         );
         button(p, "Back", UiAction::BackToMain);
@@ -757,6 +862,19 @@ fn settings_body(p: &mut ChildSpawnerCommands, settings: &Settings, rebinding: O
     label(
         p,
         "Fixed: mouse to aim and shoot, 1 / 2 or scroll to switch guns, Esc for menu.",
+        13.0,
+        DIM,
+    );
+    row(p, |r| {
+        label(r, "Casting:", 16.0, Color::WHITE);
+        for (i, name) in ["Ability 1", "Ability 2", "Ultimate"].iter().enumerate() {
+            let text = format!("{name}: {}", settings.cast_modes[i].name());
+            button_sized(r, &text, UiAction::CycleCast(i as u8), Some(170.0), false);
+        }
+    });
+    label(
+        p,
+        "Instant: casts on press. Quick: hold to aim, release to cast. Confirm: press to aim, click to cast, right-click to cancel.",
         13.0,
         DIM,
     );
@@ -990,7 +1108,7 @@ fn handle_buttons(
     mut screen: ResMut<Screen>,
     mut focus: ResMut<Focus>,
     mut rebinding: ResMut<Rebinding>,
-    mut spin: ResMut<SpinResult>,
+    mut spin: ResMut<SkinShop>,
     (mut profile, mut settings, mut ready): (ResMut<Profile>, ResMut<Settings>, ResMut<LocalReady>),
     (session, mut roster, mut state): (Res<Session>, ResMut<Roster>, ResMut<MatchState>),
     (mut overlay, mut counter, mut actions): (ResMut<Overlay>, ResMut<ActionCounter>, ResMut<ActionQueue>),
@@ -1022,7 +1140,9 @@ fn handle_buttons(
             }
             UiAction::OpenCharacters => *screen = Screen::Characters,
             UiAction::OpenSkins => {
-                spin.0 = None;
+                spin.last = None;
+                spin.message = None;
+                spin.preview = None;
                 *screen = Screen::Skins;
             }
             UiAction::OpenSettings => *screen = Screen::Settings,
@@ -1033,16 +1153,34 @@ fn handle_buttons(
             UiAction::FocusName => *focus = Focus::Name,
             UiAction::FocusAddress => *focus = Focus::Address,
             UiAction::SelectCharacter(c) => profile.character = c,
-            UiAction::Spin => {
-                if profile.spins == 0 || profile.owned_skins.len() >= SKINS.len() {
+            UiAction::SelectCrate(i) => {
+                spin.crate_id = (i as usize).min(CRATES.len() - 1);
+                spin.last = None;
+                spin.message = None;
+            }
+            UiAction::OpenCrate => {
+                let c = &CRATES[spin.crate_id];
+                if c.skins.iter().all(|s| profile.owned_skins.contains(s)) {
                     continue;
                 }
-                profile.spins -= 1;
-                let id = roll_skin(&mut rand::thread_rng());
+                if c.premium {
+                    if profile.premium_quarters < 4 {
+                        continue;
+                    }
+                    profile.premium_quarters -= 4;
+                } else {
+                    if profile.spins == 0 {
+                        continue;
+                    }
+                    profile.spins -= 1;
+                }
+                let id = roll_crate(spin.crate_id, &mut rand::thread_rng());
                 let new = !profile.owned_skins.contains(&id);
                 if new {
                     profile.owned_skins.push(id);
                     profile.owned_skins.sort();
+                } else if c.premium {
+                    profile.premium_quarters += 1;
                 } else {
                     profile.shards += 1;
                     if profile.shards >= 3 {
@@ -1050,11 +1188,34 @@ fn handle_buttons(
                         profile.spins += 1;
                     }
                 }
-                spin.0 = Some((id, new));
+                spin.last = Some((id, new));
+                spin.preview = Some(id);
+                spin.message = None;
+            }
+            UiAction::TradePremium => {
+                spin.last = None;
+                if profile.spins >= PREMIUM_TRADE_COST {
+                    profile.spins -= PREMIUM_TRADE_COST;
+                    profile.premium_quarters += 4;
+                    spin.message = Some("Traded for 1 premium spin.".into());
+                } else {
+                    spin.message = Some(format!("You need {PREMIUM_TRADE_COST} spins to trade for a premium spin."));
+                }
             }
             UiAction::EquipSkin(id) => {
                 if profile.owned_skins.contains(&id) {
-                    profile.skin = id;
+                    spin.preview = Some(id);
+                    match skin_def(id).gun {
+                        Some(gun) => {
+                            let gun = gun as usize;
+                            if profile.gun_skins.len() <= gun {
+                                profile.gun_skins.resize(gun + 1, 255);
+                            }
+                            // Clicking the equipped one takes it off.
+                            profile.gun_skins[gun] = if profile.gun_skins[gun] == id { 255 } else { id };
+                        }
+                        None => profile.skin = id,
+                    }
                 }
             }
             UiAction::CycleDisplay => settings.display = settings.display.next(),
@@ -1064,6 +1225,10 @@ fn handle_buttons(
             }
             UiAction::Rebind(a) => rebinding.0 = Some(a),
             UiAction::ResetKeys => settings.reset_keys(),
+            UiAction::CycleCast(i) => {
+                let m = &mut settings.cast_modes[i as usize];
+                *m = m.next();
+            }
             UiAction::SettingsBack => {
                 rebinding.0 = None;
                 if *overlay == Overlay::Settings {
@@ -1172,26 +1337,42 @@ fn menu_scene(
     mut mesh_assets: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     scene: Query<Entity, With<MenuScene>>,
-    mut turn: Query<(&mut Transform, &Turntable)>,
+    mut turn: Query<(&mut Transform, &Turntable), Without<ShowcaseGun>>,
+    mut showcase: Query<&mut Transform, With<ShowcaseGun>>,
+    (screen, shop, guns): (Res<Screen>, Res<SkinShop>, Res<crate::gunmodels::GunAssets>),
     mut last: Local<String>,
 ) {
-    // Who to show: you in the menu, the whole party in the lobby.
-    let people: Vec<(Character, u8)> = match app_state.get() {
+    const MENU_GUN: u8 = 6;
+    // Who to show: you in the menu, the whole party in the lobby, each with
+    // (character, skin, gun).
+    let mut showcase_skin = None;
+    let people: Vec<(Character, u8, u8)> = match app_state.get() {
         AppState::InGame => Vec::new(),
-        AppState::Menu => vec![(profile.character, profile.skin)],
+        AppState::Menu => {
+            let mut gun = MENU_GUN;
+            let mut skin = profile.skin_for(MENU_GUN);
+            if *screen == Screen::Skins {
+                if let Some(id) = shop.preview {
+                    gun = skin_def(id).gun.unwrap_or(MENU_GUN);
+                    skin = id;
+                    showcase_skin = Some((gun, id));
+                }
+            }
+            vec![(profile.character, skin, gun)]
+        }
         AppState::Lobby => {
-            let mut v: Vec<(Character, u8)> = vec![(profile.character, profile.skin)];
+            let mut v = vec![(profile.character, profile.skin_for(MENU_GUN), MENU_GUN)];
             v.extend(
                 roster
                     .0
                     .values()
                     .filter(|p| p.id != session.my_id)
-                    .map(|p| (p.character, p.skin)),
+                    .map(|p| (p.character, p.skin_for(MENU_GUN), MENU_GUN)),
             );
             v
         }
     };
-    let sig = format!("{people:?}");
+    let sig = format!("{people:?} {showcase_skin:?}");
     if *last != sig {
         *last = sig;
         for e in &scene {
@@ -1217,7 +1398,20 @@ fn menu_scene(
                 })),
                 Transform::from_xyz(2.6, -0.05, -5.8),
             ));
-            for (i, (c, skin)) in people.iter().enumerate() {
+            if let Some((gun, skin)) = showcase_skin {
+                // The previewed skin up close, slowly turning.
+                commands
+                    .spawn((
+                        MenuScene,
+                        ShowcaseGun,
+                        Transform::from_xyz(3.5, 1.3, -3.6).with_scale(Vec3::splat(2.0)),
+                        Visibility::default(),
+                    ))
+                    .with_children(|p| {
+                        crate::gunmodels::spawn_gun(p, &guns, gun, guns.skin(skin), false);
+                    });
+            }
+            for (i, (c, skin, gun)) in people.iter().enumerate() {
                 let n = people.len() as f32;
                 let spacing = if n > 4.0 { 1.0 } else { 1.4 };
                 let x = 2.6 + (i as f32 - (n - 1.0) / 2.0) * spacing;
@@ -1225,12 +1419,15 @@ fn menu_scene(
                 // Face the camera (at the origin).
                 let base = x.atan2(z);
                 let tf = Transform::from_xyz(x, 0.0, z).with_rotation(Quat::from_rotation_y(base));
-                let e = spawn_person(&mut commands, &meshes, &mut materials, &assets, *c, *skin, tf);
+                let (e, _) = spawn_person(&mut commands, &meshes, &mut materials, &assets, *c, *skin, *gun, tf);
                 commands.entity(e).insert((MenuScene, Turntable(base, i as f32)));
             }
         }
     }
     let t = time.elapsed_secs();
+    for mut tf in &mut showcase {
+        tf.rotation = Quat::from_rotation_y(t * 0.7) * Quat::from_rotation_x(-0.2);
+    }
     for (mut tf, Turntable(base, offset)) in &mut turn {
         let a = base + 0.4 * (t * 0.6 + offset).sin();
         tf.rotation = Quat::from_rotation_y(a);
