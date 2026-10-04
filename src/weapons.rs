@@ -490,6 +490,9 @@ pub fn fire(
     if overdrive {
         interval /= 1.5;
     }
+    if me.stim > 0.0 {
+        interval /= 1.25;
+    }
     if def.mode == FireMode::Burst {
         if loadout.burst_left == 0 {
             loadout.burst_left = 3;
@@ -505,7 +508,8 @@ pub fn fire(
     }
     if !overdrive && !state.sandbox.god {
         if let Some(g) = loadout.slots[active].as_mut() {
-            g.mag -= 1;
+            let rounds = if crate::data::is_dual(g.id) { 2 } else { 1 };
+            g.mag = g.mag.saturating_sub(rounds);
         }
     }
     loadout.recoil = 1.0;
@@ -560,10 +564,14 @@ pub fn fire(
     p.kick += rc.kick * handling.recoil_up * steady;
 
     let boxes = collect_boxes(colliders.iter());
-    let muzzle = origin + cam.rotation * view_muzzle.0;
+    // Twin Fangs: both guns fire on every pull.
+    let mut muzzles = vec![origin + cam.rotation * view_muzzle.0];
+    if let (true, Some(left)) = (crate::data::is_dual(gun.id), view_muzzle.1) {
+        muzzles.push(origin + cam.rotation * left);
+    }
     let mut any_hit = false;
     let mut head = false;
-    for _ in 0..def.pellets {
+    for muzzle in muzzles.iter().flat_map(|m| std::iter::repeat_n(*m, def.pellets as usize)) {
         let a = rng.gen_range(0.0..std::f32::consts::TAU);
         let r = spread * rng.gen_range(0.0f32..1.0).sqrt();
         let dir = (forward + right * a.cos() * r + up * a.sin() * r).normalize();

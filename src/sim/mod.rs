@@ -8,15 +8,15 @@ use std::collections::HashMap;
 
 use crate::avatars::spawn_replicated;
 use crate::data::{
-    ability_cooldown, elements_in, gun_def, has_perk, roll_attachments, roll_box_gun, wall_cost,
-    xp_to_next, Character, Element, GunSpecial, Perk, PowerUp, Upgrade, BOX_COST, MAX_LEVEL,
+    elements_in, gun_def, has_perk, roll_attachments, roll_box_gun, wall_cost,
+    xp_to_next, Element, GunSpecial, Perk, PowerUp, Upgrade, BOX_COST, MAX_LEVEL,
     MAX_TIER,
 };
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
 use crate::maps::{CurrentMap, EXTRACT_RADIUS};
 use crate::nav::NavGrid;
 use crate::physics::{
-    collect_boxes, line_of_sight, ray_world, resolve_collisions, trace_shot, Boxes,
+    collect_boxes, line_of_sight, resolve_collisions, trace_shot, Boxes,
 };
 use crate::weapons::GUN_RANGE;
 use crate::{
@@ -30,6 +30,8 @@ const POWERUP_CHANCE: f64 = 0.06;
 const REGEN_DELAY: f32 = 4.0;
 const REGEN_RATE: f32 = 20.0;
 
+pub mod powers;
+
 pub struct SimPlugin;
 
 impl Plugin for SimPlugin {
@@ -38,6 +40,7 @@ impl Plugin for SimPlugin {
             .init_resource::<DevQueue>()
             .init_resource::<Strikes>()
             .init_resource::<Zones>()
+            .init_resource::<powers::Forces>()
             .init_resource::<LastHurt>()
             .add_systems(
                 Update,
@@ -47,10 +50,13 @@ impl Plugin for SimPlugin {
                     player_timers,
                     status_effects,
                     projectiles,
-                    grenades,
-                    orbital_strikes,
+                    powers::grenades,
+                    powers::missiles,
+                    powers::mines,
+                    powers::strikes,
                     zones,
-                    turrets,
+                    powers::turrets,
+                    powers::timers,
                     apply_damage,
                     rounds,
                     enemy_ai,
@@ -103,6 +109,8 @@ pub struct EnemyBrain {
     pub crawler: bool,
     /// Seconds since the last swing (for the attack animation).
     pub swing: f32,
+    /// Stunned: can't move or attack.
+    pub stun: f32,
 }
 
 #[derive(Component)]
@@ -110,28 +118,6 @@ pub struct FireballBrain {
     velocity: Vec3,
     life: f32,
     damage: f32,
-}
-
-#[derive(Component)]
-pub struct GrenadeBrain {
-    owner: u8,
-    velocity: Vec3,
-    fuse: f32,
-    damage: f32,
-    radius: f32,
-    elements: u8,
-    /// A firebomb: bursts on landing and leaves a pool of fire.
-    pool: bool,
-}
-
-/// Tinker's sentry turret.
-#[derive(Component)]
-pub struct TurretBrain {
-    owner: u8,
-    life: f32,
-    cooldown: f32,
-    damage: f32,
-    elements: u8,
 }
 
 /// A lasting damage area (see `Fx::Zone` for the kinds).
@@ -168,14 +154,16 @@ struct DamageEvent {
     legs: bool,
     elements: u8,
     chained: bool,
+    /// Seconds the target is stunned (frozen, choking, knocked down).
+    stun: f32,
 }
 
 #[derive(Resource, Default)]
 struct DamageQueue(Vec<DamageEvent>);
 
-/// Pending orbital strikes: (owner, position, delay, radius, damage, elements).
+/// Delayed hits: orbital strikes, bombs, meteors, cuts (see powers.rs).
 #[derive(Resource, Default)]
-struct Strikes(Vec<(u8, Vec3, f32, f32, f32, u8)>);
+struct Strikes(Vec<powers::Strike>);
 
 /// Sandbox tools waiting to run: (player, tool).
 #[derive(Resource, Default)]
@@ -190,8 +178,10 @@ fn clear_sim(
     mut strikes: ResMut<Strikes>,
     mut hurt: ResMut<LastHurt>,
     mut zones: ResMut<Zones>,
+    mut forces: ResMut<powers::Forces>,
 ) {
     zones.0.clear();
+    forces.0.clear();
     damage.0.clear();
     strikes.0.clear();
     hurt.0.clear();
@@ -227,6 +217,7 @@ fn explode(
                 legs: false,
                 elements,
                 chained: false,
+                stun: 0.0,
             });
         }
     }
@@ -320,6 +311,7 @@ fn process_actions(
     mut damage: ResMut<DamageQueue>,
     mut strikes: ResMut<Strikes>,
     mut zones: ResMut<Zones>,
+    mut forces: ResMut<powers::Forces>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
     enemies: Query<(Entity, &Transform, &EnemyBrain)>,
@@ -331,7 +323,6 @@ fn process_actions(
     }
     let enemy_list: Vec<(Entity, Vec3)> =
         enemies.iter().map(|(e, t, _)| (e, t.translation)).collect();
-    let mut rng = rand::thread_rng();
     for (id, seq, action) in std::mem::take(&mut actions.0) {
         let Some(p) = roster.0.get_mut(&id) else {
             continue;
@@ -454,6 +445,7 @@ fn process_actions(
                         legs: false,
                         elements: 0,
                         chained: false,
+                        stun: 0.0,
                     });
                 }
             }
@@ -542,11 +534,17 @@ fn process_actions(
                     }
                 }
             }
-            PlayerAction::Ability { slot, origin, dir } => {
+            PlayerAction::Ability {
+                slot,
+                origin,
+                dir,
+                charge,
+            } => {
                 if !p.alive || slot > 2 {
                     continue;
                 }
                 let s = slot as usize;
+                let ability = p.kit[s];
                 if slot == 2 {
                     if p.ult_charge < 100.0 {
                         continue;
@@ -556,498 +554,33 @@ fn process_actions(
                     if p.cooldowns[s] > 0.0 {
                         continue;
                     }
-                    p.cooldowns[s] = ability_cooldown(p.character, s, p.tiers[s]);
+                    p.cooldowns[s] = ability.cooldown(p.tiers[s]);
                 }
                 let origin = Vec3::from_array(origin);
                 let dir = Vec3::from_array(dir).normalize_or_zero();
                 if !origin.is_finite() || dir == Vec3::ZERO {
                     continue;
                 }
+                let charge = if charge.is_finite() {
+                    charge.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 emit(&mut fx, &mut out, Fx::Cast { player: id, slot });
-                let tier = p.tiers[s] as f32;
-                let mult = level_multiplier(p);
-                let elements = p.ability_elements;
-                let feet = p.feet();
-                match (p.character, slot) {
-                    (Character::Striker, 0) => {
-                        // Dash is movement, done locally; everyone else sees
-                        // the streak.
-                        let flat = dir.with_y(0.0).normalize_or_zero();
-                        let dash = Fx::Dash {
-                            player: id,
-                            a: feet.to_array(),
-                            b: (feet + flat * 22.0 * (0.18 + 0.03 * tier)).to_array(),
-                        };
-                        out.0.push(dash);
-                    }
-                    (Character::Striker, 1) => {
-                        let id_net = state.next_net_id;
-                        state.next_net_id += 1;
-                        commands.spawn((
-                            crate::InGameEntity,
-                            Replicated {
-                                id: id_net,
-                                kind: NetKind::Grenade,
-                            },
-                            GrenadeBrain {
-                                owner: id,
-                                velocity: dir * crate::abilities::GRENADE_SPEED
-                                    + Vec3::Y * crate::abilities::GRENADE_LIFT,
-                                fuse: crate::abilities::GRENADE_FUSE,
-                                damage: (150.0 + 60.0 * tier) * mult,
-                                radius: 4.0 + 0.5 * tier,
-                                elements,
-                                pool: false,
-                            },
-                            Transform::from_translation(origin + dir * 0.6),
-                        ));
-                    }
-                    (Character::Striker, _) => {
-                        p.overdrive = 8.0 + 2.0 * tier;
-                    }
-                    (Character::Warden, 0) => {
-                        let heal = 40.0 + 20.0 * tier;
-                        let center = feet;
-                        for other in roster.0.values_mut() {
-                            if other.alive && other.feet().distance(center) < 8.0 {
-                                other.health = (other.health + heal).min(other.max_health());
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Heal {
-                                pos: center.to_array(),
-                                radius: 8.0,
-                            },
-                        );
-                    }
-                    (Character::Warden, 1) => {
-                        let dmg = (40.0 + 30.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            if pos.distance(feet) < 7.0 {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements: elements | Element::Ice.bit(),
-                                    chained: false,
-                                });
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Nova {
-                                pos: feet.to_array(),
-                                radius: 7.0,
-                            },
-                        );
-                    }
-                    (Character::Warden, _) => {
-                        let boxes = collect_boxes(colliders.iter());
-                        let dist = ray_world(origin, dir, 80.0, &boxes);
-                        let target = (origin + dir * dist).with_y(0.0);
-                        let radius = 9.0 + tier;
-                        strikes
-                            .0
-                            .push((id, target, 1.2, radius, 3000.0 * mult, elements));
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Beam {
-                                pos: target.to_array(),
-                                radius,
-                                delay: 1.2,
-                            },
-                        );
-                    }
-
-                    (Character::Ronin, 0) => {
-                        // Iaido Slash: everything in a wide arc in front.
-                        let flat = dir.with_y(0.0).normalize_or(Vec3::NEG_Z);
-                        let radius = 5.0 + 0.5 * tier;
-                        let dmg = (150.0 + 60.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            let to = (*pos - feet).with_y(0.0);
-                            let d = to.length();
-                            if d < radius
-                                && (d < 0.8 || to.normalize().dot(flat) > 0.45)
-                                && (pos.y - feet.y).abs() < 2.5
-                            {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements,
-                                    chained: false,
-                                });
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Slash {
-                                pos: (feet + Vec3::Y * 1.1).to_array(),
-                                dir: flat.to_array(),
-                                radius,
-                            },
-                        );
-                    }
-                    (Character::Ronin, 1) => {
-                        // Shadow Step: the blink is done locally; cut
-                        // everything along the path.
-                        let flat = dir.with_y(0.0).normalize_or_zero();
-                        let len = 22.0 * (0.2 + 0.03 * tier);
-                        let end = feet + flat * len;
-                        let dmg = (120.0 + 50.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            let p2 = pos.with_y(0.0);
-                            let (a, b) = (feet.with_y(0.0), end.with_y(0.0));
-                            let ab = b - a;
-                            let t =
-                                ((p2 - a).dot(ab) / ab.length_squared().max(1e-4)).clamp(0.0, 1.0);
-                            if p2.distance(a + ab * t) < 1.8 {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements,
-                                    chained: false,
-                                });
-                            }
-                        }
-                        out.0.push(Fx::Dash {
-                            player: id,
-                            a: feet.to_array(),
-                            b: end.to_array(),
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Slash {
-                                pos: (end + Vec3::Y * 1.1).to_array(),
-                                dir: flat.to_array(),
-                                radius: 3.0,
-                            },
-                        );
-                    }
-                    (Character::Ronin, _) => {
-                        let life = 6.0 + tier;
-                        zones.0.push(Zone {
-                            owner: id,
-                            pos: feet,
-                            follow: Some(id),
-                            radius: 5.0,
-                            damage: 70.0 * mult,
-                            interval: 0.25,
-                            timer: 0.0,
-                            life,
-                            elements,
-                            kind: 0,
-                            model: None,
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Zone {
-                                pos: feet.to_array(),
-                                radius: 5.0,
-                                life,
-                                follow: id,
-                                kind: 0,
-                            },
-                        );
-                    }
-                    (Character::Tinker, 0) => {
-                        // Sentry turret, set down where you aim (close by).
-                        let boxes = collect_boxes(colliders.iter());
-                        let flat = dir.with_y(0.0).normalize_or(Vec3::NEG_Z);
-                        let dist = ray_world(feet + Vec3::Y * 0.5, flat, 3.0, &boxes);
-                        let at = feet + flat * (dist - 0.6).max(0.3);
-                        let id_net = state.next_net_id;
-                        state.next_net_id += 1;
-                        commands.spawn((
-                            crate::InGameEntity,
-                            Replicated {
-                                id: id_net,
-                                kind: NetKind::Turret,
-                            },
-                            TurretBrain {
-                                owner: id,
-                                life: 15.0 + 5.0 * tier,
-                                cooldown: 0.5,
-                                damage: (24.0 + 8.0 * tier) * mult,
-                                elements,
-                            },
-                            Transform::from_translation(at)
-                                .with_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, flat)),
-                        ));
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Ring {
-                                pos: at.to_array(),
-                                radius: 1.5,
-                                color: [0.3, 0.9, 1.0],
-                            },
-                        );
-                    }
-                    (Character::Tinker, 1) => {
-                        let heal = 35.0 + 15.0 * tier;
-                        for other in roster.0.values_mut() {
-                            if other.alive && other.feet().distance(feet) < 8.0 {
-                                other.health = (other.health + heal).min(other.max_health());
-                                other.supply_seq = other.supply_seq.wrapping_add(1);
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Ring {
-                                pos: feet.to_array(),
-                                radius: 8.0,
-                                color: [1.0, 0.8, 0.2],
-                            },
-                        );
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Ring {
-                                pos: (feet + Vec3::Y * 0.6).to_array(),
-                                radius: 6.0,
-                                color: [0.3, 0.9, 1.0],
-                            },
-                        );
-                    }
-                    (Character::Tinker, _) => {
-                        // Tesla coil where you aim.
-                        let boxes = collect_boxes(colliders.iter());
-                        let dist = ray_world(origin, dir, 40.0, &boxes);
-                        let at =
-                            (origin + dir * (dist - 0.5).max(0.5)).with_y(feet.y.min(origin.y));
-                        let at = if (origin + dir * dist).y < feet.y + 0.3 {
-                            at
-                        } else {
-                            at.with_y(feet.y)
-                        };
-                        let id_net = state.next_net_id;
-                        state.next_net_id += 1;
-                        let model = commands
-                            .spawn((
-                                crate::InGameEntity,
-                                Replicated {
-                                    id: id_net,
-                                    kind: NetKind::Coil,
-                                },
-                                Transform::from_translation(at),
-                            ))
-                            .id();
-                        let life = 10.0 + tier;
-                        zones.0.push(Zone {
-                            owner: id,
-                            pos: at,
-                            follow: None,
-                            radius: 8.0,
-                            damage: 90.0 * mult,
-                            interval: 0.4,
-                            timer: 0.3,
-                            life,
-                            elements: elements | Element::Shock.bit(),
-                            kind: 1,
-                            model: Some(model),
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Zone {
-                                pos: at.to_array(),
-                                radius: 8.0,
-                                life,
-                                follow: 255,
-                                kind: 1,
-                            },
-                        );
-                    }
-                    (Character::Blaze, 0) => {
-                        let id_net = state.next_net_id;
-                        state.next_net_id += 1;
-                        commands.spawn((
-                            crate::InGameEntity,
-                            Replicated {
-                                id: id_net,
-                                kind: NetKind::Firebomb,
-                            },
-                            GrenadeBrain {
-                                owner: id,
-                                velocity: dir * crate::abilities::GRENADE_SPEED
-                                    + Vec3::Y * crate::abilities::GRENADE_LIFT,
-                                fuse: crate::abilities::GRENADE_FUSE,
-                                damage: (60.0 + 20.0 * tier) * mult,
-                                radius: 4.0 + 0.5 * tier,
-                                elements: elements | Element::Fire.bit(),
-                                pool: true,
-                            },
-                            Transform::from_translation(origin + dir * 0.6),
-                        ));
-                    }
-                    (Character::Blaze, 1) => {
-                        let range = 8.0 + tier;
-                        let dmg = (70.0 + 30.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            let to = *pos + Vec3::Y - origin;
-                            let d = to.length();
-                            if d < range && (d < 1.0 || to.normalize().dot(dir) > 0.8) {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements: elements | Element::Fire.bit(),
-                                    chained: false,
-                                });
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Cone {
-                                pos: (origin + dir * 0.5 - Vec3::Y * 0.2).to_array(),
-                                dir: dir.to_array(),
-                                range,
-                            },
-                        );
-                    }
-                    (Character::Valkyrie, 0) => {
-                        // Arc Spear: flies straight until it hits a wall,
-                        // shocking everything along the way.
-                        use crate::abilities::{SPEAR_RANGE, SPEAR_WIDTH};
-                        let boxes = collect_boxes(colliders.iter());
-                        let dist = ray_world(origin, dir, SPEAR_RANGE, &boxes);
-                        let end = origin + dir * dist;
-                        let dmg = (140.0 + 55.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            let chest = *pos + Vec3::Y * 1.0;
-                            let t = (chest - origin).dot(dir).clamp(0.0, dist);
-                            if chest.distance(origin + dir * t) < SPEAR_WIDTH {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements: elements | Element::Shock.bit(),
-                                    chained: false,
-                                });
-                            }
-                        }
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Spear {
-                                a: (origin + dir * 0.6 - Vec3::Y * 0.15).to_array(),
-                                b: end.to_array(),
-                            },
-                        );
-                    }
-                    (Character::Valkyrie, 1) => {
-                        // Storm Leap: the jump is done locally; the crash
-                        // lands where the leap ends.
-                        use crate::abilities::{leap_length, LEAP_RADIUS};
-                        let flat = dir.with_y(0.0).normalize_or_zero();
-                        let land = feet + flat * leap_length(tier);
-                        let dmg = (110.0 + 45.0 * tier) * mult;
-                        for (e, pos) in &enemy_list {
-                            if pos.with_y(0.0).distance(land.with_y(0.0)) < LEAP_RADIUS {
-                                damage.0.push(DamageEvent {
-                                    target: *e,
-                                    amount: dmg,
-                                    from: Some(id),
-                                    headshot: false,
-                                    legs: false,
-                                    elements: elements | Element::Shock.bit(),
-                                    chained: false,
-                                });
-                            }
-                        }
-                        out.0.push(Fx::Dash {
-                            player: id,
-                            a: feet.to_array(),
-                            b: land.to_array(),
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Slam {
-                                pos: land.to_array(),
-                                radius: LEAP_RADIUS,
-                            },
-                        );
-                    }
-                    (Character::Valkyrie, _) => {
-                        let life = 8.0 + tier;
-                        let radius = crate::abilities::RAGNAROK_RADIUS;
-                        zones.0.push(Zone {
-                            owner: id,
-                            pos: feet,
-                            follow: Some(id),
-                            radius,
-                            damage: 160.0 * mult,
-                            interval: 0.3,
-                            timer: 0.2,
-                            life,
-                            elements: elements | Element::Shock.bit(),
-                            kind: 4,
-                            model: None,
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Zone {
-                                pos: feet.to_array(),
-                                radius,
-                                life,
-                                follow: id,
-                                kind: 4,
-                            },
-                        );
-                    }
-                    (Character::Blaze, _) => {
-                        let life = 8.0 + tier;
-                        zones.0.push(Zone {
-                            owner: id,
-                            pos: feet,
-                            follow: Some(id),
-                            radius: 6.0,
-                            damage: 50.0 * mult,
-                            interval: 0.3,
-                            timer: 0.0,
-                            life,
-                            elements: elements | Element::Fire.bit(),
-                            kind: 3,
-                            model: None,
-                        });
-                        emit(
-                            &mut fx,
-                            &mut out,
-                            Fx::Zone {
-                                pos: feet.to_array(),
-                                radius: 6.0,
-                                life,
-                                follow: id,
-                                kind: 3,
-                            },
-                        );
-                    }
-                }
-                let _ = &mut rng;
+                let boxes = collect_boxes(colliders.iter());
+                let mut world = powers::World {
+                    commands: &mut commands,
+                    state: &mut state,
+                    damage: &mut damage,
+                    strikes: &mut strikes,
+                    zones: &mut zones,
+                    forces: &mut forces,
+                    fx: &mut fx,
+                    out: &mut out,
+                    enemies: &enemy_list,
+                    boxes: &boxes,
+                };
+                powers::cast(&mut world, &mut roster, id, slot, origin, dir, charge);
             }
         }
     }
@@ -1145,6 +678,7 @@ fn resolve_shots(
             legs: hit.legs,
             elements,
             chained: false,
+            stun: 0.0,
         });
         if let GunSpecial::Chain { jumps } = def.special {
             let mut from = end;
@@ -1176,6 +710,7 @@ fn resolve_shots(
                     legs: false,
                     elements,
                     chained: true,
+                    stun: 0.0,
                 });
             }
         }
@@ -1205,6 +740,7 @@ fn status_effects(
     for (e, mut b, mut status) in &mut enemies {
         status.flash -= dt;
         b.slow -= dt;
+        b.stun -= dt;
         if b.burn > 0.0 {
             b.burn -= dt;
             damage.0.push(DamageEvent {
@@ -1215,10 +751,12 @@ fn status_effects(
                 legs: false,
                 elements: 0,
                 chained: true,
+                stun: 0.0,
             });
         }
         status.burning = b.burn > 0.0;
         status.slowed = b.slow > 0.0;
+        status.stunned = b.stun > 0.0;
         status.crawler = b.crawler;
         status.attacking = b.swing < 0.6;
     }
@@ -1245,13 +783,14 @@ fn apply_damage(
     let mut i = 0;
     while i < queue.0.len() {
         let ev = &queue.0[i];
-        let (target, from, headshot, legs, elements, chained) = (
+        let (target, from, headshot, legs, elements, chained, stun) = (
             ev.target,
             ev.from,
             ev.headshot,
             ev.legs,
             ev.elements,
             ev.chained,
+            ev.stun,
         );
         let mut amount = ev.amount;
         i += 1;
@@ -1265,6 +804,9 @@ fn apply_damage(
             amount = amount.max(brain.health);
         }
         brain.health -= amount;
+        // Brutes shrug off half of it.
+        let resist = if brain.kind == NetKind::Brute { 0.5 } else { 1.0 };
+        brain.stun = brain.stun.max(stun * resist);
         if !chained || amount > 5.0 {
             status.flash = 0.08;
         }
@@ -1300,6 +842,7 @@ fn apply_damage(
                             legs: false,
                             elements: 0,
                             chained: true,
+                            stun: 0.0,
                         });
                     }
                 }
@@ -1544,6 +1087,7 @@ fn spawn_zombie(
         leg_damage: 0.0,
         crawler,
         swing: 9.0,
+        stun: 0.0,
     });
 }
 
@@ -1623,15 +1167,17 @@ fn enemy_ai(
     mut state: ResMut<MatchState>,
     mut roster: ResMut<Roster>,
     mut hurt: ResMut<LastHurt>,
+    forces: Res<powers::Forces>,
     mut enemies: Query<(Entity, &mut Transform, &mut EnemyBrain)>,
     colliders: Query<(&Transform, &Collider), Without<EnemyBrain>>,
 ) {
     let dt = time.delta_secs();
     let boxes: Boxes = collect_boxes(colliders.iter());
+    // Players who have vanished (Thousand Cuts) can't be chased.
     let targets: Vec<(u8, Vec3)> = roster
         .0
         .values()
-        .filter(|p| p.alive)
+        .filter(|p| p.alive && p.vanish <= 0.0)
         .map(|p| (p.id, p.feet()))
         .collect();
     let target_points: Vec<Vec3> = targets.iter().map(|t| t.1).collect();
@@ -1672,6 +1218,23 @@ fn enemy_ai(
         } else if enemy.kind == NetKind::Shooter && dist < desired - 4.0 {
             velocity = -direct * speed * 0.6;
         }
+        if enemy.stun > 0.0 {
+            velocity = Vec3::ZERO;
+        }
+        // Singularities pull, barrier domes push out.
+        for f in &forces.0 {
+            let to = (f.pos - pos).with_y(0.0);
+            let d = to.length();
+            if d < f.radius && d > 1e-3 {
+                let dir = to / d;
+                if f.strength > 0.0 {
+                    velocity = velocity * 0.3 + dir * f.strength * (0.4 + 0.6 * d / f.radius);
+                } else {
+                    let inward = velocity.dot(dir).max(0.0);
+                    velocity += -dir * (inward - f.strength * (1.0 - d / f.radius) * 2.0);
+                }
+            }
+        }
         for (other, opos) in &positions {
             if *other == entity {
                 continue;
@@ -1700,6 +1263,9 @@ fn enemy_ai(
 
         enemy.attack_timer -= dt;
         enemy.swing += dt;
+        if enemy.stun > 0.0 {
+            continue;
+        }
         match enemy.kind {
             NetKind::Shooter => {
                 if sees && dist < 28.0 && enemy.attack_timer <= 0.0 {
@@ -1776,98 +1342,11 @@ fn projectiles(
     }
 }
 
-fn grenades(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut zones: ResMut<Zones>,
-    mut damage: ResMut<DamageQueue>,
-    mut fx: ResMut<FxQueue>,
-    mut out: ResMut<FxOutbox>,
-    mut nades: Query<(Entity, &mut Transform, &mut GrenadeBrain), Without<EnemyBrain>>,
-    enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
-    colliders: Query<(&Transform, &Collider), (Without<GrenadeBrain>, Without<EnemyBrain>)>,
-) {
-    let dt = time.delta_secs();
-    if nades.is_empty() {
-        return;
-    }
-    let boxes = collect_boxes(colliders.iter());
-    let enemy_list: Vec<(Entity, Vec3)> = enemies.iter().map(|(e, t)| (e, t.translation)).collect();
-    for (e, mut tf, mut g) in &mut nades {
-        g.fuse -= dt;
-        g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
-        let next = tf.translation + g.velocity * dt;
-        // Bounce off the floor and stop at walls.
-        if next.y < 0.1 && g.pool {
-            g.fuse = 0.0;
-            tf.translation.y = 0.1;
-        } else if next.y < 0.1 {
-            g.velocity.y = -g.velocity.y * 0.35;
-            g.velocity *= 0.6;
-            tf.translation.y = 0.1;
-        } else if !line_of_sight(tf.translation, next, &boxes) {
-            g.velocity = -g.velocity * 0.3;
-        } else {
-            tf.translation = next;
-        }
-        let touching = enemy_list
-            .iter()
-            .any(|(_, p)| (*p + Vec3::Y).distance(tf.translation) < 1.0);
-        if g.fuse <= 0.0 || touching {
-            let mut color = Color::srgb(1.0, 0.55, 0.15);
-            if let Some(el) = elements_in(g.elements).next() {
-                color = el.color();
-            }
-            if g.pool {
-                let at = tf.translation.with_y(0.0);
-                let life = 6.0;
-                zones.0.push(Zone {
-                    owner: g.owner,
-                    pos: at,
-                    follow: None,
-                    radius: g.radius,
-                    damage: g.damage * 0.4,
-                    interval: 0.3,
-                    timer: 0.0,
-                    life,
-                    elements: g.elements,
-                    kind: 2,
-                    model: None,
-                });
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Zone {
-                        pos: at.to_array(),
-                        radius: g.radius,
-                        life,
-                        follow: 255,
-                        kind: 2,
-                    },
-                );
-                color = Color::srgb(1.0, 0.45, 0.1);
-            }
-            explode(
-                tf.translation + Vec3::Y * 0.3,
-                g.radius,
-                g.damage,
-                Some(g.owner),
-                g.elements,
-                &enemy_list,
-                &mut damage,
-                &mut fx,
-                &mut out,
-                color,
-            );
-            commands.entity(e).despawn();
-        }
-    }
-}
 
 fn zones(
     mut commands: Commands,
     time: Res<Time>,
-    roster: Res<Roster>,
+    mut roster: ResMut<Roster>,
     mut zones: ResMut<Zones>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
@@ -1889,6 +1368,16 @@ fn zones(
             continue;
         }
         z.timer += z.interval;
+        if z.kind == powers::zone::DOME {
+            // Barrier Dome heals instead of hurting.
+            for p in roster.0.values_mut() {
+                if p.alive && p.feet().distance(z.pos) < z.radius {
+                    p.health = (p.health + z.damage).min(p.max_health());
+                }
+            }
+            continue;
+        }
+        let stun = if z.kind == powers::zone::SMOKE { 0.8 } else { 0.0 };
         if z.kind == 4 {
             // Ragnarok: lightning from the sky on a couple of enemies in reach.
             let mut near: Vec<(Entity, Vec3)> = enemies
@@ -1907,6 +1396,7 @@ fn zones(
                     legs: false,
                     elements: z.elements,
                     chained: true,
+                    stun: 0.0,
                 });
                 emit(
                     &mut fx,
@@ -1942,6 +1432,7 @@ fn zones(
                     legs: false,
                     elements: z.elements,
                     chained: true,
+                    stun,
                 });
                 if z.kind == 1 && arcs < 4 {
                     arcs += 1;
@@ -1970,101 +1461,7 @@ fn zones(
     });
 }
 
-fn turrets(
-    mut commands: Commands,
-    time: Res<Time>,
-    mut damage: ResMut<DamageQueue>,
-    mut fx: ResMut<FxQueue>,
-    mut out: ResMut<FxOutbox>,
-    mut turrets: Query<(Entity, &mut Transform, &mut TurretBrain), Without<EnemyBrain>>,
-    enemies: Query<(Entity, &Transform, &EnemyBrain)>,
-    colliders: Query<(&Transform, &Collider), (Without<TurretBrain>, Without<EnemyBrain>)>,
-) {
-    if turrets.is_empty() {
-        return;
-    }
-    let dt = time.delta_secs();
-    let boxes = collect_boxes(colliders.iter());
-    for (e, mut tf, mut t) in &mut turrets {
-        t.life -= dt;
-        if t.life <= 0.0 {
-            emit(
-                &mut fx,
-                &mut out,
-                Fx::Explosion {
-                    pos: (tf.translation + Vec3::Y * 0.6).to_array(),
-                    radius: 1.2,
-                    color: [0.3, 0.9, 1.0],
-                },
-            );
-            commands.entity(e).despawn();
-            continue;
-        }
-        t.cooldown -= dt;
-        let gun = tf.translation + Vec3::Y * 0.85;
-        let target = enemies
-            .iter()
-            .map(|(e, et, b)| (e, et.translation + Vec3::Y * 1.1 * enemy_scale(b.kind)))
-            .filter(|(_, p)| p.distance(gun) < 24.0 && line_of_sight(gun, *p, &boxes))
-            .min_by(|a, b| a.1.distance(gun).total_cmp(&b.1.distance(gun)));
-        let Some((enemy, at)) = target else { continue };
-        let flat = (at - gun).with_y(0.0).normalize_or(Vec3::NEG_Z);
-        tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, flat);
-        if t.cooldown <= 0.0 {
-            t.cooldown = 0.15;
-            damage.0.push(DamageEvent {
-                target: enemy,
-                amount: t.damage,
-                from: Some(t.owner),
-                headshot: false,
-                legs: false,
-                elements: t.elements,
-                chained: false,
-            });
-            emit(
-                &mut fx,
-                &mut out,
-                Fx::Tracer {
-                    shooter: 255,
-                    a: (gun + flat * 0.5).to_array(),
-                    b: at.to_array(),
-                },
-            );
-        }
-    }
-}
 
-fn orbital_strikes(
-    time: Res<Time>,
-    mut strikes: ResMut<Strikes>,
-    mut damage: ResMut<DamageQueue>,
-    enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
-) {
-    let dt = time.delta_secs();
-    let mut done = Vec::new();
-    for (i, s) in strikes.0.iter_mut().enumerate() {
-        s.2 -= dt;
-        if s.2 <= 0.0 {
-            done.push(i);
-        }
-    }
-    for i in done.into_iter().rev() {
-        let (owner, pos, _, radius, dmg, elements) = strikes.0.remove(i);
-        for (e, t) in &enemies {
-            if t.translation.with_y(0.0).distance(pos) < radius {
-                damage.0.push(DamageEvent {
-                    target: e,
-                    amount: dmg,
-                    from: Some(owner),
-                    headshot: false,
-                    legs: false,
-                    elements,
-                    chained: false,
-                });
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Power-ups, mystery box, extraction, game over
@@ -2109,6 +1506,7 @@ fn powerups(
                         legs: false,
                         elements: 0,
                         chained: true,
+                        stun: 0.0,
                     });
                     emit(
                         &mut fx,
@@ -2241,7 +1639,7 @@ pub fn new_match(state: &mut MatchState, roster: &mut Roster, map: u8) {
     state.sandbox = sandbox;
     if sandbox.on {
         // Everything open and plenty of points to try things with.
-        state.doors = 0b11110;
+        state.doors = 0xFE;
     }
     state.started = true;
     state.box_spot = rng.gen_range(0..5);

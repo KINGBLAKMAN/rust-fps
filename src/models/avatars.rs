@@ -6,6 +6,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use crate::data::{Character, PowerUp};
 use crate::humanoid;
+use crate::models::projectiles;
 use crate::player::LocalPlayer;
 use crate::rig::Model;
 use crate::rig::{Rig, RigAssets};
@@ -27,6 +28,7 @@ impl Plugin for AvatarPlugin {
                 enemy_colors,
                 spin,
                 tumble,
+                spinners,
             )
                 .chain()
                 .in_set(Phase::Present)
@@ -48,6 +50,11 @@ pub struct ReplicatedAssets {
     gadgets: [(Handle<Mesh>, Handle<Mesh>); 3],
     gadget_mat: Handle<StandardMaterial>,
     gadget_glow: Handle<StandardMaterial>,
+    /// Ability projectiles by look: (solid, glowing, light colour).
+    missiles: Vec<(Handle<Mesh>, Handle<Mesh>, Color)>,
+    mine: (Handle<Mesh>, Handle<Mesh>),
+    drone: (Handle<Mesh>, Handle<Mesh>),
+    rotor: Handle<Mesh>,
 }
 
 /// Blaze's firebomb: a bottle with a burning rag.
@@ -219,6 +226,21 @@ fn setup(
         }),
         gadget_mat: materials.add(crate::kit::vertex_material(0.5, 0.3)),
         gadget_glow: materials.add(crate::kit::glow_material(3.0)),
+        missiles: (0..=crate::sim::powers::look::GRAV)
+            .map(|l| {
+                let (k, g, light) = projectiles::missile_kit(l);
+                (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()), light)
+            })
+            .collect(),
+        mine: {
+            let (k, g) = projectiles::mine_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+        },
+        drone: {
+            let (k, g) = projectiles::drone_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+        },
+        rotor: meshes.add(projectiles::rotor_kit().build_or_empty()),
     });
 }
 
@@ -343,6 +365,18 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
         }
     }
     k
+}
+
+/// Spins a part about its own axes (kunai end over end, rotors, rings).
+#[derive(Component)]
+struct Spinner(Vec3);
+
+fn spinners(time: Res<Time>, mut q: Query<(&Spinner, &mut Transform)>) {
+    let dt = time.delta_secs();
+    for (s, mut tf) in &mut q {
+        let r = s.0 * dt;
+        tf.rotate_local(Quat::from_euler(EulerRot::XYZ, r.x, r.y, r.z));
+    }
 }
 
 fn tumble(time: Res<Time>, mut q: Query<&mut Transform, With<Tumble>>) {
@@ -495,6 +529,96 @@ fn dress(
                 ));
             });
         }
+        NetKind::Missile(look) => {
+            use crate::sim::powers::look as L;
+            let Some((solid, glowing, light)) = assets.missiles.get(look as usize).cloned() else {
+                return;
+            };
+            let spin = match look {
+                L::KUNAI => Vec3::X * -22.0,
+                L::CRYO => Vec3::new(1.5, 3.0, 0.0),
+                L::GRAV => Vec3::new(4.0, 7.0, 0.0),
+                L::ROCKET => Vec3::Z * 10.0,
+                L::SMOKE | L::BOMBLET => Vec3::new(8.0, 0.0, 5.0),
+                _ => Vec3::ZERO,
+            };
+            let (power, range) = match look {
+                0..=2 => (60_000.0 * (1.0 + look as f32), 8.0),
+                L::FIREBALL => (120_000.0, 9.0),
+                L::CRYO => (60_000.0, 7.0),
+                L::BOMBLET | L::SMOKE => (0.0, 1.0),
+                _ => (15_000.0, 4.0),
+            };
+            commands.entity(root).with_children(|p| {
+                p.spawn((
+                    Spinner(spin),
+                    Mesh3d(solid),
+                    MeshMaterial3d(assets.gadget_mat.clone()),
+                    Transform::default(),
+                ))
+                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                if power > 0.0 {
+                    p.spawn((
+                        PointLight {
+                            intensity: power,
+                            color: light,
+                            range,
+                            ..default()
+                        },
+                        Transform::default(),
+                    ));
+                }
+            });
+        }
+        NetKind::Mine => {
+            let (solid, glowing) = assets.mine.clone();
+            commands.entity(root).with_children(|p| {
+                p.spawn((
+                    Mesh3d(solid),
+                    MeshMaterial3d(assets.gadget_mat.clone()),
+                    Transform::default(),
+                ))
+                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                p.spawn((
+                    PointLight {
+                        intensity: 3_000.0,
+                        color: Color::srgb(1.0, 0.2, 0.1),
+                        range: 2.5,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, 0.25, 0.0),
+                ));
+            });
+        }
+        NetKind::Drone => {
+            let (solid, glowing) = assets.drone.clone();
+            commands.entity(root).with_children(|p| {
+                p.spawn((
+                    Mesh3d(solid),
+                    MeshMaterial3d(assets.gadget_mat.clone()),
+                    Transform::default(),
+                ))
+                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                for (i, at) in projectiles::rotor_spots().into_iter().enumerate() {
+                    let dir = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    p.spawn((
+                        Spinner(Vec3::Y * 40.0 * dir),
+                        Mesh3d(assets.rotor.clone()),
+                        MeshMaterial3d(assets.gadget_mat.clone()),
+                        Transform::from_translation(at),
+                    ));
+                }
+                p.spawn((
+                    PointLight {
+                        intensity: 6_000.0,
+                        color: Color::srgb(0.3, 1.0, 0.85),
+                        range: 4.0,
+                        ..default()
+                    },
+                    Transform::from_xyz(0.0, -0.2, -0.2),
+                ));
+            });
+        }
         NetKind::PowerUp(kind) => {
             let i = PowerUp::ALL.iter().position(|p| *p == kind).unwrap_or(0);
             commands.entity(root).with_children(|p| {
@@ -528,6 +652,12 @@ fn enemy_colors(
         status.flash -= dt;
         let (tint, glow) = if status.flash > 0.0 {
             (Color::WHITE, LinearRgba::rgb(0.6, 0.6, 0.6))
+        } else if status.stunned {
+            // Frozen stiff (or choking in smoke): pale and glowing.
+            (
+                Color::srgb(0.75, 0.9, 1.0),
+                LinearRgba::rgb(0.12, 0.25, 0.45),
+            )
         } else if status.burning {
             let flicker = 0.6 + 0.4 * (time.elapsed_secs() * 12.0).sin().abs();
             (
@@ -648,7 +778,8 @@ fn sync_avatars(
         } else {
             (p.feet(), p.yaw, p.pitch, p.stance, p.emote, p.emote_seq)
         };
-        let shown = !mine || local.cam_out > 0.05;
+        // Thousand Cuts: gone from sight while the cuts land.
+        let shown = (!mine || local.cam_out > 0.05) && p.vanish <= 0.0;
         let want = if shown {
             Visibility::Inherited
         } else {

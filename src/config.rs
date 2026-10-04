@@ -5,9 +5,10 @@
 use bevy::prelude::*;
 use bevy::window::{MonitorSelection, PrimaryWindow, VideoModeSelection, WindowMode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::data::Character;
+use crate::data::{Ability, Character};
 
 pub struct ConfigPlugin;
 
@@ -333,6 +334,10 @@ pub struct Profile {
     /// The gun brought into matches, and its attachments.
     pub loadout_gun: Option<u8>,
     pub loadout_attach: u8,
+    /// XP earned with each character (their character level).
+    pub char_xp: HashMap<Character, u32>,
+    /// The abilities picked for each character.
+    pub kits: HashMap<Character, [Ability; 3]>,
 }
 
 impl Default for Profile {
@@ -353,6 +358,8 @@ impl Default for Profile {
             career_xp: 0,
             loadout_gun: None,
             loadout_attach: 0,
+            char_xp: HashMap::new(),
+            kits: HashMap::new(),
         }
     }
 }
@@ -377,6 +384,22 @@ impl Profile {
     /// The skin this player shows on `gun`.
     pub fn skin_for(&self, gun: u8) -> u8 {
         crate::data::skin_for(self.skin, &self.gun_skins, gun)
+    }
+
+    /// Level with a character: (level, XP into it, XP needed for the next).
+    pub fn char_level(&self, c: Character) -> (u32, u32, u32) {
+        crate::data::char_level(self.char_xp.get(&c).copied().unwrap_or(0))
+    }
+
+    /// The kit picked for a character, falling back to the starting kit if
+    /// the saved one isn't allowed (yet).
+    pub fn kit(&self, c: Character) -> [Ability; 3] {
+        let level = self.char_level(c).0;
+        self.kits
+            .get(&c)
+            .copied()
+            .filter(|k| crate::data::valid_kit(c, level, *k))
+            .unwrap_or(c.default_kit())
     }
 }
 

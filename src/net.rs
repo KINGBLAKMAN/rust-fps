@@ -25,7 +25,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 7;
+const PROTOCOL_VERSION: u32 = 8;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -134,6 +134,8 @@ struct ClientUpdate {
     skin: u8,
     gun_skins: Vec<u8>,
     loadout: Option<(u8, crate::data::Attach)>,
+    kit: [crate::data::Ability; 3],
+    char_level: u8,
     ready: bool,
     shots: Vec<Shot>,
     actions: Vec<(u32, PlayerAction)>,
@@ -162,7 +164,8 @@ struct NetEntity {
     kind: NetKind,
     pos: [f32; 3],
     yaw: f32,
-    /// 1 = hit flash, 2 = burning, 4 = slowed, 8 = crawling, 16 = attacking.
+    /// 1 = hit flash, 2 = burning, 4 = slowed, 8 = crawling, 16 = attacking,
+    /// 32 = stunned.
     flags: u8,
 }
 
@@ -520,6 +523,8 @@ fn handle_requests(
         let me = || PlayerInfo {
             gun_skins: profile.gun_skins.clone(),
             loadout: profile.loadout(),
+            kit: profile.kit(profile.character),
+            char_level: profile.char_level(profile.character).0 as u8,
             ..PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin)
         };
         ready.0 = false;
@@ -647,6 +652,14 @@ fn sync_own_choices(
         if me.loadout != profile.loadout() {
             me.loadout = profile.loadout();
         }
+        let kit = profile.kit(profile.character);
+        if me.kit != kit {
+            me.kit = kit;
+        }
+        let level = profile.char_level(profile.character).0 as u8;
+        if me.char_level != level {
+            me.char_level = level;
+        }
         if me.gun_skins != profile.gun_skins {
             me.gun_skins = profile.gun_skins.clone();
         }
@@ -745,6 +758,13 @@ fn host_receive(
                     p.loadout = u
                         .loadout
                         .filter(|(g, a)| crate::progression::valid_loadout(*g, *a));
+                    let level = u.char_level.clamp(1, crate::data::MAX_CHAR_LEVEL as u8);
+                    p.char_level = level;
+                    p.kit = if crate::data::valid_kit(u.character, level as u32, u.kit) {
+                        u.kit
+                    } else {
+                        u.character.default_kit()
+                    };
                     p.ready = u.ready;
                 }
                 if u.pos
@@ -827,6 +847,7 @@ fn host_send(
                         | (s.slowed as u8) << 2
                         | (s.crawler as u8) << 3
                         | (s.attacking as u8) << 4
+                        | (s.stunned as u8) << 5
                 }),
             })
             .collect(),
@@ -909,6 +930,8 @@ fn client_send(
         skin: profile.skin,
         gun_skins: profile.gun_skins.clone(),
         loadout: profile.loadout(),
+        kit: profile.kit(profile.character),
+        char_level: profile.char_level(profile.character).0 as u8,
         ready: ready.0,
         shots: std::mem::take(&mut net.shots),
         actions: net.pending.iter().take(16).copied().collect(),
@@ -1064,6 +1087,7 @@ fn client_receive(
                     status.slowed = ent.flags & 4 != 0;
                     status.crawler = ent.flags & 8 != 0;
                     status.attacking = ent.flags & 16 != 0;
+                    status.stunned = ent.flags & 32 != 0;
                 }
             }
         } else {

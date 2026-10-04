@@ -1244,6 +1244,23 @@ fn cast_pose(base: &Pose, style: CastStyle, t: f32) -> Pose {
             p.pelvis_off.y -= 0.1;
             p.fingers[0] = [0.5; 4];
         }
+        CastStyle::Ground => {
+            // Both palms slammed down at the floor in a crouch.
+            let drop = keys(v(0.0, 1.9, -0.2), v(0.0, 1.95, -0.25), v(0.0, 0.55, -0.45));
+            p.arms[0] = reach(drop + v(-0.22, 0.0, 0.0), v(-1.0, 0.2, 0.3));
+            p.arms[1] = reach(drop + v(0.22, 0.0, 0.0), v(1.0, 0.2, 0.3));
+            p.arms[0].hand = Some(Quat::from_rotation_x(FRAC_PI_2));
+            p.arms[1].hand = Some(Quat::from_rotation_x(FRAC_PI_2));
+            p.fingers = [[0.0; 4]; 2];
+            if t > 0.15 {
+                p.spine = p.spine * Quat::from_rotation_x(-0.6);
+                p.pelvis_off.y -= 0.3;
+                for s in 0..2 {
+                    p.knee[s] += 0.9;
+                    p.thigh[s] += 0.6;
+                }
+            }
+        }
         CastStyle::Move => {}
     }
     base.blend(&p, w)

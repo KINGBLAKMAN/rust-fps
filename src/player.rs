@@ -194,8 +194,10 @@ fn respawn(
     session: Res<Session>,
     roster: Res<Roster>,
     map: Option<Res<CurrentMap>>,
-    mut player: Single<&mut LocalPlayer>,
+    player: Single<(&mut LocalPlayer, &mut Transform)>,
+    colliders: Query<(&Transform, &Collider), Without<LocalPlayer>>,
 ) {
+    let (mut player, mut tf) = player.into_inner();
     let (Some(me), Some(map)) = (roster.me(&session), map) else {
         return;
     };
@@ -204,10 +206,25 @@ fn respawn(
     }
     player.last_spawn_seq = Some(me.spawn_seq);
     player.feet = player_spawn(&map.0, session.my_id);
-    player.yaw = 0.0;
+    // Face the most open way rather than into a wall.
+    let boxes = crate::physics::collect_boxes(colliders.iter());
+    let eye = player.feet + Vec3::Y * 1.5;
+    player.yaw = (0..8)
+        .map(|i| i as f32 * std::f32::consts::TAU / 8.0)
+        .max_by(|a, b| {
+            let room = |yaw: f32| {
+                let dir = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+                crate::physics::ray_world(eye, dir, 30.0, &boxes)
+            };
+            room(*a).total_cmp(&room(*b))
+        })
+        .unwrap_or(0.0);
     player.vel = Vec3::ZERO;
     player.pitch = 0.0;
     player.sliding = 0.0;
+    // Show the spawn even before the first click to play.
+    *tf = Transform::from_translation(player.feet + Vec3::Y * player.eye)
+        .with_rotation(Quat::from_rotation_y(player.yaw));
 }
 
 /// Is the local player allowed to act (alive, playing, not in a menu)?
@@ -282,6 +299,12 @@ pub fn movement(
     } else {
         1.0
     };
+    // Combat Stim: a third faster on your feet.
+    let stim = if me.is_some_and(|m| m.stim > 0.0) {
+        1.3
+    } else {
+        1.0
+    };
 
     let held = |a| active && keys.held(&settings, a);
     let tapped = |a| active && keys.tapped(&settings, a);
@@ -337,7 +360,8 @@ pub fn movement(
         SPRINT_SPEED * stamina
     } else {
         WALK_SPEED
-    } * (1.0 - 0.4 * aim.amount);
+    } * stim
+        * (1.0 - 0.4 * aim.amount);
 
     // Jumping takes a fresh press: holding the key doesn't hop again. A press
     // shortly before landing waits for touchdown, and friction holds off for

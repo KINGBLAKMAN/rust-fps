@@ -749,6 +749,21 @@ fn fx_sounds(
             ),
             Fx::Ping { pos, .. } => sounds.push(Snd::Ping, Some(Vec3::from_array(pos)), 1.0, 1.0),
             Fx::Cast { .. } => {}
+            Fx::Spell { ability, pos, .. } => {
+                use crate::data::Ability as A;
+                let snd = match ability {
+                    A::Dash | A::ShadowStep | A::ThousandCuts => Snd::Whoosh,
+                    A::Iaido | A::RisingDragon => Snd::Slash,
+                    A::Overdrive | A::CombatStim | A::SupplyDrop => Snd::PowerUp,
+                    A::RocketBarrage | A::Airstrike | A::MortarBattery => Snd::Throw,
+                    A::GlacierSpike => Snd::Ice,
+                    A::Fireball | A::FlameDash | A::MeteorShower | A::MagmaGeyser => Snd::Fire,
+                    A::ThunderClap | A::Bifrost | A::SpearRain => Snd::ShotThunder,
+                    _ => Snd::Whoosh,
+                };
+                sounds.at(snd, Vec3::from_array(pos));
+            }
+            Fx::Falling { to, .. } => sounds.push(Snd::Whoosh, Some(Vec3::from_array(to)), 0.4, 0.6),
             Fx::Ring { pos, .. } => sounds.push(Snd::Whoosh, Some(Vec3::from_array(pos)), 0.5, 1.2),
         }
     }

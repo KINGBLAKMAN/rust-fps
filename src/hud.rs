@@ -559,7 +559,7 @@ fn update_hud(
     };
     let enemy_count = enemies.iter().count() as u32;
     let max = me.max_health();
-    let abilities = me.character.abilities();
+    let abilities = me.kit;
     let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
     let ready = |i: usize| {
         if i == 2 {
@@ -676,7 +676,7 @@ fn update_hud(
                 };
                 format!(
                     "{} {}\n[{}] {}",
-                    abilities[i].0,
+                    abilities[i].name(),
                     "I".repeat(me.tiers[i] as usize + 1),
                     key_name(settings.key(keys[i])),
                     status
@@ -702,7 +702,7 @@ fn update_hud(
                 let frac = if i == 2 {
                     me.ult_charge / 100.0
                 } else {
-                    let cd = crate::data::ability_cooldown(me.character, i, me.tiers[i]);
+                    let cd = me.kit[i].cooldown(me.tiers[i]);
                     1.0 - me.cooldowns[i] / cd
                 };
                 node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
@@ -1075,7 +1075,7 @@ fn upgrade_panel(
                 for (i, c) in choices.iter().enumerate() {
                     button(
                         p,
-                        c.label(me.character, me.tiers),
+                        c.label(me.kit, me.tiers),
                         UiAction::ChooseUpgrade(i as u8),
                     );
                 }
@@ -1191,9 +1191,29 @@ fn end_screen(
                         ACCENT,
                     ));
                 }
+                let (before, after) = result.char_levels;
+                if after > before {
+                    let c = result.character;
+                    let new: Vec<&str> = c
+                        .pool()
+                        .iter()
+                        .filter(|a| a.def().unlock > before && a.def().unlock <= after)
+                        .map(|a| a.name())
+                        .collect();
+                    let msg = if new.is_empty() {
+                        format!("{} reached level {after}!", c.name())
+                    } else {
+                        format!(
+                            "{} reached level {after}! New abilities to pick in Characters: {}",
+                            c.name(),
+                            new.join(", ")
+                        )
+                    };
+                    p.spawn(text(msg, 18.0, ACCENT));
+                }
                 p.spawn(text(
                     format!(
-                        "You have {} spins and {} premium spins. Open crates in Gun Skins on the main menu.",
+                        "You have {} spins and {} premium spins. Open them in Gun Crates on the main menu.",
                         profile.spins,
                         crate::config::quarters_text(profile.premium_quarters)
                     ),

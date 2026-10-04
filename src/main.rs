@@ -123,6 +123,10 @@ pub struct PlayerInfo {
     pub id: u8,
     pub name: String,
     pub character: Character,
+    /// The two abilities and the ultimate this player brought.
+    pub kit: [data::Ability; 3],
+    /// Their level with this character (shown in the party).
+    pub char_level: u8,
     pub skin: u8,
     /// Gun-specific skins per gun id (255 for none).
     pub gun_skins: Vec<u8>,
@@ -169,6 +173,10 @@ pub struct PlayerInfo {
     pub cooldowns: [f32; 2],
     pub ult_charge: f32,
     pub overdrive: f32,
+    /// Combat Stim: faster movement and fire while above zero.
+    pub stim: f32,
+    /// Thousand Cuts: gone from sight, untouchable, while above zero.
+    pub vanish: f32,
     /// Highest action number the host has handled (for resending).
     pub action_ack: u32,
 }
@@ -184,6 +192,8 @@ impl PlayerInfo {
             id,
             name,
             character,
+            kit: character.default_kit(),
+            char_level: 1,
             skin,
             gun_skins: Vec::new(),
             loadout: None,
@@ -215,6 +225,8 @@ impl PlayerInfo {
             cooldowns: [0.0; 2],
             ult_charge: 0.0,
             overdrive: 0.0,
+            stim: 0.0,
+            vanish: 0.0,
             action_ack: 0,
         }
     }
@@ -223,6 +235,8 @@ impl PlayerInfo {
     pub fn reset_for_match(&mut self) {
         let mut keep = PlayerInfo::new(self.id, self.name.clone(), self.character, self.skin);
         keep.gun_skins = std::mem::take(&mut self.gun_skins);
+        keep.kit = self.kit;
+        keep.char_level = self.char_level;
         let seq = self.spawn_seq;
         let ack = self.action_ack;
         *self = keep;
@@ -244,7 +258,7 @@ impl PlayerInfo {
     }
 
     pub fn damage(&mut self, amount: f32) {
-        if !self.alive {
+        if !self.alive || self.vanish > 0.0 {
             return;
         }
         self.health -= amount;
@@ -254,6 +268,7 @@ impl PlayerInfo {
             // Perks are lost when you go down.
             self.perks = 0;
             self.overdrive = 0.0;
+            self.stim = 0.0;
         }
     }
 }
@@ -393,6 +408,8 @@ pub enum PlayerAction {
         slot: u8,
         origin: [f32; 3],
         dir: [f32; 3],
+        /// How far a held ability was charged (0 to 1).
+        charge: f32,
     },
     Choose(u8),
     /// Mark a spot (or an enemy by net id; u32::MAX for none).
@@ -424,6 +441,10 @@ pub enum NetKind {
     Firebomb,
     Turret,
     Coil,
+    /// An ability projectile (see `sim::powers::Look`).
+    Missile(u8),
+    Mine,
+    Drone,
 }
 
 /// An entity the host replicates to clients (enemies, projectiles, pickups).
@@ -443,6 +464,8 @@ pub struct EnemyStatus {
     pub flash: f32,
     pub burning: bool,
     pub slowed: bool,
+    /// Frozen or stunned in place.
+    pub stunned: bool,
     /// Legs shot out.
     pub crawler: bool,
     /// Mid-swing (or spitting).

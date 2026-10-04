@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 use crate::avatars::Avatar;
-use crate::data::{ability_color, cast_style, Character};
+use crate::data::Ability;
 use crate::rig::Rig;
 use crate::{AppState, InGameEntity, Phase, Roster, Session};
 
@@ -48,13 +48,13 @@ pub struct Aura {
     pub life: f32,
     pub max: f32,
     /// The ability just used and seconds since (drives the body animation).
-    pub cast: Option<(Character, u8, f32)>,
+    pub cast: Option<(Ability, f32)>,
 }
 
 impl Auras {
     /// A player used an ability.
-    pub fn cast(&mut self, player: u8, character: Character, slot: u8) {
-        let color = ability_color(character, slot);
+    pub fn cast(&mut self, player: u8, ability: Ability) {
+        let color = ability.color();
         let a = self.0.entry(player).or_insert(Aura {
             color,
             life: 0.0,
@@ -66,7 +66,7 @@ impl Auras {
             a.life = CAST_AURA;
             a.max = CAST_AURA;
         }
-        a.cast = Some((character, slot, 0.0));
+        a.cast = Some((ability, 0.0));
     }
 
     /// Keeps a player's aura lit in `color` for `life` seconds.
@@ -188,27 +188,35 @@ fn tick(
 ) {
     let dt = time.delta_secs();
     for p in roster.0.values() {
-        if p.overdrive > 0.0 {
-            let color = ability_color(p.character, 2);
+        // Overdrive and Combat Stim keep the aura lit while they last.
+        let buff = if p.overdrive > 0.0 {
+            Some((Ability::Overdrive, p.overdrive))
+        } else if p.stim > 0.0 {
+            Some((Ability::CombatStim, p.stim))
+        } else {
+            None
+        };
+        if let Some((ability, left)) = buff {
+            let color = ability.color();
             let a = auras.0.entry(p.id).or_insert(Aura {
                 color,
                 life: 0.0,
-                max: p.overdrive,
+                max: left,
                 cast: None,
             });
             a.color = color;
-            if a.life < p.overdrive {
-                a.max = a.max.max(p.overdrive);
+            if a.life < left {
+                a.max = a.max.max(left);
             }
-            a.life = p.overdrive;
+            a.life = left;
         }
     }
     for a in auras.0.values_mut() {
         a.life -= dt;
-        if let Some((_, _, t)) = a.cast.as_mut() {
+        if let Some((_, t)) = a.cast.as_mut() {
             *t += dt;
         }
-        if a.cast.is_some_and(|c| c.2 > CAST_TIME) {
+        if a.cast.is_some_and(|c| c.1 > CAST_TIME) {
             a.cast = None;
         }
     }
@@ -220,7 +228,7 @@ fn tick(
             .0
             .get(&avatar.id)
             .and_then(|a| a.cast)
-            .map(|(c, slot, t)| (cast_style(c, slot), t));
+            .map(|(a, t): (Ability, f32)| (a.style(), t));
     }
 }
 

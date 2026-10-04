@@ -12,7 +12,7 @@ use crate::abilities::{queue_action, ActionCounter};
 use crate::avatars::spawn_person;
 use crate::config::quarters_text;
 use crate::config::{key_name, Action, Profile, Settings, RESOLUTIONS};
-use crate::data::{
+use crate::data::{MAX_CHAR_LEVEL, 
     crate_odds, gun_def, roll_crate, skin_def, Attach, Character, CRATES, PREMIUM_TRADE_COST,
     ROUNDS_PER_PREMIUM_QUARTER,
 };
@@ -73,7 +73,8 @@ enum Screen {
     Main,
     Join,
     Characters,
-    Skins,
+    Crates,
+    GunSkins,
     Settings,
     Loadout,
     /// The attachment guide, on a tab (0 all, then each slot).
@@ -94,15 +95,17 @@ enum Focus {
 #[derive(Resource, Default)]
 struct Rebinding(Option<Action>, u8);
 
-/// The gun skins screen: which crate is open, the last pull (skin, was it
-/// new), the skin being previewed on the right and any message.
-/// The big turning gun on the skins screen.
+/// The big turning gun on the crates and gun skins screens.
 #[derive(Component)]
 struct ShowcaseGun;
 
+/// The crates and gun skins screens: which crate is open, the last pull
+/// (skin, was it new), the skin being previewed, any message, and the gun
+/// picked in Gun Skins (`ALL_GUNS` for the default finish).
 #[derive(Resource, Default, Debug)]
 struct SkinShop {
     crate_id: usize,
+    gun: u8,
     last: Option<(u8, bool)>,
     preview: Option<u8>,
     message: Option<String>,
@@ -122,10 +125,17 @@ pub enum UiAction {
     FocusName,
     FocusAddress,
     SelectCharacter(Character),
+    /// Put an ability in slot 0, 1 or 2 (ultimate) of this character's kit.
+    PickAbility(u8, crate::data::Ability),
     SelectCrate(u8),
     OpenCrate,
     TradePremium,
-    EquipSkin(u8),
+    PreviewSkin(u8),
+    OpenGunSkins,
+    SelectGun(u8),
+    /// Put a skin on a gun (`ALL_GUNS` for the default finish); 255 takes
+    /// it off.
+    ApplySkin(u8, u8),
     CycleDisplay,
     CycleResolution(i8),
     Rebind(Action),
@@ -450,7 +460,7 @@ fn rebuild_ui(
                 settings.ambient_occlusion
             ),
             *spin,
-            profile.character,
+            (profile.character, profile.kit(profile.character), profile.char_level(profile.character)),
             profile.name,
             profile.last_address,
             profile.spins,
@@ -484,7 +494,7 @@ fn rebuild_ui(
                 state.night,
                 session.status,
                 session.connected,
-                profile.character,
+                (profile.character, profile.kit(profile.character)),
                 ready.0,
                 session.role,
                 profile.skin,
@@ -528,7 +538,8 @@ fn rebuild_ui(
             Screen::Main => main_screen(&mut commands, &profile, &notice, *focus),
             Screen::Join => join_screen(&mut commands, &profile, &notice, *focus),
             Screen::Characters => character_screen(&mut commands, &profile, &settings),
-            Screen::Skins => skins_screen(&mut commands, &profile, &spin),
+            Screen::Crates => crates_screen(&mut commands, &profile, &spin),
+            Screen::GunSkins => gun_skins_screen(&mut commands, &profile, &spin),
             Screen::Settings => panel(&mut commands, false, |p| {
                 settings_body(p, &settings, rebinding.0, rebinding.1);
             }),
@@ -655,12 +666,13 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         button(
             p,
             format!(
-                "Gun Skins  ({} spin{})",
+                "Gun Crates  ({} spin{})",
                 profile.spins,
                 if profile.spins == 1 { "" } else { "s" }
             ),
             UiAction::OpenSkins,
         );
+        button(p, "Gun Skins", UiAction::OpenGunSkins);
         row(p, |r| {
             button_sized(
                 r,
@@ -727,16 +739,19 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
         title(p, "Choose your character");
         row(p, |r| {
             for c in Character::ALL {
+                let level = profile.char_level(c).0;
                 button_sized(
                     r,
-                    c.name(),
+                    format!("{}  Lv {level}", c.name()),
                     UiAction::SelectCharacter(c),
-                    Some(112.0),
+                    Some(150.0),
                     profile.character == c,
                 );
             }
         });
         let c = profile.character;
+        let (level, into, need) = profile.char_level(c);
+        let kit = profile.kit(c);
         let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
         p.spawn((
             Node {
@@ -751,21 +766,69 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
             BorderRadius::all(Val::Px(8.0)),
         ))
         .with_children(|card| {
-            label(card, c.name(), 30.0, c.suit_color().lighter(0.2));
-            label(card, c.tagline(), 16.0, DIM);
-            for (i, (name, desc)) in c.abilities().iter().enumerate() {
+            row(card, |r| {
+                label(r, c.name(), 30.0, c.suit_color().lighter(0.2));
+                label(r, c.tagline(), 16.0, DIM);
+            });
+            let xp = if level >= MAX_CHAR_LEVEL {
+                format!("Level {level} (max)")
+            } else {
+                format!("Level {level}   {into} / {need} XP to level {}", level + 1)
+            };
+            label(card, xp, 16.0, Color::srgb(0.55, 0.85, 1.0));
+            bar(card, if level >= MAX_CHAR_LEVEL { 1.0 } else { into as f32 / need as f32 });
+            // Pick an ability for each key. Locked ones show their level.
+            row(card, |cols| {
+                for slot in 0..3usize {
+                    cols.spawn(Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(5.0),
+                        width: Val::Px(250.0),
+                        ..default()
+                    })
+                    .with_children(|col| {
+                        let head = if slot == 2 { "Ultimate" } else { "Ability" };
+                        label(
+                            col,
+                            format!("{head} [{}]", key_name(settings.key(keys[slot]))),
+                            16.0,
+                            ACCENT,
+                        );
+                        for a in c.pool().into_iter().filter(|a| a.is_ult() == (slot == 2)) {
+                            let unlock = a.def().unlock;
+                            if unlock > level {
+                                button_sized(
+                                    col,
+                                    format!("{}  (Lv {unlock})", a.name()),
+                                    UiAction::Locked,
+                                    Some(250.0),
+                                    false,
+                                );
+                            } else {
+                                button_sized(
+                                    col,
+                                    a.name(),
+                                    UiAction::PickAbility(slot as u8, a),
+                                    Some(250.0),
+                                    kit[slot] == a,
+                                );
+                            }
+                        }
+                    });
+                }
+            });
+            for (slot, a) in kit.iter().enumerate() {
                 label(
                     card,
-                    format!("[{}] {name}", key_name(settings.key(keys[i]))),
-                    17.0,
-                    ACCENT,
+                    format!("[{}] {}: {}", key_name(settings.key(keys[slot])), a.name(), a.def().desc),
+                    15.0,
+                    Color::WHITE,
                 );
-                label(card, *desc, 15.0, Color::WHITE);
             }
         });
         label(
             p,
-            "Abilities get stronger as you level up in a match.",
+            "Play matches as a character to level them up and unlock new abilities. Abilities also get stronger as you level up in a match.",
             15.0,
             DIM,
         );
@@ -773,10 +836,32 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
     });
 }
 
-fn skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
+/// A thin progress bar.
+fn bar(p: &mut ChildSpawnerCommands, frac: f32) {
+    p.spawn((
+        Node {
+            width: Val::Px(400.0),
+            height: Val::Px(8.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.12)),
+        BorderRadius::all(Val::Px(4.0)),
+    ))
+    .with_child((
+        Node {
+            width: Val::Percent(frac.clamp(0.0, 1.0) * 100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.55, 0.85, 1.0)),
+        BorderRadius::all(Val::Px(4.0)),
+    ));
+}
+
+fn crates_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
     let c = &CRATES[shop.crate_id];
     panel(commands, false, |p| {
-        label(p, "GUN SKINS", 34.0, ACCENT);
+        label(p, "GUN CRATES", 34.0, ACCENT);
         label(
             p,
             format!(
@@ -910,77 +995,194 @@ fn skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
         })
         .with_children(|g| {
             for &id in c.skins {
-                let s = skin_def(id);
                 let owned = profile.owned_skins.contains(&id);
-                let equipped = match s.gun {
-                    Some(gun) => profile.skin_for(gun) == id,
-                    None => profile.skin == id,
+                let s = skin_def(id);
+                let fits = s.gun.map_or("All guns", |g| gun_def(g).name);
+                skin_tile(g, id, owned, shop.preview == Some(id), fits, UiAction::PreviewSkin(id));
+            }
+        });
+        label(
+            p,
+            "Click a skin you own to see it on the right. Put skins on your guns in\nGun Skins on the main menu. Round 5 = 1 spin, round 10 = 3,\nround 15 = 6, round 20 = 10.",
+            12.0,
+            DIM,
+        );
+        button(p, "Back", UiAction::BackToMain);
+    });
+}
+
+/// One skin in a grid: a colour swatch, its name and a line underneath.
+fn skin_tile(
+    g: &mut ChildSpawnerCommands,
+    id: u8,
+    owned: bool,
+    selected: bool,
+    under: &str,
+    action: UiAction,
+) {
+    let s = skin_def(id);
+    g.spawn((
+        Button,
+        action,
+        Node {
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(4.0)),
+            border: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(BUTTON),
+        BorderColor(if selected {
+            ACCENT
+        } else {
+            s.rarity.color().with_alpha(0.4)
+        }),
+        BorderRadius::all(Val::Px(6.0)),
+    ))
+    .with_children(|b| {
+        // A two-tone swatch for patterned skins.
+        b.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            ..default()
+        })
+        .with_children(|sw| {
+            let rgb = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
+            let locked = Color::srgb(0.2, 0.2, 0.22);
+            let parts = if s.gun.is_some() {
+                [s.color, s.accent]
+            } else {
+                [s.color, s.color]
+            };
+            for part in parts {
+                sw.spawn((
+                    Node {
+                        width: Val::Px(28.0),
+                        height: Val::Px(12.0),
+                        ..default()
+                    },
+                    BackgroundColor(if owned { rgb(part) } else { locked }),
+                ));
+            }
+        });
+        let name = if owned { s.name } else { "???" };
+        label(b, name, 13.0, if owned { Color::WHITE } else { DIM });
+        label(
+            b,
+            format!("{} - {under}", s.rarity.name()),
+            10.0,
+            s.rarity.color(),
+        );
+    });
+}
+
+/// Stands in for a gun in Gun Skins: the default finish every gun uses
+/// unless it has its own skin.
+pub const ALL_GUNS: u8 = 254;
+
+/// Gun Skins: pick a gun, then put one of your skins on it.
+fn gun_skins_screen(commands: &mut Commands, profile: &Profile, shop: &SkinShop) {
+    let gun = shop.gun;
+    panel(commands, false, |p| {
+        label(p, "GUN SKINS", 34.0, ACCENT);
+        label(
+            p,
+            "Pick a gun, then click a skin to put it on. It shows in game, for you and your party.",
+            14.0,
+            DIM,
+        );
+        p.spawn(Node {
+            display: Display::Grid,
+            grid_template_columns: RepeatedGridTrack::flex(5, 1.0),
+            column_gap: Val::Px(4.0),
+            row_gap: Val::Px(4.0),
+            ..default()
+        })
+        .with_children(|g| {
+            let guns = std::iter::once(ALL_GUNS).chain(0..crate::data::GUNS.len() as u8);
+            for id in guns {
+                let (name, skin) = if id == ALL_GUNS {
+                    ("Default finish", profile.skin)
+                } else {
+                    (gun_def(id).name, profile.skin_for(id))
                 };
+                let s = skin_def(skin);
                 g.spawn((
                     Button,
-                    UiAction::EquipSkin(id),
+                    UiAction::SelectGun(id),
                     Node {
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
+                        padding: UiRect::axes(Val::Px(3.0), Val::Px(3.0)),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON),
+                    BorderColor(if id == gun { ACCENT } else { Color::NONE }),
+                    BorderRadius::all(Val::Px(5.0)),
+                ))
+                .with_children(|b| {
+                    label(b, name, 12.0, Color::WHITE);
+                    label(b, s.name, 10.0, s.rarity.color());
+                });
+            }
+        });
+        let (title, current) = if gun == ALL_GUNS {
+            ("Default finish (guns with no skin of their own)".to_string(), profile.skin)
+        } else {
+            (format!("Skins for the {}", gun_def(gun).name), profile.skin_for(gun))
+        };
+        label(p, title, 18.0, ACCENT);
+        // Skins that fit: the default finish takes skins for every gun; a
+        // gun also takes its own.
+        let fits: Vec<u8> = (0..crate::data::SKINS.len() as u8)
+            .filter(|&id| profile.owned_skins.contains(&id))
+            .filter(|&id| {
+                if gun == ALL_GUNS {
+                    skin_def(id).gun.is_none()
+                } else {
+                    crate::data::skin_fits(id, gun)
+                }
+            })
+            .collect();
+        let own = gun != ALL_GUNS && profile.gun_skins.get(gun as usize).is_some_and(|&s| crate::data::skin_fits(s, gun));
+        p.spawn(Node {
+            display: Display::Grid,
+            grid_template_columns: RepeatedGridTrack::flex(5, 1.0),
+            column_gap: Val::Px(5.0),
+            row_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|g| {
+            if gun != ALL_GUNS {
+                g.spawn((
+                    Button,
+                    UiAction::ApplySkin(gun, 255),
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
                         padding: UiRect::all(Val::Px(4.0)),
                         border: UiRect::all(Val::Px(2.0)),
                         ..default()
                     },
                     BackgroundColor(BUTTON),
-                    BorderColor(if equipped {
-                        ACCENT
-                    } else {
-                        s.rarity.color().with_alpha(0.4)
-                    }),
+                    BorderColor(if own { Color::NONE } else { ACCENT }),
                     BorderRadius::all(Val::Px(6.0)),
                 ))
                 .with_children(|b| {
-                    // A two-tone swatch for patterned skins.
-                    b.spawn(Node {
-                        flex_direction: FlexDirection::Row,
-                        ..default()
-                    })
-                    .with_children(|sw| {
-                        let rgb = |c: [f32; 3]| Color::srgb(c[0], c[1], c[2]);
-                        let locked = Color::srgb(0.2, 0.2, 0.22);
-                        let parts = if s.gun.is_some() {
-                            [s.color, s.accent]
-                        } else {
-                            [s.color, s.color]
-                        };
-                        for part in parts {
-                            sw.spawn((
-                                Node {
-                                    width: Val::Px(28.0),
-                                    height: Val::Px(12.0),
-                                    ..default()
-                                },
-                                BackgroundColor(if owned { rgb(part) } else { locked }),
-                            ));
-                        }
-                    });
-                    let name = if owned {
-                        s.name.to_string()
-                    } else {
-                        "???".to_string()
-                    };
-                    let fits = s.gun.map_or("All guns", |g| gun_def(g).name);
-                    label(b, name, 13.0, if owned { Color::WHITE } else { DIM });
-                    label(
-                        b,
-                        format!("{} - {fits}", s.rarity.name()),
-                        10.0,
-                        s.rarity.color(),
-                    );
+                    label(b, "Default", 13.0, Color::WHITE);
+                    label(b, skin_def(profile.skin).name, 10.0, DIM);
                 });
             }
+            for id in fits {
+                let made_for = if skin_def(id).gun.is_some() { "Made for it" } else { "All guns" };
+                let on = if gun == ALL_GUNS { profile.skin == id } else { own && current == id };
+                skin_tile(g, id, true, on, made_for, UiAction::ApplySkin(gun, id));
+            }
         });
-        label(
-            p,
-            "Click a skin you own to equip it and see it on the right. Gun skins only\nshow on their gun; click one again to take it off. Round 5 = 1 spin,\nround 10 = 3, round 15 = 6, round 20 = 10.",
-            12.0,
-            DIM,
-        );
+        if !profile.owned_skins.iter().any(|&id| id != 0) {
+            label(p, "Open Gun Crates to win more skins.", 14.0, WARN);
+        }
         button(p, "Back", UiAction::BackToMain);
     });
 }
@@ -1242,18 +1444,27 @@ fn lobby_screen(
                 );
             }
         });
-        let ab = profile.character.abilities();
+        let ab = profile.kit(profile.character);
         label(
             p,
-            format!("{}, {}, ultimate: {}", ab[0].0, ab[1].0, ab[2].0),
+            format!(
+                "Level {} - {}, {}, ultimate: {} (change in Characters)",
+                profile.char_level(profile.character).0,
+                ab[0].name(),
+                ab[1].name(),
+                ab[2].name()
+            ),
             14.0,
             DIM,
         );
         label(
             p,
             format!(
-                "Gun skin: {} (change it in Gun Skins on the main menu)",
-                skin_def(profile.skin).name
+                "Gun skins: {} on most guns, {} with their own (change them in Gun Skins)",
+                skin_def(profile.skin).name,
+                (0..crate::data::GUNS.len() as u8)
+                    .filter(|&g| profile.skin_for(g) != profile.skin)
+                    .count()
             ),
             14.0,
             DIM,
@@ -1578,8 +1789,10 @@ fn handle_buttons(
                 spin.last = None;
                 spin.message = None;
                 spin.preview = None;
-                *screen = Screen::Skins;
+                *screen = Screen::Crates;
             }
+            UiAction::OpenGunSkins => *screen = Screen::GunSkins,
+            UiAction::SelectGun(g) => spin.gun = g,
             UiAction::OpenSettings => *screen = Screen::Settings,
             UiAction::BackToMain => *screen = Screen::Main,
             UiAction::Quit => {
@@ -1588,6 +1801,19 @@ fn handle_buttons(
             UiAction::FocusName => *focus = Focus::Name,
             UiAction::FocusAddress => *focus = Focus::Address,
             UiAction::SelectCharacter(c) => profile.character = c,
+            UiAction::PickAbility(slot, a) => {
+                let c = profile.character;
+                let mut kit = profile.kit(c);
+                let slot = (slot as usize).min(2);
+                // Picking the one in the other key swaps them over.
+                if slot < 2 && kit[1 - slot] == a {
+                    kit[1 - slot] = kit[slot];
+                }
+                kit[slot] = a;
+                if crate::data::valid_kit(c, profile.char_level(c).0, kit) {
+                    profile.kits.insert(c, kit);
+                }
+            }
             UiAction::SelectCrate(i) => {
                 spin.crate_id = (i as usize).min(CRATES.len() - 1);
                 spin.last = None;
@@ -1643,24 +1869,25 @@ fn handle_buttons(
                     ));
                 }
             }
-            UiAction::EquipSkin(id) => {
+            UiAction::PreviewSkin(id) => {
                 if profile.owned_skins.contains(&id) {
                     spin.preview = Some(id);
-                    match skin_def(id).gun {
-                        Some(gun) => {
-                            let gun = gun as usize;
-                            if profile.gun_skins.len() <= gun {
-                                profile.gun_skins.resize(gun + 1, 255);
-                            }
-                            // Clicking the equipped one takes it off.
-                            profile.gun_skins[gun] = if profile.gun_skins[gun] == id {
-                                255
-                            } else {
-                                id
-                            };
-                        }
-                        None => profile.skin = id,
+                }
+            }
+            UiAction::ApplySkin(gun, id) => {
+                if id != 255 && !profile.owned_skins.contains(&id) {
+                    continue;
+                }
+                if gun == ALL_GUNS {
+                    if skin_def(id).gun.is_none() {
+                        profile.skin = id;
                     }
+                } else if id == 255 || crate::data::skin_fits(id, gun) {
+                    let gun = gun as usize;
+                    if profile.gun_skins.len() <= gun {
+                        profile.gun_skins.resize(gun + 1, 255);
+                    }
+                    profile.gun_skins[gun] = id;
                 }
             }
             UiAction::CycleDisplay => settings.display = settings.display.next(),
@@ -1829,11 +2056,21 @@ fn menu_scene(
         AppState::Menu => {
             let mut gun = MENU_GUN;
             let mut skin = profile.skin_for(MENU_GUN);
-            if *screen == Screen::Skins {
+            if *screen == Screen::Crates {
                 if let Some(id) = shop.preview {
                     gun = skin_def(id).gun.unwrap_or(MENU_GUN);
                     skin = id;
                     showcase_skin = Some((gun, id));
+                }
+            }
+            if *screen == Screen::GunSkins {
+                // The picked gun in the skin it will show in game.
+                if shop.gun == ALL_GUNS {
+                    showcase_skin = Some((MENU_GUN, profile.skin));
+                } else {
+                    gun = shop.gun;
+                    skin = profile.skin_for(gun);
+                    showcase_skin = Some((gun, skin));
                 }
             }
             vec![(profile.character, skin, gun)]

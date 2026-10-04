@@ -6,4 +6,5 @@ pub mod gunmodels;
 pub mod hands;
 pub mod humanoid;
 pub mod kit;
+pub mod projectiles;
 pub mod skins;

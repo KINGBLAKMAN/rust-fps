@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v6.1** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v6); small updates bump the minor number (v6.1, v6.2...).
+Current version: **v7.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v7); small updates bump the minor number (v7.1, v7.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -25,8 +25,9 @@ Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the
 
 - **Play Solo**, **Host a Party** or **Join a Party** (type or paste the host's address with Ctrl+V).
 - **Loadout**: pick the gun you bring into matches and its attachments (see Career below).
-- **Characters**: pick one of 6 characters (Striker, Warden, Ronin, Tinker, Blaze, Valkyrie).
-- **Gun Skins**: open crates with your spins and equip skins.
+- **Characters**: pick one of 6 characters (Striker, Warden, Ronin, Tinker, Blaze, Valkyrie), see their level and choose which abilities they take into a match.
+- **Gun Crates**: open crates with your spins to win skins.
+- **Gun Skins**: pick any gun and put one of your skins on it. It shows in game for you and your party.
 - **Attachment Guide**: every attachment and exactly what it changes, with a tab per slot.
 - **Sandbox**: a practice match with no waves and a tools panel (F1) to spawn zombies, switch on god mode and free abilities, add points, jump rounds and try any gun with any attachments.
 - **Settings**: field of view, mouse sensitivity, volume (master plus guns, enemies, movement, effects and interface), graphics (shadows, smoothed edges, glow, soft corner shading), windowed / borderless / fullscreen, resolution and key remapping.
@@ -72,7 +73,7 @@ The frag grenade is held in your hand while you aim, for as long as you like: it
 
 ## What you see
 
-Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The mystery box opens its lid and spins through the guns, and flies away when it moves; perk machines are vending machines; power-ups are little models. Every gun has its own recoil pattern and visible attachments, sights line up when you aim, tracers streak and fade, and hits show a hit marker (orange for headshots, red for kills). Zombies fall over with a death animation, and shooting their legs out turns them into crawlers. Everything has sound. The three maps are built from detailed props (containers, cranes, forklifts and a ship; trees, a fountain, a bandstand and a playground; houses, fences, cars and street lights).
+Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. The Twin Fangs are a pair of full-auto SMGs, one in each hand, and both fire on every shot. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The mystery box opens its lid and spins through the guns, and flies away when it moves; perk machines are vending machines; power-ups are little models. Every gun has its own recoil pattern and visible attachments, sights line up when you aim, tracers streak and fade, and hits show a hit marker (orange for headshots, red for kills). Zombies fall over with a death animation, and shooting their legs out turns them into crawlers. Everything has sound. The three maps are built room by room, with furnished interiors (offices, kitchens, classrooms, labs, cells, a diner, a museum and more), windows, lamps and roofs.
 
 ## Gameplay
 
@@ -82,17 +83,33 @@ Every gun is modelled (23 in all) and held in gloved first-person hands, with an
 - **Mystery box:** 750 points per spin, always. Its beam goes up into the sky so you can find it from anywhere. It gives one of 20 guns, or rarely one of 2 wonder weapons (Ray Blaster: explosive shots; Thunder Cannon: lightning that chains between enemies). Box guns come with random attachments: all, some or none of an optic (Red Dot, Holo Sight, 3x Scope), a muzzle, an underbarrel grip or laser and an extended mag. The box sits at one of 5 spots and every few spins it may fly away to another (you get your points back).
 - **Perk machines:** Quick Hands (3000, reload twice as fast), Stamina Rush (2000, faster sprint and slides), Boom Shot (3500, headshots can explode), Juggernaut (2500, 200 max health), Rapid Fire (2000, shoot 33% faster). You lose your perks when you go down.
 - **Power-ups** drop from zombies: Nuke (kills everything, +400 points each), Insta-Kill, Double Points (30 seconds each) and Max Ammo.
-- **Bigger maps and doors:** every map has its starting area plus 4 more areas around it, each behind a blocked passage you buy open (750-1250 points): stacked crates under a container tunnel in the yard, boarded-up stone arches in the park and garden pergolas in the neighbourhood. Zombies only come from areas that are open. One of the perk machines is behind a door.
-- **Buildings:** each map has two walk-through buildings joining neighbouring areas, with their own way in to clear (1250 points): the Cold Store and Machine Shop in the yard, the Library and Museum in the park, the Mall and Diner in the neighbourhood. Go in through one area and come out in another.
+- **Maps and doors:** every map is a set of rooms, corridors, yards and buildings to explore, split into a starting area and 7 more areas behind doors you buy open (750-1250 points). Areas loop into each other, so there's usually more than one way round. Zombies only come from areas that are open, and the perk machines are spread through the areas.
+  - **Shipping Yard:** start in the Customs Hall and Gate Yard; open up the Container Stacks, the Warehouse (with a cold store), the Dockside, the Port Office, the Rail Yard, the Machine Shop and the Truck Depot.
+  - **Central Park:** start in the Visitor Centre and Fountain Court; open up the Hedge Maze, Lakeside (boat shed and café), the Museum, the Old Zoo, the Conservatory, the Chapel and Bandstand Green.
+  - **The Neighborhood:** start in the Hendersons' house and back yard; open up Main Street, the Diner and Corner Store, the School, the Police Station, the Community Centre, Maple Court and the Back Alley.
 - **Melee:** press V for a quick knife slash at whatever is right in front of you, crawlers included.
-- **Wall guns:** each map has 2 guns hanging on walls (chalk outline). Guns players bring from their loadout take these boards. Buy the gun (pistol 500, SMG or shotgun 1000, rifle 1250), or ammo for half price if you already have it. Wall guns never come out of the mystery box on that map.
+- **Wall guns:** each map has 8 guns hanging on walls (chalk outline). Guns players bring from their loadout take the first two boards (one in the starting area, one just past the first door). Buy the gun (pistol 500, SMG or shotgun 1000, rifle 1250), or ammo for half price if you already have it. Wall guns never come out of the mystery box on that map.
 - **Day and night:** the host picks Day or Night on the party screen. At night the sky is dark, the street lamps are brighter and everyone has a flashlight.
 - **Emotes and pings:** press G for the emote list; the camera pulls out so you can see your character (move or shoot to stop). Press Z to ping a spot (yellow beam) or an enemy (red marker that follows it), with your name and the distance.
-- **Characters:** Striker has Dash, Frag Grenade and the Overdrive ultimate (more damage, faster fire, no ammo use). Warden has Heal Pulse (heals you and nearby teammates), Frost Nova (damages and slows enemies around you) and the Orbital Strike ultimate. Ronin has Iaido Slash, Shadow Step and the Blade Storm ultimate (a whirl of crimson and gold kunai). Tinker has Sentry Turret, Supply Drop (ammo and healing for teammates nearby) and the Tesla Coil ultimate. Blaze has Firebomb, Flame Wave and the Inferno ultimate. Valkyrie has Arc Spear (a lightning spear thrown in a line), Storm Leap and the Ragnarok ultimate. Every character has their own model. Ultimates charge over time and with kills.
+- **Characters:** every character has their own model, two abilities (Q and E) and an ultimate (X). Ultimates charge over time and with kills. See Character levels below for every ability.
 - **Levels:** kills give XP. Every level adds 3% damage, and every 5 levels you pick an upgrade (press B): a stronger ability tier, or an element. At levels 5, 10, 15, 20 and 25 one of the choices is always an element. Elements: Fire (burns over time), Ice (slows) and Shock (arcs to nearby enemies), for your guns or your abilities.
 - **Extraction:** after clearing round 15, and every 10 rounds after that (25, 35...), a green extraction beam opens for 45 seconds. Get every living teammate into it for 5 seconds to extract, or ignore it and keep fighting.
 - **Zombies:** walkers (in three outfits), spitters that spit fireballs from range and hulking brutes.
-- **Maps:** Shipping Yard, Central Park and The Neighborhood.
+
+## Character levels and abilities
+
+Each character levels up on their own from the XP you earn playing them (up to level 10). New abilities unlock at levels 2, 4, 6 and 8, and on the Characters screen you choose which two abilities and which ultimate to take. The end-of-match screen shows when a character levels up and what it unlocked.
+
+| Character | Starting kit | Lv 2 | Lv 4 | Lv 6 (ultimate) | Lv 8 |
+|---|---|---|---|---|---|
+| Striker | Dash, Frag Grenade, Overdrive | Cluster Grenade (scatters six bomblets) | Rocket Barrage (a fan of six mini rockets) | Airstrike (jets carpet-bomb a line) | Combat Stim (heal, move and shoot faster) |
+| Warden | Heal Pulse, Frost Nova, Orbital Strike | Glacier Spike (a wall of ice spikes along the ground) | Barrier Dome (zombies can't get in, heals inside) | Blizzard (a freezing storm) | Cryo Orb (a slow orb that freezes, then shatters) |
+| Ronin | Iaido Slash, Shadow Step, Blade Storm | Kunai Fan (seven piercing kunai) | Smoke Bomb (stuns zombies inside) | Thousand Cuts (vanish and cut down everything around you) | Rising Dragon (a flaming uppercut leap) |
+| Tinker | Sentry Turret, Supply Drop, Tesla Coil | Proximity Mines (three mines) | Combat Drone (follows you and shoots) | Mortar Battery (shells rain down) | Grav Grenade (pulls zombies in, then implodes) |
+| Blaze | Firebomb, Flame Wave, Inferno | Fireball (explodes and leaves flames) | Flame Dash (leaves a trail of fire) | Meteor Shower | Magma Geyser (a pillar of magma) |
+| Valkyrie | Arc Spear, Storm Leap, Ragnarok | Thunder Clap (a stunning shockwave) | Chain Lightning (leaps from zombie to zombie) | Bifrost (a beam from the sky sweeps along) | Spear Rain (lightning spears rain down) |
+
+Iaido Slash is charged: hold Q and Ronin draws the sword and focuses; let go and he cuts, sending a crescent of light flying forward. The longer you hold (up to a second), the bigger the crescent and the further it travels (12 to 40 m). It pierces through every zombie in its path.
 
 ## Career and loadout
 
@@ -100,7 +117,7 @@ Every match earns career XP (150 per round survived, 3 per kill, 600 for extract
 
 On the Loadout screen pick a gun to bring and its attachments. In every match it hangs on one of the map's wall boards with your attachments on it (with your name), and the mystery box leaves it out. With two or more players, the first two loadouts take the two boards.
 
-## Gacha spins, crates and skins
+## Gun crates and skins
 
 Crates open with a carousel that slides through the skins and slows down onto your prize. Spins are earned by how far you get, so restarting round 1 over and over earns nothing:
 
@@ -115,7 +132,9 @@ Crates open with a carousel that slides through the skins and slows down onto yo
 
 Extracting gives the same spins as reaching that round; it doesn't double them.
 
-There are 35 skins in 5 crates. 12 are finishes that fit every gun; the other 23 are patterned skins made for one gun each (camo, tiger stripes, carbon fibre, damascus, marble, dragon scales, glowing lava, circuits, starfields...). A gun skin only shows on its own gun, so you can give every gun its own look; click an equipped gun skin again to take it off.
+There are 35 skins in 5 crates. 12 are finishes that fit every gun; the other 23 are patterned skins made for one gun each (camo, tiger stripes, carbon fibre, damascus, marble, dragon scales, glowing lava, circuits, starfields...).
+
+On the Gun Skins screen pick a gun and click a skin to put it on: any finish you own, or a patterned skin made for that gun. Default finish sets the skin for every gun that doesn't have its own.
 
 | Crate | Cost | Inside |
 |---|---|---|
@@ -147,17 +166,17 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | `src/graphics.rs` | Applies the graphics settings and distance haze |
 | `src/player.rs` | Camera and movement (sprint, slide, crouch, bunny hop) |
 | `src/weapons.rs` | Two gun slots, firing, recoil, reloading, melee |
-| `src/abilities.rs` | Ability and buy input, cast modes, aiming previews |
+| `src/abilities/` | Ability and buy input, cast modes and charged casts (`mod.rs`), aiming previews (`preview.rs`) |
 | `src/viewmodel.rs` | First-person gun and hands, with all their animations and ability props |
-| `src/sim.rs` | Host-only simulation: rounds, zombie AI, damage, elements, XP, box, perks, power-ups, extraction, sandbox |
+| `src/sim/` | Host-only simulation: rounds, zombie AI, damage, elements, XP, box, perks, power-ups, extraction, sandbox (`mod.rs`), and every ability with its projectiles, grenades, mines, turrets, drones and air strikes (`powers.rs`) |
 | `src/zombies.rs` | Zombie animation, crawlers and death falls |
 | `src/physics.rs` | Box collisions and ray casts |
 | `src/emotes.rs`, `src/pings.rs` | Emotes and the third-person emote camera; pings |
 | `src/hud.rs` | In-game HUD, hit markers, scoreboard, level-up picker, end screen |
 | `src/net.rs` | Command line, UDP messages, host and client networking, internet address lookup |
-| `src/maps/` | The three maps (`mod.rs`), props, the areas behind the doors (`strips.rs`), the walk-through buildings (`interiors.rs`) and zombie pathfinding (`nav.rs`) |
-| `src/models/` | The modelling kit, the 23 gun models, gun skins, hands, gun mounts and other players' models |
+| `src/maps/` | The three maps (`mod.rs`), the floor-plan kit for rooms, walls and furniture (`interiors.rs`), props, doors (`strips.rs`) and zombie pathfinding (`nav.rs`) |
+| `src/models/` | The modelling kit, the 23 gun models, gun skins, hands, gun mounts, other players' models and ability projectiles and gadgets (`projectiles.rs`) |
 | `src/rig/` | Skeleton and animation (`mod.rs`), the 6 hero models and the zombie models |
-| `src/fx/` | Tracers, explosions, ability effects, and the ability auras |
+| `src/fx/` | Tracers, explosions, ability effects (`spells.rs` for the newer ones), and the ability auras |
 | `src/audio/` | Sound effects, made by a small synthesizer at startup, and volume groups |
 | `src/ui/` | Menus (`mod.rs`), the crate carousel, loadout and attachment guide, sandbox tools |

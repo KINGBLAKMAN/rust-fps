@@ -70,6 +70,9 @@ pub struct MatchResult {
     /// Career XP earned, and career level before and after.
     pub xp: u32,
     pub levels: (u32, u32),
+    /// The character played and their level before and after.
+    pub character: crate::data::Character,
+    pub char_levels: (u32, u32),
 }
 
 pub fn match_ended(state: &MatchState) -> bool {
@@ -341,6 +344,11 @@ fn award_spins(
     let before = crate::progression::career(profile.career_xp).0;
     profile.career_xp += xp;
     let after = crate::progression::career(profile.career_xp).0;
+    // The same XP goes to the character you played.
+    let character = profile.character;
+    let char_before = profile.char_level(character).0;
+    *profile.char_xp.entry(character).or_insert(0) += xp;
+    let char_after = profile.char_level(character).0;
     *result = MatchResult {
         awarded: true,
         spins,
@@ -349,6 +357,8 @@ fn award_spins(
         new_best,
         xp,
         levels: (before, after),
+        character,
+        char_levels: (char_before, char_after),
     };
 }
 

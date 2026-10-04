@@ -153,7 +153,7 @@ pub const GUNS: [GunDef; 23] = [
     gun("Sentinel Marksman", Rifle, Semi, 75.0, 330.0, 20, 120, 2.2),
     gun("Judge Revolver", Pistol, Semi, 115.0, 160.0, 6, 54, 2.5),
     gun("Hammer .50", Pistol, Semi, 88.0, 220.0, 7, 49, 1.6),
-    gun("Twin Fangs", Smg, Auto, 25.0, 1200.0, 40, 240, 2.5),
+    gun("Twin Fangs", Smg, Auto, 20.0, 900.0, 80, 480, 2.5),
     GunDef {
         rare: true,
         special: GunSpecial::Explosive { radius: 3.5 },
@@ -175,6 +175,11 @@ pub fn gun_def(id: u8) -> &'static GunDef {
 }
 
 /// Price of a gun bought off the wall (ammo for it costs half).
+/// Guns carried in pairs that fire both at once (Twin Fangs).
+pub fn is_dual(gun: u8) -> bool {
+    gun == 20
+}
+
 pub fn wall_cost(gun: u8) -> u32 {
     match gun_def(gun).class {
         GunClass::Pistol => 500,
@@ -1081,13 +1086,19 @@ pub fn skin_material(id: u8) -> StandardMaterial {
     }
 }
 
-/// Which skin a gun shows: its own equipped skin if it has one, else the
-/// finish that fits every gun. `gun_skins[gun]` is 255 for none.
+/// Which skin a gun shows: the skin applied to it in Gun Skins if any (its
+/// own skin or one that fits every gun), else the default finish.
+/// `gun_skins[gun]` is 255 for none.
 pub fn skin_for(default: u8, gun_skins: &[u8], gun: u8) -> u8 {
     match gun_skins.get(gun as usize) {
-        Some(&s) if (s as usize) < SKINS.len() && SKINS[s as usize].gun == Some(gun) => s,
+        Some(&s) if skin_fits(s, gun) => s,
         _ => default,
     }
+}
+
+/// Whether a skin can go on a gun.
+pub fn skin_fits(skin: u8, gun: u8) -> bool {
+    (skin as usize) < SKINS.len() && SKINS[skin as usize].gun.is_none_or(|g| g == gun)
 }
 
 /// A gacha crate: what's inside and what it costs to open.
@@ -1244,64 +1255,16 @@ impl Character {
         }
     }
 
-    /// (name, description) for ability 1, ability 2 and the ultimate.
-    pub fn abilities(self) -> [(&'static str, &'static str); 3] {
-        match self {
-            Character::Striker => [
-                ("Dash", "Burst forward at high speed."),
-                ("Frag Grenade", "Throw a grenade that explodes in an area."),
-                ("Overdrive", "ULT: bigger damage, faster fire, no ammo use."),
-            ],
-            Character::Warden => [
-                ("Heal Pulse", "Heal yourself and nearby teammates."),
-                ("Frost Nova", "Damage and slow every enemy around you."),
-                ("Orbital Strike", "ULT: call a huge blast where you aim."),
-            ],
-            Character::Ronin => [
-                ("Iaido Slash", "Draw and cut everything in front of you."),
-                (
-                    "Shadow Step",
-                    "Blink forward, slicing enemies you pass through.",
-                ),
-                (
-                    "Blade Storm",
-                    "ULT: whirling blades shred enemies around you.",
-                ),
-            ],
-            Character::Tinker => [
-                (
-                    "Sentry Turret",
-                    "Deploy a turret that shoots nearby enemies.",
-                ),
-                ("Supply Drop", "Refill ammo and patch up teammates nearby."),
-                (
-                    "Tesla Coil",
-                    "ULT: plant a coil that shocks everything near it.",
-                ),
-            ],
-            Character::Blaze => [
-                ("Firebomb", "Throw a bomb that leaves a pool of fire."),
-                (
-                    "Flame Wave",
-                    "Blast a cone of fire that sets enemies alight.",
-                ),
-                ("Inferno", "ULT: wreathe yourself in a ring of fire."),
-            ],
-            Character::Valkyrie => [
-                (
-                    "Arc Spear",
-                    "Hurl a lightning spear that shocks everything in a line.",
-                ),
-                (
-                    "Storm Leap",
-                    "Leap forward and crash down in a burst of lightning.",
-                ),
-                (
-                    "Ragnarok",
-                    "ULT: a storm follows you, striking nearby enemies with lightning.",
-                ),
-            ],
-        }
+    /// All seven abilities, in unlock order.
+    pub fn pool(self) -> [Ability; 7] {
+        let i = Character::ALL.iter().position(|c| *c == self).unwrap_or(0) * 7;
+        std::array::from_fn(|k| Ability::ALL[i + k])
+    }
+
+    /// The kit a character starts with.
+    pub fn default_kit(self) -> [Ability; 3] {
+        let p = self.pool();
+        [p[0], p[1], p[2]]
     }
 
     pub fn suit_color(self) -> Color {
@@ -1327,30 +1290,281 @@ impl Character {
     }
 }
 
-/// Ability cooldown in seconds by slot (0 or 1) and upgrade tier (0-3).
-pub fn ability_cooldown(c: Character, slot: usize, tier: u8) -> f32 {
-    let t = tier as f32;
-    match (c, slot) {
-        (Character::Striker, 0) => 6.0 - t,
-        (Character::Striker, _) => 12.0 - 2.0 * t,
-        (Character::Warden, 0) => 14.0 - 2.0 * t,
-        (Character::Warden, _) => 12.0 - 2.0 * t,
-        (Character::Ronin, 0) => 5.0 - t,
-        (Character::Ronin, _) => 9.0 - 1.5 * t,
-        (Character::Tinker, 0) => 20.0 - 3.0 * t,
-        (Character::Tinker, _) => 16.0 - 2.0 * t,
-        (Character::Blaze, 0) => 10.0 - 2.0 * t,
-        (Character::Blaze, _) => 7.0 - t,
-        (Character::Valkyrie, 0) => 8.0 - 1.5 * t,
-        (Character::Valkyrie, _) => 11.0 - 2.0 * t,
+// ---------------------------------------------------------------------------
+// Abilities
+// ---------------------------------------------------------------------------
+
+/// Every ability in the game. Each character has seven: three from the
+/// start and four unlocked by levelling that character. A kit is two
+/// regular abilities (Q and E) and one ultimate.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum Ability {
+    // Striker
+    Dash,
+    FragGrenade,
+    Overdrive,
+    ClusterGrenade,
+    RocketBarrage,
+    Airstrike,
+    CombatStim,
+    // Warden
+    HealPulse,
+    FrostNova,
+    OrbitalStrike,
+    GlacierSpike,
+    BarrierDome,
+    Blizzard,
+    CryoOrb,
+    // Ronin
+    Iaido,
+    ShadowStep,
+    BladeStorm,
+    KunaiFan,
+    SmokeBomb,
+    ThousandCuts,
+    RisingDragon,
+    // Tinker
+    Sentry,
+    SupplyDrop,
+    TeslaCoil,
+    ProximityMines,
+    CombatDrone,
+    MortarBattery,
+    GravGrenade,
+    // Blaze
+    Firebomb,
+    FlameWave,
+    Inferno,
+    Fireball,
+    FlameDash,
+    MeteorShower,
+    MagmaGeyser,
+    // Valkyrie
+    ArcSpear,
+    StormLeap,
+    Ragnarok,
+    ThunderClap,
+    ChainLightning,
+    Bifrost,
+    SpearRain,
+}
+
+pub struct AbilityDef {
+    pub name: &'static str,
+    pub desc: &'static str,
+    /// Character level that unlocks it (1 = from the start).
+    pub unlock: u32,
+    pub ult: bool,
+    /// Cooldown at tier 0, and how much each upgrade tier takes off.
+    pub cooldown: (f32, f32),
+    pub style: CastStyle,
+    pub color: [f32; 3],
+}
+
+const fn ab(
+    name: &'static str,
+    desc: &'static str,
+    unlock: u32,
+    ult: bool,
+    cooldown: (f32, f32),
+    style: CastStyle,
+    color: [f32; 3],
+) -> AbilityDef {
+    AbilityDef {
+        name,
+        desc,
+        unlock,
+        ult,
+        cooldown,
+        style,
+        color,
     }
 }
 
+use CastStyle as S;
+
+/// In the same order as `Ability`.
+#[rustfmt::skip]
+const ABILITY_DEFS: [AbilityDef; 42] = [
+    // Striker
+    ab("Dash", "Burst forward at high speed.", 1, false, (6.0, 1.0), S::Move, [0.4, 0.75, 1.0]),
+    ab("Frag Grenade", "Throw a grenade that explodes in an area.", 1, false, (12.0, 2.0), S::Throw, [1.0, 0.7, 0.3]),
+    ab("Overdrive", "ULT: bigger damage, faster fire, no ammo use.", 1, true, (0.0, 0.0), S::Push, [1.0, 0.5, 0.1]),
+    ab("Cluster Grenade", "A grenade that bursts and scatters six bomblets.", 2, false, (14.0, 2.0), S::Throw, [1.0, 0.6, 0.2]),
+    ab("Rocket Barrage", "Fire a fan of six mini rockets from your wrist launcher.", 4, false, (12.0, 2.0), S::Push, [1.0, 0.45, 0.15]),
+    ab("Airstrike", "ULT: jets carpet-bomb a long line where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.1]),
+    ab("Combat Stim", "Heal up and move and shoot faster for a while.", 8, false, (20.0, 3.0), S::Push, [0.3, 1.0, 0.6]),
+    // Warden
+    ab("Heal Pulse", "Heal yourself and nearby teammates.", 1, false, (14.0, 2.0), S::Push, [0.35, 1.0, 0.5]),
+    ab("Frost Nova", "Damage and slow every enemy around you.", 1, false, (12.0, 2.0), S::Push, [0.55, 0.85, 1.0]),
+    ab("Orbital Strike", "ULT: call a huge blast where you aim.", 1, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.15]),
+    ab("Glacier Spike", "A wall of ice spikes tears along the ground, freezing what it hits.", 2, false, (10.0, 1.5), S::Ground, [0.5, 0.85, 1.0]),
+    ab("Barrier Dome", "A dome zombies can't get into. Heals everyone inside.", 4, false, (24.0, 3.0), S::Sky, [0.4, 0.95, 1.0]),
+    ab("Blizzard", "ULT: a freezing storm where you aim, slowing and shredding the horde.", 6, true, (0.0, 0.0), S::Sky, [0.7, 0.9, 1.0]),
+    ab("Cryo Orb", "Launch a slow orb that freezes everything it passes, then shatters.", 8, false, (14.0, 2.0), S::Push, [0.45, 0.8, 1.0]),
+    // Ronin
+    ab("Iaido Slash", "Hold to draw and focus, release to send a flying crescent cut.", 1, false, (6.0, 1.0), S::Sword, [1.0, 0.8, 0.3]),
+    ab("Shadow Step", "Blink forward, slicing enemies you pass through.", 1, false, (9.0, 1.5), S::Move, [0.6, 0.5, 1.0]),
+    ab("Blade Storm", "ULT: whirling blades shred enemies around you.", 1, true, (0.0, 0.0), S::Sword, [1.0, 0.2, 0.25]),
+    ab("Kunai Fan", "Throw a fan of seven piercing kunai.", 2, false, (7.0, 1.0), S::Throw, [1.0, 0.3, 0.3]),
+    ab("Smoke Bomb", "A cloud of smoke that leaves zombies inside choking and stunned.", 4, false, (16.0, 2.0), S::Throw, [0.6, 0.55, 0.75]),
+    ab("Thousand Cuts", "ULT: vanish and cut down every enemy around you in a storm of slashes.", 6, true, (0.0, 0.0), S::Sword, [1.0, 0.15, 0.2]),
+    ab("Rising Dragon", "Leap up in a flaming uppercut, launching enemies in front.", 8, false, (9.0, 1.5), S::Sword, [1.0, 0.5, 0.15]),
+    // Tinker
+    ab("Sentry Turret", "Deploy a turret that shoots nearby enemies.", 1, false, (20.0, 3.0), S::Deploy, [0.3, 0.9, 1.0]),
+    ab("Supply Drop", "Refill ammo and patch up teammates nearby.", 1, false, (16.0, 2.0), S::Deploy, [1.0, 0.8, 0.2]),
+    ab("Tesla Coil", "ULT: plant a coil that shocks everything near it.", 1, true, (0.0, 0.0), S::Deploy, [0.5, 0.8, 1.0]),
+    ab("Proximity Mines", "Toss three mines that blow when zombies get close.", 2, false, (14.0, 2.0), S::Throw, [1.0, 0.3, 0.2]),
+    ab("Combat Drone", "A drone that follows you and shoots what you're fighting.", 4, false, (24.0, 3.0), S::Deploy, [0.3, 1.0, 0.8]),
+    ab("Mortar Battery", "ULT: shells rain down on the area where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.75, 0.3]),
+    ab("Grav Grenade", "A grenade that opens a singularity, pulls zombies in, then implodes.", 8, false, (16.0, 2.0), S::Throw, [0.75, 0.4, 1.0]),
+    // Blaze
+    ab("Firebomb", "Throw a bomb that leaves a pool of fire.", 1, false, (10.0, 2.0), S::Throw, [1.0, 0.45, 0.1]),
+    ab("Flame Wave", "Blast a cone of fire that sets enemies alight.", 1, false, (7.0, 1.0), S::Push, [1.0, 0.5, 0.1]),
+    ab("Inferno", "ULT: wreathe yourself in a ring of fire.", 1, true, (0.0, 0.0), S::Push, [1.0, 0.4, 0.05]),
+    ab("Fireball", "Hurl a roaring fireball that explodes and leaves flames.", 2, false, (8.0, 1.0), S::Push, [1.0, 0.55, 0.15]),
+    ab("Flame Dash", "Rocket forward, leaving a trail of fire behind you.", 4, false, (9.0, 1.5), S::Move, [1.0, 0.4, 0.1]),
+    ab("Meteor Shower", "ULT: meteors crash down around where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.05]),
+    ab("Magma Geyser", "The ground cracks where you aim and erupts in a pillar of magma.", 8, false, (12.0, 2.0), S::Ground, [1.0, 0.3, 0.05]),
+    // Valkyrie
+    ab("Arc Spear", "Hurl a lightning spear that shocks everything in a line.", 1, false, (8.0, 1.5), S::Spear, [0.5, 0.8, 1.0]),
+    ab("Storm Leap", "Leap forward and crash down in a burst of lightning.", 1, false, (11.0, 2.0), S::Move, [0.5, 0.8, 1.0]),
+    ab("Ragnarok", "ULT: a storm follows you, striking nearby enemies with lightning.", 1, true, (0.0, 0.0), S::Sky, [0.6, 0.7, 1.0]),
+    ab("Thunder Clap", "Clap a shockwave that stuns and shocks everything around you.", 2, false, (9.0, 1.5), S::Push, [0.6, 0.85, 1.0]),
+    ab("Chain Lightning", "A bolt that leaps from zombie to zombie.", 4, false, (8.0, 1.2), S::Push, [0.55, 0.75, 1.0]),
+    ab("Bifrost", "ULT: a rainbow beam from the sky sweeps along where you aim.", 6, true, (0.0, 0.0), S::Sky, [0.9, 0.7, 1.0]),
+    ab("Spear Rain", "Lightning spears rain down where you aim.", 8, false, (14.0, 2.0), S::Sky, [0.5, 0.85, 1.0]),
+];
+
+impl Ability {
+    pub const ALL: [Ability; 42] = [
+        Ability::Dash,
+        Ability::FragGrenade,
+        Ability::Overdrive,
+        Ability::ClusterGrenade,
+        Ability::RocketBarrage,
+        Ability::Airstrike,
+        Ability::CombatStim,
+        Ability::HealPulse,
+        Ability::FrostNova,
+        Ability::OrbitalStrike,
+        Ability::GlacierSpike,
+        Ability::BarrierDome,
+        Ability::Blizzard,
+        Ability::CryoOrb,
+        Ability::Iaido,
+        Ability::ShadowStep,
+        Ability::BladeStorm,
+        Ability::KunaiFan,
+        Ability::SmokeBomb,
+        Ability::ThousandCuts,
+        Ability::RisingDragon,
+        Ability::Sentry,
+        Ability::SupplyDrop,
+        Ability::TeslaCoil,
+        Ability::ProximityMines,
+        Ability::CombatDrone,
+        Ability::MortarBattery,
+        Ability::GravGrenade,
+        Ability::Firebomb,
+        Ability::FlameWave,
+        Ability::Inferno,
+        Ability::Fireball,
+        Ability::FlameDash,
+        Ability::MeteorShower,
+        Ability::MagmaGeyser,
+        Ability::ArcSpear,
+        Ability::StormLeap,
+        Ability::Ragnarok,
+        Ability::ThunderClap,
+        Ability::ChainLightning,
+        Ability::Bifrost,
+        Ability::SpearRain,
+    ];
+
+    pub fn def(self) -> &'static AbilityDef {
+        &ABILITY_DEFS[self as usize]
+    }
+
+    pub fn name(self) -> &'static str {
+        self.def().name
+    }
+
+    pub fn owner(self) -> Character {
+        Character::ALL[self as usize / 7]
+    }
+
+    pub fn is_ult(self) -> bool {
+        self.def().ult
+    }
+
+    pub fn style(self) -> CastStyle {
+        self.def().style
+    }
+
+    pub fn color(self) -> Color {
+        let [r, g, b] = self.def().color;
+        Color::srgb(r, g, b)
+    }
+
+    /// Cooldown in seconds at an upgrade tier (0-3).
+    pub fn cooldown(self, tier: u8) -> f32 {
+        let (base, per) = self.def().cooldown;
+        base - per * tier as f32
+    }
+
+    /// Held in the hand and thrown (with an arc preview).
+    pub fn is_thrown(self) -> bool {
+        matches!(
+            self,
+            Ability::FragGrenade
+                | Ability::ClusterGrenade
+                | Ability::Firebomb
+                | Ability::SmokeBomb
+                | Ability::GravGrenade
+                | Ability::ProximityMines
+        )
+    }
+
+    /// Moves you rather than using your hand.
+    pub fn is_dash(self) -> bool {
+        self.style() == CastStyle::Move
+    }
+
+    /// Hold the key to charge it up, let go to cast (Iaido).
+    pub fn charges(self) -> bool {
+        self == Ability::Iaido
+    }
+
+}
+
+/// Ability upgrade tiers bought with level-ups in a match.
 pub const MAX_TIER: u8 = 3;
 
-/// Abilities you hold in your hand and throw (with an arc preview).
-pub fn is_thrown(c: Character, slot: u8) -> bool {
-    matches!((c, slot), (Character::Striker, 1) | (Character::Blaze, 0))
+/// Character levels: each one is earned with match XP played as that
+/// character, and unlocks abilities (see `AbilityDef::unlock`).
+pub const MAX_CHAR_LEVEL: u32 = 10;
+
+pub fn char_xp_to_next(level: u32) -> u32 {
+    800 + 400 * level.saturating_sub(1)
+}
+
+/// (character level, XP into it, XP needed for the next).
+pub fn char_level(xp: u32) -> (u32, u32, u32) {
+    let mut level = 1;
+    let mut left = xp;
+    while level < MAX_CHAR_LEVEL && left >= char_xp_to_next(level) {
+        left -= char_xp_to_next(level);
+        level += 1;
+    }
+    (level, left, char_xp_to_next(level))
+}
+
+/// Is `kit` a fair kit for `c` at `level`: two different regular abilities
+/// and an ultimate, all theirs and unlocked?
+pub fn valid_kit(c: Character, level: u32, kit: [Ability; 3]) -> bool {
+    let ok = |a: Ability, ult: bool| a.owner() == c && a.is_ult() == ult && a.def().unlock <= level;
+    ok(kit[0], false) && ok(kit[1], false) && ok(kit[2], true) && kit[0] != kit[1]
 }
 
 /// How a character's body moves when they use an ability.
@@ -1370,48 +1584,8 @@ pub enum CastStyle {
     Spear,
     /// Something set down on the ground in front (Tinker).
     Deploy,
-}
-
-pub fn cast_style(c: Character, slot: u8) -> CastStyle {
-    use CastStyle::*;
-    match (c, slot) {
-        _ if is_dash(c, slot) => Move,
-        _ if is_thrown(c, slot) => Throw,
-        (Character::Ronin, 0) | (Character::Ronin, 2) => Sword,
-        (Character::Valkyrie, 0) => Spear,
-        (Character::Warden, 2) | (Character::Valkyrie, 2) => Sky,
-        (Character::Tinker, _) => Deploy,
-        _ => Push,
-    }
-}
-
-/// The colour of an ability's glow and aura.
-pub fn ability_color(c: Character, slot: u8) -> Color {
-    let rgb = |r, g, b| Color::srgb(r, g, b);
-    match (c, slot) {
-        (Character::Striker, 0) => rgb(0.4, 0.75, 1.0),
-        (Character::Striker, 1) => rgb(1.0, 0.7, 0.3),
-        (Character::Striker, _) => rgb(1.0, 0.5, 0.1),
-        (Character::Warden, 0) => rgb(0.35, 1.0, 0.5),
-        (Character::Warden, 1) => rgb(0.55, 0.85, 1.0),
-        (Character::Warden, _) => rgb(1.0, 0.35, 0.15),
-        (Character::Ronin, 0) => rgb(1.0, 0.8, 0.3),
-        (Character::Ronin, 1) => rgb(0.6, 0.5, 1.0),
-        (Character::Ronin, _) => rgb(1.0, 0.2, 0.25),
-        (Character::Tinker, 0) => rgb(0.3, 0.9, 1.0),
-        (Character::Tinker, 1) => rgb(1.0, 0.8, 0.2),
-        (Character::Tinker, _) => rgb(0.5, 0.8, 1.0),
-        (Character::Blaze, _) => rgb(1.0, 0.45, 0.1),
-        (Character::Valkyrie, _) => rgb(0.5, 0.8, 1.0),
-    }
-}
-
-/// Abilities that move you rather than use your hand.
-pub fn is_dash(c: Character, slot: u8) -> bool {
-    matches!(
-        (c, slot),
-        (Character::Striker, 0) | (Character::Ronin, 1) | (Character::Valkyrie, 1)
-    )
+    /// Palm slammed down at the ground.
+    Ground,
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,10 +1749,10 @@ pub enum Upgrade {
 }
 
 impl Upgrade {
-    pub fn label(self, c: Character, tiers: [u8; 3]) -> String {
+    pub fn label(self, kit: [Ability; 3], tiers: [u8; 3]) -> String {
         match self {
             Upgrade::Ability(slot) => {
-                let name = c.abilities()[slot as usize].0;
+                let name = kit[slot as usize].name();
                 format!("{name} tier {}", tiers[slot as usize] + 2)
             }
             Upgrade::GunElement(e) => {

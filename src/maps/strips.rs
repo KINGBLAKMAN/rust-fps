@@ -1,189 +1,21 @@
-//! The bigger maps: every map has a starting area inside an inner fence and
-//! four more areas around it (north, south, east and west), each behind a
-//! door you buy open. The corners are filled with big buildings. Two of the
-//! areas have a gun on the wall to buy, and one has a perk machine.
+//! Props shared by the maps (rail cars, trucks, sheds, school and building
+//! site clutter), and the bought doors and wall guns in the world.
 
 use bevy::prelude::*;
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::FRAC_PI_2;
 
 use crate::kit::c;
-use crate::maps::{Blocker, DoorDef, MapLayout, WallBuy, DOOR_WIDTH, INNER, OUTER};
+use crate::maps::{Blocker, MapLayout, DOOR_WIDTH};
 use crate::props::{boxr, hash, shade, v, Art};
 
-/// Inner fence line (the old map edge).
-const FENCE: f32 = INNER + 0.5;
-/// Gap left in the fence for a door (its pillars fill the edges).
-const GAP: f32 = DOOR_WIDTH / 2.0 + 0.4;
 
 impl MapLayout {
-    /// Adds the doors, the four new areas and the corner buildings.
-    pub fn expand(&mut self, map: u8) {
-        match map {
-            1 => self.expand_park(),
-            2 => self.expand_neighborhood(),
-            _ => self.expand_yard(),
-        }
-        let (style, height, block) = match map {
-            1 => (1, 3.0, 1),
-            2 => (2, 2.2, 2),
-            _ => (0, 4.5, 0),
-        };
-        self.ring(style, height);
-        let mid = (INNER + 1.0 + OUTER) / 2.0;
-        for (i, (sx, sz)) in [(-1.0f32, -1.0f32), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)]
-            .into_iter()
-            .enumerate()
-        {
-            self.corner_block(
-                sx * mid,
-                sz * mid,
-                block,
-                i as f32 + map as f32 * 4.0,
-                i + (i >= 2) as usize,
-            );
-        }
-    }
-
-    fn door(&mut self, x: f32, z: f32, zone: u8, cost: u32, name: &'static str, blocker: Blocker) {
-        let along_x = zone == 1 || zone == 2;
-        let pos = if along_x {
-            v(x, 0.0, if zone == 1 { FENCE } else { -FENCE })
-        } else {
-            v(if zone == 3 { FENCE } else { -FENCE }, 0.0, z)
-        };
-        self.doors.push(DoorDef {
-            pos,
-            along_x,
-            cost,
-            zone,
-            zone2: 0,
-            name,
-            blocker,
-        });
-    }
-
-    /// A gun board on a concrete panel, facing `yaw`, with its back to the
-    /// inner fence.
-    fn wall_buy(&mut self, pos: Vec3, yaw: f32, gun: u8) {
-        let mut a = Art::default();
-        let concrete = c(0.62, 0.62, 0.6);
-        boxr(&mut a.paint, v(-1.5, 0.0, -0.3), v(1.5, 2.6, 0.0), concrete);
-        boxr(
-            &mut a.paint,
-            v(-1.6, 2.6, -0.35),
-            v(1.6, 2.75, 0.05),
-            shade(concrete, 0.8),
-        );
-        // Chalk outline of the gun and a lamp over it.
-        let chalk = c(0.95, 0.95, 0.85);
-        for (p0, p1) in [
-            (v(-1.1, 0.9, 0.01), v(1.1, 0.9, 0.01)),
-            (v(-1.1, 2.1, 0.01), v(1.1, 2.1, 0.01)),
-            (v(-1.1, 0.9, 0.01), v(-1.1, 2.1, 0.01)),
-            (v(1.1, 0.9, 0.01), v(1.1, 2.1, 0.01)),
-        ] {
-            a.glow.beam(p0, p1, Vec2::new(0.04, 0.01), chalk);
-        }
-        a.metal.beam(
-            v(0.0, 2.75, -0.1),
-            v(0.0, 2.85, 0.35),
-            Vec2::splat(0.05),
-            c(0.2, 0.2, 0.2),
-        );
-        a.metal.cone(
-            v(0.0, 2.8, 0.42),
-            0.18,
-            0.15,
-            Quat::IDENTITY,
-            c(0.2, 0.2, 0.2),
-        );
-        a.glow.cyl(
-            v(0.0, 2.72, 0.42),
-            0.12,
-            0.02,
-            Quat::IDENTITY,
-            c(1.0, 0.95, 0.8),
-        );
-        self.place(a, pos, yaw);
-        self.collide_local(pos, yaw, v(0.0, 1.3, -0.15), v(3.0, 2.6, 0.35));
-        self.light(
-            pos + Quat::from_rotation_y(yaw) * v(0.0, 2.5, 0.8),
-            c(1.0, 0.92, 0.75),
-            40_000.0,
-        );
-        self.wall_buys.push(WallBuy {
-            pos,
-            yaw,
-            gun,
-            attach: crate::data::Attach::NONE,
-            owner: None,
-        });
-    }
-
-    /// The inner fence, with gaps and pillars for the doors.
-    fn ring(&mut self, style: u8, height: f32) {
-        let mut a = Art::default();
-        for side in 0..4 {
-            // Positions along the side where doors are.
-            let mut cuts: Vec<f32> = self
-                .doors
-                .iter()
-                .filter(|d| {
-                    let z = d.pos.z.abs() > INNER;
-                    match side {
-                        0 => z && d.pos.z < 0.0,
-                        1 => z && d.pos.z > 0.0,
-                        2 => !z && d.pos.x < 0.0,
-                        _ => !z && d.pos.x > 0.0,
-                    }
-                })
-                .map(|d| if side < 2 { d.pos.x } else { d.pos.z })
-                .collect();
-            cuts.sort_by(f32::total_cmp);
-            let point = |t: f32| match side {
-                0 => v(t, 0.0, -FENCE),
-                1 => v(t, 0.0, FENCE),
-                2 => v(-FENCE, 0.0, t),
-                _ => v(FENCE, 0.0, t),
-            };
-            let mut start = -FENCE;
-            for cut in cuts.iter().copied().chain(std::iter::once(FENCE + GAP)) {
-                let end = cut - GAP;
-                if end - start > 1.2 {
-                    self.fence_run(&mut a, point(start + 0.5), point(end - 0.5), style, height);
-                }
-                start = cut + GAP;
-            }
-        }
-        // Each gap gets a way through that fits the place.
-        let doors = self.doors.clone();
-        for d in &doors {
-            let yaw = if d.along_x { 0.0 } else { FRAC_PI_2 };
-            let p = match style {
-                0 => container_tunnel(),
-                1 => stone_arch(),
-                _ => pergola(),
-            };
-            let depth = if style == 0 { 5.0 } else { 0.9 };
-            for s in [-1.0f32, 1.0] {
-                self.collide_local(
-                    d.pos,
-                    yaw,
-                    v(s * (DOOR_WIDTH / 2.0 + 0.45), 1.8, 0.0),
-                    v(0.5, 3.6, depth),
-                );
-            }
-            self.place(p, d.pos, yaw);
-        }
-        self.place(a, Vec3::ZERO, 0.0);
-    }
-
     // -----------------------------------------------------------------------
     // Shared props for the new areas
     // -----------------------------------------------------------------------
 
     /// Railway track along X from `x0` to `x1`.
-    fn track(&mut self, x0: f32, x1: f32, z: f32) {
+    pub(crate) fn track(&mut self, x0: f32, x1: f32, z: f32) {
         let mut a = Art::default();
         let mut x = x0;
         while x <= x1 {
@@ -212,7 +44,7 @@ impl MapLayout {
     }
 
     /// Railway boxcar standing on a track along X.
-    fn boxcar(&mut self, x: f32, z: f32, color: Color, seed: f32) {
+    pub(crate) fn boxcar(&mut self, x: f32, z: f32, color: Color, seed: f32) {
         let mut a = Art::default();
         let (l, w, h) = (12.0, 3.0, 3.6);
         boxr(
@@ -287,7 +119,7 @@ impl MapLayout {
         self.collide(v(x, 2.4, z), v(l, 4.8, w));
     }
 
-    fn bollard(&mut self, x: f32, z: f32) {
+    pub(crate) fn bollard(&mut self, x: f32, z: f32) {
         let mut a = Art::default();
         let iron = c(0.12, 0.12, 0.13);
         a.metal
@@ -306,7 +138,7 @@ impl MapLayout {
     }
 
     /// Wooden crates, stacked.
-    fn crates(&mut self, x: f32, z: f32, seed: f32) {
+    pub(crate) fn crates(&mut self, x: f32, z: f32, seed: f32) {
         let mut a = Art::default();
         let wood = c(0.6, 0.45, 0.27);
         let n = 2 + (hash(seed, 1.0) * 3.0) as usize;
@@ -345,7 +177,7 @@ impl MapLayout {
     }
 
     /// Harbour or yard lamp post with an overhanging lamp.
-    fn lamp_post(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn lamp_post(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         let grey = c(0.3, 0.31, 0.33);
         a.metal
@@ -364,7 +196,7 @@ impl MapLayout {
     }
 
     /// Semi truck (cab facing +Z) with a box trailer behind it.
-    fn semi(&mut self, x: f32, z: f32, yaw: f32, color: Color, trailer: Color) {
+    pub(crate) fn semi(&mut self, x: f32, z: f32, yaw: f32, color: Color, trailer: Color) {
         let mut a = Art::default();
         let dark = c(0.08, 0.08, 0.08);
         let chrome = c(0.8, 0.8, 0.82);
@@ -438,7 +270,7 @@ impl MapLayout {
     }
 
     /// Fuel pump island under a canopy (canopy optional).
-    fn fuel_pumps(&mut self, x: f32, z: f32, yaw: f32, canopy: bool) {
+    pub(crate) fn fuel_pumps(&mut self, x: f32, z: f32, yaw: f32, canopy: bool) {
         let mut a = Art::default();
         let white = c(0.92, 0.92, 0.9);
         let red = c(0.8, 0.12, 0.1);
@@ -494,48 +326,6 @@ impl MapLayout {
         self.collide_local(v(x, 0.0, z), yaw, v(0.0, 1.0, 0.0), v(6.0, 2.0, 1.4));
     }
 
-    /// Open-sided steel shed roof on columns over a rectangle.
-    fn canopy(&mut self, x0: f32, z0: f32, x1: f32, z1: f32, height: f32, color: Color) {
-        let mut a = Art::default();
-        let grey = c(0.5, 0.5, 0.52);
-        let mut x = x0;
-        while x <= x1 + 0.01 {
-            for zz in [z0, z1] {
-                a.metal
-                    .cuboid(v(x, height / 2.0, zz), v(0.35, height, 0.35), grey);
-                self.collide(v(x, height / 2.0, zz), v(0.4, height, 0.4));
-            }
-            a.metal.beam(
-                v(x, height, z0),
-                v(x, height, z1),
-                Vec2::new(0.25, 0.4),
-                grey,
-            );
-            x += (x1 - x0) / 4.0;
-        }
-        boxr(
-            &mut a.metal,
-            v(x0 - 0.5, height + 0.2, z0 - 0.5),
-            v(x1 + 0.5, height + 0.45, z1 + 0.5),
-            color,
-        );
-        let mut x = x0 + 2.0;
-        while x < x1 - 1.0 {
-            a.glow.cuboid(
-                v(x, height - 0.05, (z0 + z1) / 2.0),
-                v(0.3, 0.06, (z1 - z0) * 0.7),
-                c(0.9, 0.95, 1.0),
-            );
-            self.light(
-                v(x, height - 0.6, (z0 + z1) / 2.0),
-                c(0.9, 0.95, 1.0),
-                120_000.0,
-            );
-            x += (x1 - x0) / 3.0;
-        }
-        self.place(a, Vec3::ZERO, 0.0);
-    }
-
     /// Storage rack with boxes on three shelves.
     pub(crate) fn shelving(&mut self, x: f32, z: f32, yaw: f32, seed: f32) {
         let mut a = Art::default();
@@ -574,7 +364,7 @@ impl MapLayout {
     }
 
     /// Small booth (guard hut, ticket booth).
-    fn booth(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn booth(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         boxr(&mut a.paint, v(-1.2, 0.0, -1.2), v(1.2, 2.6, 1.2), color);
         boxr(
@@ -604,164 +394,10 @@ impl MapLayout {
     }
 
     // -----------------------------------------------------------------------
-    // Shipping Yard
-    // -----------------------------------------------------------------------
-
-    fn expand_yard(&mut self) {
-        self.door(10.0, 0.0, 1, 1000, "Rail Yard", Blocker::Crates);
-        self.door(-6.0, 0.0, 2, 750, "Dockside", Blocker::Crates);
-        self.door(0.0, 15.0, 3, 1000, "Warehouse", Blocker::Crates);
-        self.door(0.0, -18.0, 4, 1250, "Truck Depot", Blocker::Crates);
-        self.perk_spots[4] = v(20.0, 0.0, -47.0);
-
-        // North: rail yard with boxcars.
-        self.wall_buy(v(-4.0, 0.0, 41.3), 0.0, 3);
-        let cars = [
-            c(0.55, 0.2, 0.12),
-            c(0.2, 0.3, 0.45),
-            c(0.35, 0.36, 0.3),
-            c(0.6, 0.45, 0.15),
-        ];
-        for (i, z) in [47.0f32, 53.0].into_iter().enumerate() {
-            self.track(-40.0, 40.0, z);
-            let xs: &[f32] = if i == 0 {
-                &[-28.0, 22.0]
-            } else {
-                &[-8.0, 6.0, 30.0]
-            };
-            for (j, x) in xs.iter().enumerate() {
-                self.boxcar(*x, z, cars[(i * 2 + j) % 4], *x);
-            }
-        }
-        self.booth(-36.0, 43.5, 0.0, c(0.7, 0.6, 0.3));
-        self.crates(4.0, 43.0, 1.0);
-        self.crates(-16.0, 50.0, 2.0);
-        for x in [-24.0f32, 0.0, 24.0] {
-            self.lamp_post(x, 50.0, 0.0, c(1.0, 0.85, 0.6));
-        }
-
-        // South: the quay, with bollards along the water and the ship beyond.
-        let mut a = Art::default();
-        a.paint
-            .cuboid(v(0.0, 0.02, -57.0), v(80.0, 0.04, 2.0), c(0.85, 0.75, 0.15));
-        self.place(a, Vec3::ZERO, 0.0);
-        let mut x = -36.0;
-        while x <= 36.0 {
-            self.bollard(x, -56.0);
-            x += 8.0;
-        }
-        for (i, (x, z)) in [
-            (-30.0f32, -45.0f32),
-            (-14.0, -50.0),
-            (8.0, -45.0),
-            (30.0, -50.0),
-            (-2.0, -52.0),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            self.crates(x, z, i as f32 + 10.0);
-        }
-        self.container(-22.0, -48.0, 0.0, true, c(0.12, 0.3, 0.6), 300.0);
-        self.container(34.0, -46.0, 0.0, false, c(0.6, 0.18, 0.12), 301.0);
-        self.container(34.0, -46.0, 2.6, false, c(0.15, 0.45, 0.25), 302.0);
-        for x in [-26.0f32, 0.0, 26.0] {
-            self.lamp_post(x, -54.5, PI, c(1.0, 0.8, 0.5));
-        }
-
-        // East: warehouse floor under a canopy, with racks and a forklift.
-        self.wall_buy(v(41.3, 0.0, -8.0), FRAC_PI_2, 10);
-        self.canopy(44.0, -32.0, 56.0, 32.0, 7.0, c(0.35, 0.37, 0.4));
-        for (i, z) in [-26.0f32, -16.0, 24.0].into_iter().enumerate() {
-            self.shelving(50.0, z, 0.0, i as f32);
-        }
-        for z in [-26.0f32, -16.0, 24.0] {
-            self.shelving(50.0, z + 3.0, 0.0, z);
-        }
-        self.forklift(46.0, 6.0, 0.4, c(0.95, 0.7, 0.1));
-        self.pallet_stack(53.0, 4.0, 0.0, 11.0);
-        self.pallet_stack(53.0, 8.0, 0.2, 12.0);
-        self.pallet_stack(46.0, -6.0, 0.1, 13.0);
-
-        // West: truck depot.
-        self.semi(
-            -50.0,
-            30.0,
-            PI * 0.95,
-            c(0.75, 0.12, 0.1),
-            c(0.9, 0.9, 0.88),
-        );
-        self.semi(-50.0, 4.0, PI * 1.05, c(0.15, 0.3, 0.65), c(0.8, 0.8, 0.78));
-        self.semi(-46.0, -30.0, 0.1, c(0.95, 0.75, 0.1), c(0.6, 0.18, 0.12));
-        self.fuel_pumps(-48.0, -10.0, FRAC_PI_2, true);
-        self.tires(-55.0, 16.0, 4);
-        self.tires(-44.0, 20.0, 3);
-        self.drums(-55.0, -22.0, 3, 21.0);
-        self.booth(-44.0, -36.0, 0.0, c(0.85, 0.85, 0.82));
-    }
-
-    // -----------------------------------------------------------------------
     // Central Park
     // -----------------------------------------------------------------------
 
-    fn greenhouse(&mut self, x: f32, z: f32) {
-        let mut a = Art::default();
-        let (l, w, h) = (14.0, 7.0, 3.2);
-        let white = c(0.92, 0.93, 0.9);
-        boxr(
-            &mut a.paint,
-            v(-l / 2.0, 0.0, -w / 2.0),
-            v(l / 2.0, 0.6, w / 2.0),
-            c(0.6, 0.55, 0.5),
-        );
-        boxr(
-            &mut a.glass,
-            v(-l / 2.0, 0.6, -w / 2.0),
-            v(l / 2.0, h, w / 2.0),
-            c(0.7, 0.85, 0.8),
-        );
-        a.glass.wedge(
-            v(0.0, h + 1.0, 0.0),
-            v(w, 2.0, l),
-            Quat::from_rotation_y(FRAC_PI_2),
-            c(0.7, 0.85, 0.8),
-        );
-        let mut t = -l / 2.0;
-        while t <= l / 2.0 + 0.01 {
-            for s in [-1.0f32, 1.0] {
-                a.metal
-                    .cuboid(v(t, h / 2.0, s * w / 2.0), v(0.08, h, 0.08), white);
-                a.metal.beam(
-                    v(t, h, s * w / 2.0),
-                    v(t, h + 2.0, 0.0),
-                    Vec2::splat(0.08),
-                    white,
-                );
-            }
-            t += 1.75;
-        }
-        a.metal.beam(
-            v(-l / 2.0, h + 2.0, 0.0),
-            v(l / 2.0, h + 2.0, 0.0),
-            Vec2::splat(0.1),
-            white,
-        );
-        // Plants inside.
-        for i in 0..10 {
-            let px = -l / 2.0 + 1.0 + i as f32 * 1.3;
-            for s in [-1.0f32, 1.0] {
-                a.paint.blob(
-                    v(px, 1.0, s * 2.0),
-                    v(0.5, 0.6 + hash(px, s) * 0.5, 0.5),
-                    c(0.2, 0.5 + hash(s, px) * 0.2, 0.18),
-                );
-            }
-        }
-        self.place(a, v(x, 0.0, z), 0.0);
-        self.collide(v(x, 2.5, z), v(l, 5.0, w));
-    }
-
-    fn flower_bed(&mut self, x: f32, z: f32, l: f32, seed: f32) {
+    pub(crate) fn flower_bed(&mut self, x: f32, z: f32, l: f32, seed: f32) {
         let mut a = Art::default();
         boxr(
             &mut a.paint,
@@ -804,7 +440,7 @@ impl MapLayout {
         self.collide(v(x, 0.25, z), v(l, 0.5, 1.6));
     }
 
-    fn tennis_court(&mut self, x: f32, z: f32, color: Color) {
+    pub(crate) fn tennis_court(&mut self, x: f32, z: f32, color: Color) {
         let mut a = Art::default();
         let (l, w) = (24.0, 11.0);
         a.paint.cuboid(
@@ -841,7 +477,7 @@ impl MapLayout {
         self.collide(v(x, 0.5, z), v(w + 1.0, 1.0, 0.2));
     }
 
-    fn rowboat(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn rowboat(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         a.paint.blob(v(0.0, 0.2, 0.0), v(0.7, 0.3, 1.9), color);
         a.paint
@@ -860,173 +496,11 @@ impl MapLayout {
         self.place(a, v(x, 0.0, z), yaw);
     }
 
-    fn boathouse(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut a = Art::default();
-        let wood = c(0.5, 0.3, 0.2);
-        boxr(&mut a.paint, v(-4.0, 0.0, -3.0), v(4.0, 3.2, 3.0), wood);
-        for i in 0..14 {
-            let y = 0.2 + i as f32 * 0.22;
-            boxr(
-                &mut a.paint,
-                v(-4.05, y, -3.05),
-                v(4.05, y + 0.04, 3.05),
-                shade(wood, 0.8),
-            );
-        }
-        a.paint.wedge(
-            v(0.0, 4.2, 0.0),
-            v(8.6, 2.0, 6.6),
-            Quat::IDENTITY,
-            c(0.25, 0.3, 0.28),
-        );
-        boxr(
-            &mut a.paint,
-            v(-1.0, 0.0, 3.0),
-            v(1.0, 2.3, 3.06),
-            c(0.85, 0.85, 0.8),
-        );
-        for s in [-1.0f32, 1.0] {
-            boxr(
-                &mut a.glass,
-                v(s * 2.6 - 0.6, 1.3, 3.0),
-                v(s * 2.6 + 0.6, 2.3, 3.06),
-                c(0.35, 0.45, 0.55),
-            );
-        }
-        a.glow
-            .cuboid(v(0.0, 2.6, 3.2), v(0.3, 0.2, 0.1), c(1.0, 0.85, 0.55));
-        self.place(a, v(x, 0.0, z), yaw);
-        self.collide_local(v(x, 0.0, z), yaw, v(0.0, 2.0, 0.0), v(8.0, 4.0, 6.0));
-        self.light(
-            v(x, 2.7, z) + Quat::from_rotation_y(yaw) * v(0.0, 0.0, 3.6),
-            c(1.0, 0.85, 0.55),
-            50_000.0,
-        );
-    }
-
-    fn expand_park(&mut self) {
-        self.door(0.0, 0.0, 1, 1000, "Greenhouse Garden", Blocker::Planks);
-        self.door(0.0, 0.0, 2, 750, "Parking Lot", Blocker::Planks);
-        self.door(0.0, 0.0, 3, 1000, "Tennis Courts", Blocker::Planks);
-        self.door(0.0, 0.0, 4, 1250, "Boathouse Lake", Blocker::Planks);
-        self.perk_spots[4] = v(-46.0, 0.0, 12.0);
-        let path = c(0.7, 0.64, 0.52);
-
-        // North: greenhouse and flower beds.
-        self.wall_buy(v(-7.0, 0.0, 41.3), 0.0, 2);
-        self.ground_paint(v(0.0, 0.0, 49.0), Vec2::new(4.0, 17.0), 0.0, path, 0.008);
-        self.ground_paint(v(0.0, 0.0, 46.0), Vec2::new(70.0, 3.0), 0.0, path, 0.008);
-        self.greenhouse(-20.0, 52.0);
-        self.greenhouse(20.0, 52.0);
-        for x in [-30.0f32, -10.0, 10.0, 30.0] {
-            self.flower_bed(x, 43.6, 6.0, x);
-        }
-        for x in [-6.0f32, 6.0] {
-            self.flower_bed(x, 52.0, 4.0, x + 1.0);
-        }
-        self.park_lamp(-6.0, 47.6);
-        self.park_lamp(6.0, 47.6);
-        self.bench(-14.0, 47.8, PI);
-        self.bench(14.0, 47.8, PI);
-
-        // South: car park.
-        let mut a = Art::default();
-        a.paint.cuboid(
-            v(0.0, 0.01, -49.5),
-            v(80.0, 0.02, 17.0),
-            c(0.22, 0.22, 0.24),
-        );
-        for i in 0..20 {
-            let x = -38.0 + i as f32 * 4.0;
-            for z in [-45.5f32, -53.5] {
-                a.paint
-                    .cuboid(v(x, 0.025, z), v(0.12, 0.02, 4.5), c(0.9, 0.9, 0.88));
-            }
-        }
-        self.place(a, Vec3::ZERO, 0.0);
-        let car_colors = [
-            c(0.7, 0.1, 0.1),
-            c(0.1, 0.2, 0.6),
-            c(0.85, 0.85, 0.85),
-            c(0.15, 0.15, 0.15),
-            c(0.2, 0.45, 0.3),
-            c(0.9, 0.7, 0.2),
-        ];
-        for (i, (x, z)) in [
-            (-32.0f32, -45.5f32),
-            (-24.0, -53.5),
-            (-12.0, -45.5),
-            (-4.0, -53.5),
-            (10.0, -45.5),
-            (18.0, -45.5),
-            (26.0, -53.5),
-            (34.0, -45.5),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            self.car(x + 2.0, z, FRAC_PI_2, car_colors[i % car_colors.len()]);
-        }
-        self.booth(-36.0, -42.5, 0.0, c(0.85, 0.85, 0.82));
-        for x in [-20.0f32, 0.0, 20.0] {
-            self.lamp_post(x, -49.5, 0.0, c(1.0, 0.85, 0.6));
-        }
-
-        // East: two tennis courts and benches.
-        self.wall_buy(v(41.3, 0.0, -12.0), FRAC_PI_2, 7);
-        self.tennis_court(50.0, -18.0, c(0.2, 0.45, 0.6));
-        self.tennis_court(50.0, 18.0, c(0.25, 0.5, 0.3));
-        for z in [-2.0f32, 2.0] {
-            self.bench(50.0, z, if z < 0.0 { PI } else { 0.0 });
-        }
-        self.park_lamp(44.0, 0.0);
-        self.park_lamp(56.0, 0.0);
-
-        // West: the lake, a boardwalk, boats and the boathouse.
-        let mut a = Art::default();
-        a.glass
-            .cuboid(v(-52.0, 0.04, 0.0), v(9.0, 0.04, 50.0), c(0.2, 0.42, 0.62));
-        a.paint
-            .cuboid(v(-52.0, 0.01, 0.0), v(9.4, 0.02, 50.4), c(0.18, 0.25, 0.2));
-        let wood = c(0.55, 0.4, 0.27);
-        let mut zz = -24.0;
-        while zz < 24.0 {
-            a.paint.cuboid(
-                v(-46.8, 0.25, zz),
-                v(2.2, 0.08, 0.28),
-                shade(wood, 0.9 + hash(zz, 1.0) * 0.2),
-            );
-            zz += 0.32;
-        }
-        for zz in [-24.0f32, -12.0, 0.0, 12.0, 24.0] {
-            for s in [-1.0f32, 1.0] {
-                a.paint.cyl(
-                    v(-46.8 + s * 1.0, 0.5, zz),
-                    0.07,
-                    1.0,
-                    Quat::IDENTITY,
-                    shade(wood, 0.7),
-                );
-            }
-        }
-        self.place(a, Vec3::ZERO, 0.0);
-        self.rowboat(-52.0, -8.0, 0.3, c(0.85, 0.85, 0.82));
-        self.rowboat(-53.5, 6.0, -0.4, c(0.7, 0.15, 0.12));
-        self.rowboat(-51.0, 20.0, 0.1, c(0.2, 0.35, 0.6));
-        self.boathouse(-50.0, -32.0, 0.0);
-        self.park_lamp(-45.0, -14.0);
-        self.park_lamp(-45.0, 26.0);
-        for i in 0..6 {
-            let zz = -20.0 + i as f32 * 8.0;
-            self.bush(-56.5, zz, 1.2, zz, None);
-        }
-    }
-
     // -----------------------------------------------------------------------
     // The Neighborhood
     // -----------------------------------------------------------------------
 
-    fn garage(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn garage(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         boxr(&mut a.paint, v(-3.0, 0.0, -3.0), v(3.0, 3.0, 3.0), color);
         boxr(
@@ -1056,7 +530,7 @@ impl MapLayout {
         self.collide_local(v(x, 0.0, z), yaw, v(0.0, 1.6, 0.0), v(6.0, 3.2, 6.0));
     }
 
-    fn dumpster(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
+    pub(crate) fn dumpster(&mut self, x: f32, z: f32, yaw: f32, color: Color) {
         let mut a = Art::default();
         boxr(&mut a.metal, v(-1.0, 0.15, -0.8), v(1.0, 1.3, 0.8), color);
         a.metal.cuboid_rot(
@@ -1079,7 +553,7 @@ impl MapLayout {
     }
 
     /// Wooden power poles along X with sagging wires between them.
-    fn power_line(&mut self, x0: f32, x1: f32, z: f32) {
+    pub(crate) fn power_line(&mut self, x0: f32, x1: f32, z: f32) {
         let mut a = Art::default();
         let wood = c(0.42, 0.3, 0.2);
         let mut x = x0;
@@ -1126,7 +600,7 @@ impl MapLayout {
         self.place(a, Vec3::ZERO, 0.0);
     }
 
-    fn bleachers(&mut self, x: f32, z: f32, yaw: f32) {
+    pub(crate) fn bleachers(&mut self, x: f32, z: f32, yaw: f32) {
         let mut a = Art::default();
         let alu = c(0.75, 0.76, 0.78);
         for row in 0..4 {
@@ -1159,7 +633,7 @@ impl MapLayout {
         self.collide_local(v(x, 0.0, z), yaw, v(0.0, 1.0, 0.9), v(10.0, 2.0, 2.4));
     }
 
-    fn school_bus(&mut self, x: f32, z: f32, yaw: f32) {
+    pub(crate) fn school_bus(&mut self, x: f32, z: f32, yaw: f32) {
         let mut a = Art::default();
         let yellow = c(0.95, 0.72, 0.1);
         let dark = c(0.06, 0.06, 0.06);
@@ -1204,124 +678,7 @@ impl MapLayout {
         self.collide_local(v(x, 0.0, z), yaw, v(0.0, 1.5, 0.3), v(2.6, 3.0, 10.6));
     }
 
-    fn store(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut a = Art::default();
-        let wall = c(0.85, 0.82, 0.75);
-        boxr(&mut a.paint, v(-6.0, 0.0, -4.0), v(6.0, 4.0, 4.0), wall);
-        boxr(
-            &mut a.paint,
-            v(-6.2, 4.0, -4.2),
-            v(6.2, 4.6, 4.2),
-            c(0.75, 0.15, 0.12),
-        );
-        boxr(
-            &mut a.glass,
-            v(-5.0, 0.3, 4.0),
-            v(3.0, 3.0, 4.06),
-            c(0.35, 0.45, 0.5),
-        );
-        boxr(
-            &mut a.paint,
-            v(3.6, 0.0, 4.0),
-            v(5.2, 2.6, 4.06),
-            c(0.3, 0.33, 0.38),
-        );
-        a.glow
-            .cuboid(v(0.0, 4.3, 4.25), v(7.0, 0.5, 0.06), c(1.0, 0.95, 0.6));
-        a.glow
-            .cuboid(v(-1.0, 1.6, 4.02), v(7.6, 2.4, 0.01), c(0.55, 0.6, 0.55));
-        // Shelves seen through the window.
-        for px in [-3.5f32, -0.5, 2.0] {
-            boxr(
-                &mut a.paint,
-                v(px - 0.8, 0.0, 1.5),
-                v(px + 0.8, 1.6, 2.2),
-                c(0.6, 0.3, 0.2),
-            );
-        }
-        self.place(a, v(x, 0.0, z), yaw);
-        self.collide_local(v(x, 0.0, z), yaw, v(0.0, 2.3, 0.0), v(12.0, 4.6, 8.0));
-    }
-
-    fn scaffold(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut a = Art::default();
-        let pipe = c(0.55, 0.57, 0.6);
-        let plank = c(0.65, 0.5, 0.3);
-        let (l, w) = (10.0, 8.0);
-        // House frame: studs and a floor slab.
-        boxr(
-            &mut a.paint,
-            v(-l / 2.0, 0.0, -w / 2.0),
-            v(l / 2.0, 0.3, w / 2.0),
-            c(0.65, 0.65, 0.63),
-        );
-        let mut t = -l / 2.0;
-        while t <= l / 2.0 + 0.01 {
-            for s in [-1.0f32, 1.0] {
-                a.paint
-                    .cuboid(v(t, 1.8, s * w / 2.0), v(0.1, 3.0, 0.15), plank);
-            }
-            t += 0.8;
-        }
-        let mut t = -w / 2.0;
-        while t <= w / 2.0 + 0.01 {
-            a.paint
-                .cuboid(v(-l / 2.0, 1.8, t), v(0.15, 3.0, 0.1), plank);
-            t += 0.8;
-        }
-        boxr(
-            &mut a.paint,
-            v(-l / 2.0, 3.3, -w / 2.0),
-            v(l / 2.0, 3.45, w / 2.0),
-            plank,
-        );
-        // Scaffold along the front.
-        for px in [-l / 2.0, 0.0, l / 2.0] {
-            for zz in [w / 2.0 + 0.6, w / 2.0 + 1.8] {
-                a.metal.cyl(v(px, 3.0, zz), 0.04, 6.0, Quat::IDENTITY, pipe);
-            }
-        }
-        for y in [1.5f32, 3.4, 5.2] {
-            boxr(
-                &mut a.paint,
-                v(-l / 2.0, y, w / 2.0 + 0.5),
-                v(l / 2.0, y + 0.06, w / 2.0 + 1.9),
-                plank,
-            );
-            a.metal.cyl(
-                v(0.0, y + 1.0, w / 2.0 + 1.85),
-                0.03,
-                l,
-                Quat::from_rotation_z(FRAC_PI_2),
-                pipe,
-            );
-        }
-        self.place(a, v(x, 0.0, z), yaw);
-        // Walls you can't pass, but the open back lets you through.
-        self.collide_local(v(x, 0.0, z), yaw, v(0.0, 1.8, w / 2.0), v(l, 3.6, 0.3));
-        self.collide_local(v(x, 0.0, z), yaw, v(-l / 2.0, 1.8, 0.0), v(0.3, 3.6, w));
-        self.collide_local(
-            v(x, 0.0, z),
-            yaw,
-            v(0.0, 1.8, -w / 2.0),
-            v(l * 0.5, 3.6, 0.3),
-        );
-    }
-
-    fn dirt_pile(&mut self, x: f32, z: f32, size: f32) {
-        let mut a = Art::default();
-        a.paint
-            .blob(v(0.0, 0.0, 0.0), v(2.2, 1.3, 1.8) * size, c(0.42, 0.3, 0.2));
-        a.paint.blob(
-            v(0.8, 0.0, 0.6) * size,
-            v(1.4, 0.9, 1.2) * size,
-            c(0.38, 0.27, 0.18),
-        );
-        self.place(a, v(x, 0.0, z), x);
-        self.collide(v(x, 0.5 * size, z), v(3.6, 1.0, 3.0) * size);
-    }
-
-    fn pipes(&mut self, x: f32, z: f32, yaw: f32) {
+    pub(crate) fn pipes(&mut self, x: f32, z: f32, yaw: f32) {
         let mut a = Art::default();
         for (i, (px, py)) in [
             (-0.5f32, 0.35f32),
@@ -1352,425 +709,6 @@ impl MapLayout {
         self.collide_local(v(x, 0.0, z), yaw, v(0.25, 0.65, 0.0), v(2.2, 1.3, 4.0));
     }
 
-    fn cement_mixer(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut a = Art::default();
-        let orange = c(0.9, 0.45, 0.1);
-        boxr(
-            &mut a.metal,
-            v(-0.6, 0.4, -0.8),
-            v(0.6, 0.6, 0.8),
-            c(0.3, 0.3, 0.3),
-        );
-        a.metal.frustum(
-            v(0.0, 1.3, 0.1),
-            0.35,
-            0.6,
-            1.1,
-            Quat::from_rotation_x(-0.6),
-            orange,
-        );
-        a.metal.cyl(
-            v(0.0, 1.1, -0.3),
-            0.55,
-            0.3,
-            Quat::from_rotation_x(-0.6),
-            orange,
-        );
-        for s in [-1.0f32, 1.0] {
-            a.paint.cyl(
-                v(s * 0.65, 0.3, -0.5),
-                0.3,
-                0.15,
-                Quat::from_rotation_z(FRAC_PI_2),
-                c(0.06, 0.06, 0.06),
-            );
-        }
-        self.place(a, v(x, 0.0, z), yaw);
-        self.collide(v(x, 0.8, z), v(1.6, 1.6, 1.8));
-    }
-
-    fn porta_potty(&mut self, x: f32, z: f32, yaw: f32) {
-        let mut a = Art::default();
-        let blue = c(0.15, 0.35, 0.75);
-        boxr(&mut a.paint, v(-0.6, 0.0, -0.6), v(0.6, 2.3, 0.6), blue);
-        a.paint.cyl(
-            v(0.0, 2.35, 0.0),
-            0.62,
-            0.1,
-            Quat::IDENTITY,
-            c(0.9, 0.9, 0.9),
-        );
-        boxr(
-            &mut a.paint,
-            v(-0.45, 0.1, 0.6),
-            v(0.45, 2.1, 0.63),
-            shade(blue, 0.8),
-        );
-        self.place(a, v(x, 0.0, z), yaw);
-        self.collide(v(x, 1.15, z), v(1.2, 2.3, 1.2));
-    }
-
-    fn expand_neighborhood(&mut self) {
-        self.door(10.0, 0.0, 1, 1000, "Back Alley", Blocker::Planks);
-        self.door(-10.0, 0.0, 2, 750, "School Yard", Blocker::Planks);
-        self.door(0.0, 0.0, 3, 1000, "Gas Station", Blocker::Planks);
-        self.door(0.0, 0.0, 4, 1250, "Construction Site", Blocker::Planks);
-        self.perk_spots[4] = v(16.0, 0.0, -47.0);
-        let asphalt = c(0.17, 0.17, 0.19);
-
-        // North: back alley with garages, dumpsters and power lines.
-        self.wall_buy(v(-6.0, 0.0, 41.3), 0.0, 12);
-        self.ground_paint(v(0.0, 0.0, 48.0), Vec2::new(80.0, 6.0), 0.0, asphalt, 0.006);
-        let cols = [
-            c(0.75, 0.7, 0.6),
-            c(0.6, 0.65, 0.7),
-            c(0.7, 0.55, 0.45),
-            c(0.65, 0.7, 0.6),
-        ];
-        for (i, x) in [-30.0f32, -20.0, -4.0, 6.0, 22.0, 32.0]
-            .into_iter()
-            .enumerate()
-        {
-            self.garage(x, 54.0, PI, cols[i % 4]);
-        }
-        self.dumpster(-12.0, 51.8, 0.0, c(0.2, 0.4, 0.25));
-        self.dumpster(14.0, 51.8, 0.0, c(0.25, 0.3, 0.55));
-        self.trash_cans(-25.0, 43.5);
-        self.trash_cans(27.0, 43.5);
-        self.power_line(-38.0, 38.0, 44.2);
-        self.street_light(0.0, 51.5, 0.0);
-
-        // South: school yard with a court, bleachers and a bus.
-        let mut a = Art::default();
-        a.paint
-            .cuboid(v(0.0, 0.01, -49.0), v(30.0, 0.02, 15.0), c(0.55, 0.25, 0.2));
-        let white = c(0.95, 0.95, 0.95);
-        for s in [-1.0f32, 1.0] {
-            a.paint
-                .cuboid(v(s * 14.0, 0.025, -49.0), v(0.1, 0.02, 14.0), white);
-            a.paint
-                .cuboid(v(0.0, 0.025, -49.0 + s * 7.0), v(28.0, 0.02, 0.1), white);
-            a.paint
-                .torus(v(s * 11.0, 0.025, -49.0), 0.05, 3.0, Quat::IDENTITY, white);
-        }
-        a.paint
-            .torus(v(0.0, 0.025, -49.0), 0.05, 1.8, Quat::IDENTITY, white);
-        a.paint
-            .cuboid(v(0.0, 0.025, -49.0), v(0.1, 0.02, 14.0), white);
-        self.place(a, Vec3::ZERO, 0.0);
-        self.hoop(-14.5, -49.0, -FRAC_PI_2);
-        self.hoop(14.5, -49.0, FRAC_PI_2);
-        self.bleachers(0.0, -56.0, 0.0);
-        self.school_bus(-30.0, -49.0, 0.0);
-        let mut a = Art::default();
-        a.metal.cyl(
-            v(0.0, 5.0, 0.0),
-            0.06,
-            10.0,
-            Quat::IDENTITY,
-            c(0.75, 0.75, 0.78),
-        );
-        boxr(
-            &mut a.paint,
-            v(0.06, 8.6, -0.02),
-            v(1.9, 9.8, 0.02),
-            c(0.2, 0.3, 0.7),
-        );
-        self.place(a, v(28.0, 0.0, -44.0), 0.0);
-        self.collide(v(28.0, 2.0, -44.0), v(0.3, 4.0, 0.3));
-        self.street_light(-20.0, -42.5, PI);
-        self.street_light(22.0, -55.0, 0.0);
-
-        // East: the street carries on to a gas station and a corner store.
-        self.ground_paint(v(49.0, 0.0, 0.0), Vec2::new(18.0, 8.0), 0.0, asphalt, 0.006);
-        self.ground_paint(
-            v(50.0, 0.0, -14.0),
-            Vec2::new(16.0, 20.0),
-            0.0,
-            c(0.3, 0.3, 0.31),
-            0.005,
-        );
-        self.wall_buy(v(41.3, 0.0, 14.0), FRAC_PI_2, 9);
-        self.fuel_pumps(50.0, -11.0, 0.0, true);
-        self.store(50.0, -27.0, 0.0);
-        self.car(46.0, -5.6, 0.0, c(0.7, 0.1, 0.1));
-        self.car(52.0, 14.0, FRAC_PI_2, c(0.15, 0.15, 0.15));
-        self.trash_cans(44.0, -20.0);
-        self.street_light(48.0, 6.6, 0.0);
-        self.street_light(56.0, -6.6, PI);
-        for z in [20.0f32, 28.0, 34.0] {
-            self.bush(56.0, z, 1.1, z, None);
-        }
-
-        // West: a house going up, with diggings and site clutter.
-        self.ground_paint(
-            v(-49.0, 0.0, 0.0),
-            Vec2::new(18.0, 8.0),
-            0.0,
-            asphalt,
-            0.006,
-        );
-        self.ground_paint(
-            v(-50.0, 0.0, 22.0),
-            Vec2::new(16.0, 26.0),
-            0.0,
-            c(0.45, 0.35, 0.25),
-            0.005,
-        );
-        self.scaffold(-50.0, 24.0, PI);
-        self.dirt_pile(-46.0, -16.0, 1.0);
-        self.dirt_pile(-53.0, -26.0, 1.3);
-        self.pipes(-45.0, -32.0, FRAC_PI_2);
-        self.cement_mixer(-54.0, -12.0, 0.6);
-        self.porta_potty(-56.0, 9.0, FRAC_PI_2);
-        self.barriers(-44.0, -6.5, 0.0, 2, c(0.9, 0.5, 0.1));
-        self.barriers(-44.0, 6.5, 0.0, 2, c(0.9, 0.5, 0.1));
-        for (x, z) in [(-48.0f32, -4.0f32), (-50.0, 4.0), (-46.0, 10.0)] {
-            self.traffic_cone(x, z);
-        }
-        self.street_light(-48.0, -6.6, PI);
-        self.light_tower(-55.0, 35.0, PI * 0.75);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Ways through the inner fence
-// ---------------------------------------------------------------------------
-
-/// Shipping yard: a container with both ends cut open, laid across the
-/// fence line so you walk through it.
-fn container_tunnel() -> Art {
-    let mut a = Art::default();
-    let red = c(0.62, 0.2, 0.12);
-    let w = DOOR_WIDTH / 2.0 + 0.45;
-    let (h, len) = (3.9, 5.0);
-    for s in [-1.0f32, 1.0] {
-        // Corrugated side walls.
-        boxr(
-            &mut a.metal,
-            v(s * w - 0.1, 0.0, -len / 2.0),
-            v(s * w + 0.1, h, len / 2.0),
-            red,
-        );
-        let mut z = -len / 2.0 + 0.15;
-        while z < len / 2.0 {
-            for side in [-1.0f32, 1.0] {
-                a.metal.cuboid(
-                    v(s * w + side * 0.12, h / 2.0, z),
-                    v(0.06, h - 0.3, 0.14),
-                    shade(red, 0.82),
-                );
-            }
-            z += 0.3;
-        }
-        // Corner posts, and the doors swung open off their hinges.
-        for e in [-1.0f32, 1.0] {
-            boxr(
-                &mut a.metal,
-                v(s * w - 0.18, 0.0, e * len / 2.0 - 0.18),
-                v(s * w + 0.18, h, e * len / 2.0 + 0.18),
-                shade(red, 0.6),
-            );
-            let hinge = v(s * (w + 0.15), 0.0, e * (len / 2.0 + 0.2));
-            a.metal.cuboid_rot(
-                hinge + v(s * 0.55, h / 2.0 - 0.1, e * 0.5),
-                v(1.2, h - 0.5, 0.06),
-                Quat::from_rotation_y(s * e * 0.8),
-                shade(red, 0.9),
-            );
-            for k in 0..2 {
-                a.metal.cyl(
-                    hinge
-                        + v(
-                            s * (0.3 + k as f32 * 0.5),
-                            h / 2.0,
-                            e * (0.25 + k as f32 * 0.4),
-                        ),
-                    0.025,
-                    h - 0.6,
-                    Quat::IDENTITY,
-                    c(0.6, 0.6, 0.6),
-                );
-            }
-        }
-    }
-    // Roof, floor plates, a stencilled number and a work light.
-    boxr(
-        &mut a.metal,
-        v(-w - 0.2, h, -len / 2.0 - 0.2),
-        v(w + 0.2, h + 0.25, len / 2.0 + 0.2),
-        shade(red, 0.75),
-    );
-    boxr(
-        &mut a.paint,
-        v(-w, 0.0, -len / 2.0),
-        v(w, 0.04, len / 2.0),
-        c(0.35, 0.28, 0.2),
-    );
-    for e in [-1.0f32, 1.0] {
-        a.paint.cuboid(
-            v(0.0, h - 0.5, e * (len / 2.0 + 0.21)),
-            v(2.2, 0.35, 0.02),
-            c(0.92, 0.9, 0.85),
-        );
-    }
-    a.glow
-        .cuboid(v(0.0, h - 0.12, 0.0), v(0.6, 0.06, 0.2), c(1.0, 0.9, 0.7));
-    a
-}
-
-/// Central park: a stone arch with ivy and lanterns.
-fn stone_arch() -> Art {
-    let mut a = Art::default();
-    let stone = c(0.66, 0.63, 0.57);
-    let ivy = c(0.2, 0.42, 0.18);
-    let w = DOOR_WIDTH / 2.0 + 0.05;
-    for s in [-1.0f32, 1.0] {
-        boxr(
-            &mut a.paint,
-            v(s * w, 0.0, -0.45),
-            v(s * (w + 0.8), 3.4, 0.45),
-            stone,
-        );
-        boxr(
-            &mut a.paint,
-            v(s * (w - 0.05), 0.0, -0.5),
-            v(s * (w + 0.85), 0.5, 0.5),
-            shade(stone, 0.8),
-        );
-        boxr(
-            &mut a.paint,
-            v(s * (w - 0.08), 3.3, -0.52),
-            v(s * (w + 0.88), 3.55, 0.52),
-            shade(stone, 0.9),
-        );
-        for e in [-1.0f32, 1.0] {
-            a.metal.cuboid(
-                v(s * (w + 0.4), 2.6, e * 0.55),
-                v(0.22, 0.35, 0.22),
-                c(0.15, 0.15, 0.15),
-            );
-            a.glow.cuboid(
-                v(s * (w + 0.4), 2.6, e * 0.55),
-                v(0.16, 0.26, 0.24),
-                c(1.0, 0.85, 0.5),
-            );
-        }
-        for i in 0..6 {
-            let y = 0.6 + i as f32 * 0.5;
-            for e in [-1.0f32, 1.0] {
-                a.paint.blob(
-                    v(s * (w + 0.4 + 0.2 * (i as f32).sin()), y, e * 0.47),
-                    v(0.3, 0.28, 0.06),
-                    ivy,
-                );
-            }
-        }
-    }
-    // The arch: blocks laid round a half circle, keystone a shade lighter.
-    let n = 9;
-    let r = w + 0.4;
-    for i in 0..n {
-        let t = (i as f32 + 0.5) / n as f32 * PI;
-        let p = v(-t.cos() * r, 3.45 + t.sin() * r * 0.45, 0.0);
-        let col = if i == n / 2 {
-            shade(stone, 1.12)
-        } else {
-            stone
-        };
-        a.paint.cuboid_rot(
-            p,
-            v(0.85, 0.6, 0.9),
-            Quat::from_rotation_z(-(t - FRAC_PI_2) * 0.7),
-            col,
-        );
-    }
-    for i in 0..5 {
-        for e in [-1.0f32, 1.0] {
-            a.paint.blob(
-                v(
-                    -1.6 + i as f32 * 0.8,
-                    4.2 + 0.3 * (i as f32 * 1.3).sin(),
-                    e * 0.45,
-                ),
-                v(0.45, 0.3, 0.08),
-                ivy,
-            );
-        }
-    }
-    a
-}
-
-/// The neighbourhood: a wooden pergola with lattice sides, planters and a
-/// string of lights.
-fn pergola() -> Art {
-    let mut a = Art::default();
-    let wood = c(0.55, 0.4, 0.26);
-    let w = DOOR_WIDTH / 2.0 + 0.2;
-    for s in [-1.0f32, 1.0] {
-        for e in [-0.6f32, 0.6] {
-            boxr(
-                &mut a.paint,
-                v(s * w - 0.15, 0.0, e - 0.15),
-                v(s * w + 0.15, 3.6, e + 0.15),
-                wood,
-            );
-        }
-        for i in 0..6 {
-            a.paint.cuboid(
-                v(s * w, 0.4 + i as f32 * 0.5, 0.0),
-                v(0.05, 0.05, 1.2),
-                shade(wood, 1.15),
-            );
-        }
-        for i in 0..4 {
-            a.paint.cuboid(
-                v(s * w, 1.8, -0.45 + i as f32 * 0.3),
-                v(0.05, 3.2, 0.05),
-                shade(wood, 1.15),
-            );
-        }
-        a.paint.cuboid(
-            v(s * (w + 0.35), 0.25, 0.0),
-            v(0.5, 0.5, 1.4),
-            c(0.45, 0.3, 0.2),
-        );
-        for i in 0..3 {
-            let col = [c(0.85, 0.2, 0.3), c(0.95, 0.8, 0.2), c(0.6, 0.3, 0.8)][i];
-            a.paint.blob(
-                v(s * (w + 0.35), 0.6, -0.4 + i as f32 * 0.4),
-                v(0.2, 0.2, 0.2),
-                col,
-            );
-        }
-    }
-    for e in [-0.6f32, 0.6] {
-        boxr(
-            &mut a.paint,
-            v(-w - 0.5, 3.6, e - 0.12),
-            v(w + 0.5, 3.85, e + 0.12),
-            wood,
-        );
-    }
-    let mut x = -w - 0.3;
-    while x <= w + 0.3 {
-        boxr(
-            &mut a.paint,
-            v(x - 0.06, 3.85, -0.9),
-            v(x + 0.06, 4.0, 0.9),
-            shade(wood, 0.9),
-        );
-        x += 0.45;
-    }
-    for i in 0..9 {
-        let f = i as f32 / 8.0;
-        a.glow.sphere(
-            v(-w + f * w * 2.0, 3.5 - 0.3 * (f * PI).sin(), 0.0),
-            0.06,
-            c(1.0, 0.85, 0.55),
-        );
-    }
-    a
 }
 
 // ---------------------------------------------------------------------------

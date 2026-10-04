@@ -14,7 +14,7 @@ use rand::Rng;
 use std::f32::consts::PI;
 
 use crate::abilities::CastState;
-use crate::data::{ability_color, cast_style, gun_def, CastStyle, Character, GunClass};
+use crate::data::{gun_def, Ability, CastStyle, Character, GunClass};
 use crate::gunmodels::{grenade_kit, spawn_gun, GunAssets, GunMag, GunPump, Support};
 use crate::hands::{forearm_kit, hand_kit, HandPose};
 use crate::kit::{c, glow_material, vertex_material, Kit};
@@ -46,11 +46,11 @@ impl Plugin for ViewModelPlugin {
 
 /// Where the muzzle is relative to the camera (for tracers).
 #[derive(Resource)]
-pub struct ViewMuzzle(pub Vec3);
+pub struct ViewMuzzle(pub Vec3, pub Option<Vec3>);
 
 impl Default for ViewMuzzle {
     fn default() -> Self {
-        Self(Vec3::new(0.1, -0.08, -0.35))
+        Self(Vec3::new(0.1, -0.08, -0.35), None)
     }
 }
 
@@ -101,10 +101,12 @@ enum Prop {
     Saya,
     /// Valkyrie's spear (right hand).
     Spear,
+    /// A glowing edge along the katana while Iaido charges.
+    Edge,
 }
 
 #[derive(Component)]
-struct Flash;
+struct Flash(u8);
 
 #[derive(Component)]
 struct FlashLight;
@@ -114,6 +116,8 @@ struct RigAssets {
     skin_mat: Handle<StandardMaterial>,
     glow_mat: Handle<StandardMaterial>,
     orb_mat: Handle<StandardMaterial>,
+    edge: Handle<Mesh>,
+    edge_mat: Handle<StandardMaterial>,
     flash: Handle<Mesh>,
     grenade: Handle<Mesh>,
     orb: Handle<Mesh>,
@@ -331,6 +335,13 @@ fn spawn_rig(
             alpha_mode: AlphaMode::Blend,
             ..default()
         }),
+        edge: meshes.add(Cuboid::new(0.014, 0.04, 0.7)),
+        edge_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.85, 0.4, 0.8),
+            unlit: true,
+            alpha_mode: AlphaMode::Add,
+            ..default()
+        }),
         flash: meshes.add(flash_kit().build_or_empty()),
         grenade: meshes.add(grenade.build_or_empty()),
         orb: meshes.add(Sphere::new(0.03).mesh().ico(2).unwrap()),
@@ -450,6 +461,14 @@ fn spawn_rig(
                             );
                             prop(
                                 h,
+                                Prop::Edge,
+                                &assets.edge,
+                                &assets.edge_mat,
+                                Transform::from_xyz(0.0, 0.06 + 0.43, 0.012)
+                                    .with_rotation(Quat::from_rotation_x(PI / 2.0 + 0.07)),
+                            );
+                            prop(
+                                h,
                                 Prop::Spear,
                                 &assets.spear,
                                 &assets.spear_mat,
@@ -514,9 +533,9 @@ fn rebuild(
         }
         commands.entity(e).with_children(|p| {
             spawn_gun(p, &guns, gun, attach, skin.clone(), true);
-            if pivot.0 == 0 {
+            if pivot.0 == 0 || def.rig.dual {
                 p.spawn((
-                    Flash,
+                    Flash(pivot.0),
                     Mesh3d(rig.flash.clone()),
                     MeshMaterial3d(rig.glow_mat.clone()),
                     Transform::from_translation(def.rig.muzzle),
@@ -612,7 +631,7 @@ fn animate(
         Query<(Entity, &Hand, &mut Transform)>,
         Query<(&Forearm, &mut Transform)>,
         Query<(&HandMesh, &ChildOf, &mut Visibility)>,
-        Query<(&mut Transform, &mut Visibility), With<Flash>>,
+        Query<(&Flash, &mut Transform, &mut Visibility)>,
         Query<(&mut Transform, Has<GunPump>), Or<(With<GunMag>, With<GunPump>)>>,
         Query<(&Prop, &mut Visibility, &mut Transform)>,
         Query<&mut Visibility, With<ViewRoot>>,
@@ -643,7 +662,6 @@ fn animate(
     let ads = ease(aim.amount);
     let steady = 1.0 - 0.85 * ads;
     let def = gun_def(gun);
-    let character = me.character;
 
     // --- Timers and blends -------------------------------------------------
     anim.equip = (anim.equip + dt / 0.35).min(1.0);
@@ -679,17 +697,26 @@ fn animate(
     anim.bob += dt * (4.0 + speed * 1.2).min(16.0) * amp.min(1.0);
 
     // Is the left hand busy with an ability?
-    let style_of = |slot: u8| cast_style(character, slot);
+    let ab = |slot: u8| me.kit[slot as usize];
+    let style_of = |slot: u8| ab(slot).style();
     let blade = |slot: u8| matches!(style_of(slot), CastStyle::Sword | CastStyle::Spear);
     let anim_len = |slot: u8| if blade(slot) { 0.7 } else { 0.55 };
     let cast_anim = cast.cast.filter(|(slot, s)| *s < anim_len(*slot));
     // Sword and spear casts use the right hand, so the gun goes down.
     let two_hand = cast_anim.filter(|(slot, _)| cast.aiming.is_none() && blade(*slot));
-    let stow = two_hand.map_or(0.0, |(_, s)| {
-        ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68))
-    });
+    // Holding Iaido: the sword comes out and waits, ready to cut.
+    let charging = cast.aiming.filter(|s| ab(*s).charges());
+    let stow = if charging.is_some() {
+        ramp(cast.held, 0.0, 0.1)
+    } else {
+        two_hand.map_or(0.0, |(_, s)| {
+            ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68))
+        })
+    };
     let cast_slot = cast.aiming.or(cast_anim.map(|(s, _)| s));
-    let busy = two_hand.is_none() && cast_slot.is_some_and(|s| style_of(s) != CastStyle::Move);
+    let busy = two_hand.is_none()
+        && charging.is_none()
+        && cast_slot.is_some_and(|s| style_of(s) != CastStyle::Move);
     anim.busy = approach(anim.busy, if busy { 1.0 } else { 0.0 }, dt * 12.0);
 
     // --- Gun pose ----------------------------------------------------------
@@ -747,9 +774,15 @@ fn animate(
     let handling = attach.handling(gun);
     let kick = crate::data::recoil(gun).visual;
     let r = loadout.recoil * (0.5 + 0.5 * handling.recoil_up);
-    pos.z += r * 0.045 * kick * (1.0 - 0.4 * ads);
-    pos.y += r * 0.006 * kick;
-    rot *= Quat::from_rotation_x(r * 0.09 * kick * (1.0 - 0.6 * ads));
+    let recoil_at = |k: f32| {
+        (
+            Vec3::new(0.0, r * 0.006 * kick * k, r * 0.045 * kick * k * (1.0 - 0.4 * ads)),
+            Quat::from_rotation_x(r * 0.09 * kick * k * (1.0 - 0.6 * ads)),
+        )
+    };
+    // Dual guns fire together; the left one kicks a little out of step.
+    let (recoil_pos, recoil_rot) = recoil_at(1.0);
+    let (recoil2_pos, recoil2_rot) = recoil_at(0.85);
     // Raising a new gun.
     let e = ease(anim.equip);
     pos.y -= (1.0 - e) * 0.3;
@@ -784,8 +817,11 @@ fn animate(
         pos += Vec3::new(0.05, -0.3, 0.1) * stow;
         rot *= Quat::from_rotation_x(-0.8 * stow);
     }
-    let gun_tf = at(pos, rot);
-    let gun2_tf = at(Vec3::new(-pos.x, pos.y, pos.z), mirror(rot));
+    let gun_tf = at(pos + recoil_pos, rot * recoil_rot);
+    let gun2_tf = at(
+        Vec3::new(-pos.x, pos.y, pos.z) + recoil2_pos,
+        mirror(rot) * recoil2_rot,
+    );
 
     // --- Magazine and pump -------------------------------------------------
     let mut mag_offset = 0.0f32;
@@ -922,12 +958,16 @@ fn animate(
         let slot = cast_slot.unwrap_or(0);
         let style = style_of(slot);
         let ready = at(Vec3::new(-0.13, -0.13, -0.32), Quat::from_rotation_x(0.15));
-        let color = ability_color(character, slot);
+        let ability = ab(slot);
+        let color = ability.color();
         // What the hand holds for this ability, if anything.
-        let thing = match style {
-            CastStyle::Throw if character == Character::Blaze => Some(Prop::Firebomb),
-            CastStyle::Throw => Some(Prop::Grenade),
-            CastStyle::Deploy => Some(Prop::Gadget(slot.min(2))),
+        let thing = match ability {
+            Ability::Firebomb => Some(Prop::Firebomb),
+            Ability::KunaiFan => Some(Prop::Knife),
+            Ability::Sentry | Ability::CombatDrone => Some(Prop::Gadget(0)),
+            Ability::SupplyDrop => Some(Prop::Gadget(1)),
+            Ability::TeslaCoil => Some(Prop::Gadget(2)),
+            _ if style == CastStyle::Throw => Some(Prop::Grenade),
             _ => None,
         };
         let mut hand = ready;
@@ -977,10 +1017,15 @@ fn animate(
                 _ => {
                     // Push the palm out (heal, nova, overdrive, flames) or
                     // raise it to the sky (orbital strike, Ragnarok).
-                    let push = if style == CastStyle::Sky {
-                        at(Vec3::new(-0.09, 0.08, -0.4), Quat::from_rotation_x(0.5))
-                    } else {
-                        at(Vec3::new(-0.06, -0.08, -0.52), Quat::IDENTITY)
+                    let push = match style {
+                        CastStyle::Sky => {
+                            at(Vec3::new(-0.09, 0.08, -0.4), Quat::from_rotation_x(0.5))
+                        }
+                        // Slammed down at the floor.
+                        CastStyle::Ground => {
+                            at(Vec3::new(-0.04, -0.42, -0.5), Quat::from_rotation_x(-1.2))
+                        }
+                        _ => at(Vec3::new(-0.06, -0.08, -0.52), Quat::IDENTITY),
                     };
                     hand = if s < 0.12 {
                         blend(ready, push, ramp(s, 0.0, 0.12))
@@ -1018,36 +1063,84 @@ fn animate(
     // Iaido / Blade Storm: draw the katana from the left hip and cut across.
     // Arc Spear: raise the spear over the shoulder and hurl it.
     let mut saya = false;
+    let mut edge: Option<(Color, f32)> = None;
+    // The fist turned so the blade (up through the grip) points along `dir`.
+    let sword = |pos: Vec3, dir: Vec3| at(pos, Quat::from_rotation_arc(Vec3::Y, dir.normalize()));
+    let sheath = sword(Vec3::new(-0.18, -0.3, -0.22), Vec3::new(-0.5, -0.3, 0.8));
+    // Iaido held ready: blade out to the left, level, edge forward.
+    let ready_cut = sword(Vec3::new(0.02, -0.15, -0.42), Vec3::new(-0.75, 0.15, -0.65));
+    // The left hand holds the scabbard at the hip.
+    let hip = at(
+        Vec3::new(-0.2, -0.34, -0.22),
+        Quat::from_euler(EulerRot::YXZ, 1.75, 0.12, 0.0),
+    );
+    if let Some(slot) = charging {
+        let k = (cast.held / crate::abilities::FULL_CHARGE).min(1.0);
+        let draw = ramp(cast.held, 0.0, 0.07);
+        let mut ready = ready_cut;
+        // Fully charged: the blade trembles with held power.
+        if k >= 1.0 {
+            ready.translation +=
+                Vec3::new((t * 70.0).sin(), (t * 53.0).cos(), (t * 61.0).sin()) * 0.0025;
+        }
+        right_tf = if cast.held < 0.07 {
+            blend(right_tf, sheath, draw)
+        } else {
+            blend(sheath, ready, ease(ramp(cast.held, 0.07, 0.22)))
+        };
+        right_held = Some(Prop::Katana);
+        right_pose = HandPose::Grip { trigger: false };
+        left_tf = blend(left_tf, hip, ease(draw));
+        left_pose = HandPose::Hold;
+        saya = true;
+        edge = Some((ab(slot).color(), 0.25 + 0.75 * k));
+    }
     if let Some((slot, s)) = two_hand {
         let back = right_tf;
         let ease_back = |pose: Transform| blend(pose, back, ramp(s, 0.48, 0.68));
         if style_of(slot) == CastStyle::Sword {
-            // The fist turned so the blade (up through the grip) points
-            // along `dir`. The cut sweeps it across the screen: drawn from
-            // the hip, up on the left, over and down to the right.
-            let sword =
-                |pos: Vec3, dir: Vec3| at(pos, Quat::from_rotation_arc(Vec3::Y, dir.normalize()));
-            let sheath = sword(Vec3::new(-0.18, -0.3, -0.22), Vec3::new(-0.5, -0.3, 0.8));
-            let start = sword(Vec3::new(-0.3, -0.06, -0.36), Vec3::new(-0.8, 0.5, -0.3));
-            let mid = sword(Vec3::new(0.0, -0.06, -0.46), Vec3::new(0.05, 0.85, -0.5));
-            let finish = sword(Vec3::new(0.3, -0.2, -0.32), Vec3::new(0.9, -0.15, -0.4));
-            right_tf = if s < 0.08 {
-                blend(back, sheath, ramp(s, 0.0, 0.08))
-            } else if s < 0.13 {
-                blend(sheath, start, ramp(s, 0.08, 0.13))
-            } else if s < 0.17 {
-                blend(start, mid, ramp(s, 0.13, 0.17))
-            } else if s < 0.22 {
+            // The cut sweeps the blade across the screen: drawn from the
+            // hip, up on the left, over and down to the right.
+            let mut start = sword(Vec3::new(-0.3, -0.06, -0.36), Vec3::new(-0.8, 0.5, -0.3));
+            let mut mid = sword(Vec3::new(0.0, -0.06, -0.46), Vec3::new(0.05, 0.85, -0.5));
+            let mut finish = sword(Vec3::new(0.3, -0.2, -0.32), Vec3::new(0.9, -0.15, -0.4));
+            let ability = ab(slot);
+            if ability == Ability::RisingDragon {
+                // Low on the right, up through the middle, high overhead.
+                start = sword(Vec3::new(0.2, -0.4, -0.3), Vec3::new(0.3, -0.3, -0.9));
+                mid = sword(Vec3::new(0.05, -0.05, -0.5), Vec3::new(0.0, 0.6, -0.8));
+                finish = sword(Vec3::new(-0.05, 0.25, -0.35), Vec3::new(-0.1, 1.0, 0.3));
+            }
+            // A charged Iaido cuts straight from where it was held, flat
+            // and fast across the whole view.
+            let from_ready = ability.charges() && cast.held > 0.1;
+            if from_ready {
+                start = ready_cut;
+                mid = sword(Vec3::new(0.05, -0.12, -0.5), Vec3::new(0.0, 0.2, -1.0));
+                finish = sword(Vec3::new(0.38, -0.16, -0.3), Vec3::new(0.95, 0.05, -0.2));
+                if s < 0.3 {
+                    edge = Some((ability.color(), 1.0 - ramp(s, 0.1, 0.3)));
+                }
+            }
+            let (t0, t1, t2) = if from_ready {
+                (0.0, 0.035, 0.08)
+            } else {
+                (0.08, 0.13, 0.17)
+            };
+            right_tf = if s < t0 {
+                blend(back, sheath, ramp(s, 0.0, t0))
+            } else if s < t1 {
+                blend(if from_ready { start } else { sheath }, if from_ready { mid } else { start }, ramp(s, t0, t1))
+            } else if s < t2 {
+                blend(if from_ready { mid } else { start }, if from_ready { finish } else { mid }, ramp(s, t1, t2))
+            } else if !from_ready && s < 0.22 {
                 blend(mid, finish, ramp(s, 0.17, 0.22))
             } else {
                 ease_back(finish)
             };
-            right_held = (0.06..0.6).contains(&s).then_some(Prop::Katana);
-            // The left hand holds the scabbard at the hip.
-            let hip = at(
-                Vec3::new(-0.2, -0.34, -0.22),
-                Quat::from_euler(EulerRot::YXZ, 1.75, 0.12, 0.0),
-            );
+            right_held = (if from_ready { 0.0 } else { 0.06 }..0.6)
+                .contains(&s)
+                .then_some(Prop::Katana);
             left_tf = blend(
                 left_tf,
                 hip,
@@ -1084,7 +1177,7 @@ fn animate(
                 left_pose = HandPose::Open;
             }
             if s < 0.2 {
-                orb = Some((ability_color(character, slot), 1.0 + s * 6.0));
+                orb = Some((ab(slot).color(), 1.0 + s * 6.0));
             }
         }
         if s < 0.6 {
@@ -1179,8 +1272,8 @@ fn animate(
 
     // Muzzle flash (a suppressor hides it).
     let flash_on = anim.since_shot < 0.045 && loadout.shots > 0 && handling.flash > 0.0;
-    for (mut tf, mut vis) in &mut parts.p4() {
-        *vis = if flash_on {
+    for (flash, mut tf, mut vis) in &mut parts.p4() {
+        *vis = if flash_on && (flash.0 == 0 || rig.dual) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1197,6 +1290,7 @@ fn animate(
     }
     let muzzle_root = gun_tf.transform_point(rig.muzzle);
     muzzle.0 = muzzle_root * RIG_SCALE;
+    muzzle.1 = rig.dual.then(|| gun2_tf.transform_point(rig.muzzle) * RIG_SCALE);
     anim.light = (
         muzzle_root + Vec3::new(0.0, 0.05, 0.0),
         flash_on,
@@ -1231,6 +1325,15 @@ fn animate(
                 orb.is_some()
             }
             Prop::Saya => saya,
+            Prop::Edge => {
+                if let Some((color, k)) = edge {
+                    tf.scale = Vec3::new(1.0 + k, 1.0, 0.4 + 0.6 * k);
+                    if let Some(m) = materials.get_mut(&rig_assets.edge_mat) {
+                        m.base_color = color.with_alpha(0.9 * k);
+                    }
+                }
+                edge.is_some() && right_held == Some(Prop::Katana)
+            }
             p => held == Some(p) || right_held == Some(p),
         };
         let want = if shown {

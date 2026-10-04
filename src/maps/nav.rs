@@ -151,3 +151,174 @@ impl NavGrid {
         Some(to.normalize_or_zero())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::maps::{layout, MapLayout, BOX_HALF};
+
+    /// The map's colliders, with the doors not yet opened in `open` shut.
+    fn boxes(m: &MapLayout, open: u8) -> Boxes {
+        let mut b: Boxes = m.solids.iter().map(|s| (s.pos, s.size / 2.0)).collect();
+        for d in &m.doors {
+            if d.locked(open) {
+                let half = if d.along_x {
+                    Vec3::new(2.0, 1.6, 0.2)
+                } else {
+                    Vec3::new(0.2, 1.6, 2.0)
+                };
+                b.push((d.pos + Vec3::Y * 1.6, half));
+            }
+        }
+        for p in &m.perk_spots {
+            b.push((*p + Vec3::Y * 1.2, Vec3::new(0.6, 1.2, 0.6)));
+        }
+        for p in &m.box_spots {
+            b.push((*p + Vec3::Y * BOX_HALF.y, BOX_HALF));
+        }
+        b
+    }
+
+    fn field(m: &MapLayout, open: u8) -> NavGrid {
+        let mut g = NavGrid::new(m.half);
+        g.rebuild_obstacles(&boxes(m, open));
+        g.rebuild_field(&[m.player_spawns[0]]);
+        g
+    }
+
+    /// Can you walk from the first player spawn to near `p`?
+    fn reach(g: &NavGrid, p: Vec3, r: i32) -> bool {
+        let Some((x, z)) = g.cell(p) else {
+            return false;
+        };
+        (-r..=r).any(|dz| {
+            (-r..=r).any(|dx| g.free(x + dx, z + dz) && g.dist[g.idx(x + dx, z + dz)] != UNREACHED)
+        })
+    }
+
+    /// Prints each map's walkable cells (north at the top). Run with
+    /// `cargo test map_plans -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn map_plans() {
+        for map in 0..3u8 {
+            let m = layout(map);
+            let g = field(&m, 0);
+            let all = field(&m, 0xFE);
+            let mut rows: Vec<Vec<char>> = (0..g.n)
+                .map(|z| {
+                    (0..g.n)
+                        .map(|x| {
+                            let i = g.idx(x, z);
+                            if all.blocked[i] {
+                                '#'
+                            } else if g.dist[i] != UNREACHED {
+                                '.'
+                            } else if all.dist[i] != UNREACHED {
+                                ','
+                            } else {
+                                ' '
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut mark = |p: Vec3, ch: char| {
+                if let Some((x, z)) = g.cell(p) {
+                    rows[z as usize][x as usize] = ch;
+                }
+            };
+            for d in &m.doors {
+                mark(d.pos, 'D');
+            }
+            for (s, zone) in &m.enemy_spawns {
+                mark(*s, char::from_digit(*zone as u32, 10).unwrap_or('?'));
+            }
+            for p in &m.perk_spots {
+                mark(*p, 'P');
+            }
+            for p in &m.box_spots {
+                mark(*p, 'B');
+            }
+            for w in &m.wall_buys {
+                mark(w.stand(), 'W');
+            }
+            mark(m.player_spawns[0], 'S');
+            mark(m.extraction, 'E');
+            println!("map {map}:");
+            for row in rows.iter().rev() {
+                println!("{}", row.iter().collect::<String>());
+            }
+        }
+    }
+
+    #[test]
+    fn maps_connect() {
+        let mut errors = Vec::new();
+        let mut check = |ok: bool, what: String| {
+            if !ok {
+                errors.push(what);
+            }
+        };
+        for map in 0..3u8 {
+            let m = layout(map);
+            println!(
+                "map {map}: {} solids, {} lights, {} doors, {} wall buys, {} spawns",
+                m.solids.len(),
+                m.lights.len(),
+                m.doors.len(),
+                m.wall_buys.len(),
+                m.enemy_spawns.len(),
+            );
+            assert!(m.wall_buys.len() >= 2);
+            let all = 0xFEu8;
+            let g = field(&m, all);
+            for (i, s) in m.player_spawns.iter().enumerate() {
+                check(reach(&g, *s, 0), format!("map {map} player spawn {i} blocked"));
+            }
+            for (s, zone) in &m.enemy_spawns {
+                check(reach(&g, *s, 0), format!("map {map} zone {zone} spawn {s} unreachable"));
+            }
+            for (i, p) in m.perk_spots.iter().enumerate() {
+                check(reach(&g, *p, 2), format!("map {map} perk {i} {p} unreachable"));
+            }
+            for (i, p) in m.box_spots.iter().enumerate() {
+                check(reach(&g, *p, 2), format!("map {map} box {i} {p} unreachable"));
+            }
+            for (i, w) in m.wall_buys.iter().enumerate() {
+                check(reach(&g, w.stand(), 1), format!("map {map} wall buy {i} {} unreachable", w.pos));
+            }
+            check(reach(&g, m.extraction, 1), format!("map {map} extraction unreachable"));
+            for d in &m.doors {
+                let side = if d.along_x { Vec3::Z } else { Vec3::X };
+                for s in [-2.0f32, 2.0] {
+                    check(reach(&g, d.pos + side * s, 0), format!("map {map} door {} {} side {s} blocked", d.name, d.pos));
+                }
+            }
+
+            // Buy doors one at a time, as players would: each opened area
+            // becomes reachable, and areas still shut stay sealed.
+            let mut open = 0u8;
+            loop {
+                let g = field(&m, open);
+                for (s, zone) in &m.enemy_spawns {
+                    let want = MapLayout::zone_open(open, *zone);
+                    check(
+                        reach(&g, *s, 0) == want,
+                        format!("map {map} zone {zone} spawn {s}, open {open:08b}"),
+                    );
+                }
+                let next = m.doors.iter().find(|d| {
+                    let side = if d.along_x { Vec3::Z } else { Vec3::X };
+                    d.locked(open)
+                        && (reach(&g, d.pos + side * 2.0, 0) || reach(&g, d.pos - side * 2.0, 0))
+                });
+                let Some(d) = next else { break };
+                open |= d.opens();
+            }
+            let zones: u8 = m.enemy_spawns.iter().map(|(_, z)| 1u8 << z).fold(0, |a, b| a | b);
+            check(open | 1 == zones | 1, format!("map {map}: some doors can't be reached"));
+        }
+        assert!(errors.is_empty(), "{}", errors.join("\n"));
+    }
+}
