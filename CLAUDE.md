@@ -9,7 +9,7 @@ Rust FPS: a co-op zombie wave-survival shooter in Rust with Bevy 0.16. Solo, or 
 ## Build and run
 
 - `cargo run` for a debug build (optimised enough to play). `cargo build --release` for a real build.
-- Windows exe for Jonah (no MSVC on his PC): `cargo build --release --target x86_64-pc-windows-gnu`, then `x86_64-w64-mingw32-strip`.
+- Windows exe for Jonah (no MSVC on their PC): `cargo build --release --target x86_64-pc-windows-gnu`, then `x86_64-w64-mingw32-strip`.
 - Command line: `rust-fps solo --start --map 0|1|2` skips the menus. Also `host [port]` and `join <address>`.
 - Save data goes in `%APPDATA%\RustFPS` or `~/.config/rust-fps`. Set `RUST_FPS_DATA=<dir>` to use a throwaway folder when testing.
 
