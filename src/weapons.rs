@@ -13,7 +13,8 @@ use crate::game::Paused;
 use crate::physics::{collect_boxes, trace_shot};
 use crate::player::{can_act, LocalPlayer};
 use crate::{
-    AppState, Collider, Enemy, MatchState, Phase, Replicated, Roster, Session, Shot, ShotQueue,
+    AppState, Collider, Enemy, MatchState, Phase, PlayerAction, Replicated, Roster, Session, Shot,
+    ShotQueue,
 };
 
 pub const GUN_RANGE: f32 = 120.0;
@@ -26,7 +27,7 @@ impl Plugin for WeaponPlugin {
             .init_resource::<Aim>()
             .add_systems(
                 Update,
-                (sync_loadout, switch_weapon, reload, aim, fire)
+                (sync_loadout, switch_weapon, reload, melee, aim, fire)
                     .chain()
                     .after(crate::player::movement)
                     .in_set(Phase::Local),
@@ -85,26 +86,6 @@ impl Aim {
     }
 }
 
-/// Zoom (field of view multiplier) and whether it's a scope, for a gun.
-pub fn sight_zoom(gun: u8, attach: Attach) -> (f32, bool) {
-    let d = gun_def(gun);
-    if d.class == GunClass::Sniper {
-        return (if gun == 15 { 0.28 } else { 0.42 }, true);
-    }
-    match attach.optic() {
-        3 => (0.38, true),
-        1 | 2 => (0.72, false),
-        _ => (
-            match d.class {
-                GunClass::Pistol | GunClass::Shotgun => 0.85,
-                GunClass::Smg | GunClass::Wonder => 0.8,
-                _ => 0.76,
-            },
-            false,
-        ),
-    }
-}
-
 #[derive(Resource, Default)]
 pub struct Loadout {
     pub slots: [Option<GunState>; 2],
@@ -126,7 +107,24 @@ pub struct Loadout {
     /// Seconds left to show the hit marker, and whether it was a headshot.
     pub hitmarker: f32,
     pub headshot: bool,
+    /// Muzzle climb from recoil still to be recovered, and how long the
+    /// trigger has been held (auto guns drift sideways the longer you hold).
+    climb: f32,
+    spray: u32,
+    /// Melee: seconds into the swing (None when not swinging), the cooldown,
+    /// and whether this swing has landed yet.
+    pub melee: Option<f32>,
+    melee_cd: f32,
+    melee_struck: bool,
+    /// Seconds left to show the kill marker.
+    pub kill_marker: f32,
+    last_kills: u32,
 }
+
+/// How long a melee swing takes, and when in it the blade connects.
+pub const MELEE_TIME: f32 = 0.5;
+const MELEE_STRIKE: f32 = 0.13;
+pub const MELEE_RANGE: f32 = 2.3;
 
 impl Loadout {
     pub fn current(&self) -> Option<&GunState> {
@@ -163,19 +161,24 @@ fn aim(
         && mouse.pressed(MouseButton::Right)
         && cast.aiming.is_none()
         && !player.emoting()
-        && player.dash_time <= 0.0;
-    // Heavier guns take longer to raise.
+        && player.dash_time <= 0.0
+        && loadout.melee.is_none();
+    // Heavier guns take longer to raise; attachments change it too.
+    let handling = gun.attach.handling(gun.id);
     let time_to_aim = match def.class {
         GunClass::Pistol => 0.13,
         GunClass::Smg => 0.16,
         GunClass::Lmg | GunClass::Sniper => 0.3,
         _ => 0.21,
-    };
+    } * handling.ads_time;
     let step = time.delta_secs() / time_to_aim;
-    aim.amount = if want { (aim.amount + step).min(1.0) } else { (aim.amount - step * 1.3).max(0.0) };
-    let (zoom, scoped) = sight_zoom(gun.id, gun.attach);
-    aim.zoom = zoom;
-    aim.scoped = scoped && aim.amount > 0.9;
+    aim.amount = if want {
+        (aim.amount + step).min(1.0)
+    } else {
+        (aim.amount - step * 1.3).max(0.0)
+    };
+    aim.zoom = handling.zoom;
+    aim.scoped = handling.scoped && aim.amount > 0.9;
 }
 
 /// Keeps our guns in step with what the host says we hold (mystery box,
@@ -281,7 +284,11 @@ fn reload(
     mut loadout: ResMut<Loadout>,
 ) {
     let perks = roster.me(&session).map(|m| m.perks).unwrap_or(0);
-    let speed = if has_perk(perks, Perk::QuickHands) { 2.0 } else { 1.0 };
+    let speed = if has_perk(perks, Perk::QuickHands) {
+        2.0
+    } else {
+        1.0
+    };
     let active = loadout.active;
     let Some(gun) = loadout.slots[active] else {
         return;
@@ -292,7 +299,7 @@ fn reload(
         && gun.mag < gun.mag_size()
         && gun.reserve > 0
     {
-        loadout.reload = def.reload / speed;
+        loadout.reload = def.reload * gun.attach.handling(gun.id).reload / speed;
         loadout.reload_total = loadout.reload;
     }
     if loadout.reload > 0.0 {
@@ -306,6 +313,97 @@ fn reload(
             }
         }
     }
+}
+
+/// Melee: a quick knife slash. The host decides what it hits; we show the
+/// hit marker straight away if someone is in reach.
+#[allow(clippy::too_many_arguments)]
+fn melee(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    state: Res<MatchState>,
+    paused: Res<Paused>,
+    mut counter: ResMut<crate::abilities::ActionCounter>,
+    mut actions: ResMut<crate::ActionQueue>,
+    mut loadout: ResMut<Loadout>,
+    player: Single<(&Transform, &LocalPlayer)>,
+    enemies: Query<(&Transform, &Replicated, Option<&crate::EnemyStatus>), With<Enemy>>,
+) {
+    let dt = time.delta_secs();
+    loadout.melee_cd -= dt;
+    loadout.kill_marker -= dt;
+    let kills = roster.me(&session).map_or(0, |m| m.kills);
+    if kills > loadout.last_kills {
+        loadout.kill_marker = 0.35;
+    }
+    loadout.last_kills = kills;
+    let (cam, p) = player.into_inner();
+    if let Some(t) = loadout.melee.as_mut() {
+        *t += dt;
+        let t = *t;
+        if t >= MELEE_STRIKE && !loadout.melee_struck {
+            loadout.melee_struck = true;
+            let origin = cam.translation;
+            let dir = cam.forward().as_vec3();
+            crate::abilities::queue_action(
+                &session,
+                &mut counter,
+                &mut actions,
+                PlayerAction::Melee {
+                    origin: origin.to_array(),
+                    dir: dir.to_array(),
+                },
+            );
+            let reach = enemies.iter().any(|(tf, r, s)| {
+                melee_reach(
+                    origin,
+                    dir,
+                    tf.translation,
+                    crate::sim::enemy_scale(r.kind),
+                    s.is_some_and(|s| s.crawler),
+                )
+                .is_some()
+            });
+            if reach {
+                loadout.hitmarker = 0.15;
+                loadout.headshot = false;
+            }
+        }
+        if t >= MELEE_TIME {
+            loadout.melee = None;
+        }
+        return;
+    }
+    if keys.tapped(&settings, Action::Melee)
+        && loadout.melee_cd <= 0.0
+        && can_act(&session, &roster, &state, &paused, &window)
+        && !p.emoting()
+    {
+        loadout.melee = Some(0.0);
+        loadout.melee_struck = false;
+        loadout.melee_cd = MELEE_TIME + 0.1;
+        loadout.reload = 0.0;
+        loadout.burst_left = 0;
+        loadout.fire_cd = loadout.fire_cd.max(MELEE_TIME - 0.05);
+    }
+}
+
+/// Distance to an enemy if a swing from `origin` along `dir` reaches it.
+pub fn melee_reach(origin: Vec3, dir: Vec3, feet: Vec3, scale: f32, crawl: bool) -> Option<f32> {
+    let chest = feet + Vec3::Y * if crawl { 0.35 } else { 1.0 * scale };
+    let to = chest - origin;
+    let flat = to.with_y(0.0);
+    let dist = flat.length();
+    let reach = MELEE_RANGE + 0.25 * (scale - 1.0);
+    // In front of you (a wide arc), within reach and not far above or below.
+    let facing = flat
+        .normalize_or_zero()
+        .dot(dir.with_y(0.0).normalize_or_zero());
+    (dist < reach && (facing > 0.45 || dist < 0.7) && to.y.abs() < 1.8).then_some(dist)
 }
 
 pub fn fire(
@@ -322,8 +420,8 @@ pub fn fire(
     mut loadout: ResMut<Loadout>,
     mut shots: ResMut<ShotQueue>,
     mut fx: ResMut<FxQueue>,
-    player: Single<(&Transform, &mut LocalPlayer)>,
-    enemies: Query<(Entity, &Transform, &Replicated), With<Enemy>>,
+    mut player: Single<(&Transform, &mut LocalPlayer)>,
+    enemies: Query<(Entity, &Transform, &Replicated, Option<&crate::EnemyStatus>), With<Enemy>>,
     colliders: Query<(&Transform, &Collider)>,
 ) {
     let dt = time.delta_secs();
@@ -331,6 +429,18 @@ pub fn fire(
     loadout.hitmarker -= dt;
     loadout.recoil = (loadout.recoil - dt * 8.0).max(0.0);
     loadout.flash -= dt;
+    // Once the trigger is let go the muzzle settles most of the way back.
+    let (cam_tf, p) = &mut *player;
+    let cam_tf = **cam_tf;
+    let holding = mouse.pressed(MouseButton::Left) && loadout.fire_cd > -0.08;
+    if !holding {
+        loadout.spray = 0;
+        if loadout.climb > 0.0 {
+            let back = (loadout.climb * (1.0 - (-9.0 * dt).exp())).min(loadout.climb);
+            loadout.climb -= back;
+            p.pitch -= back * 0.75;
+        }
+    }
 
     if !can_act(&session, &roster, &state, &paused, &window) {
         loadout.burst_left = 0;
@@ -351,14 +461,23 @@ pub fn fire(
         FireMode::Semi => mouse.just_pressed(MouseButton::Left),
         FireMode::Burst => mouse.just_pressed(MouseButton::Left) || loadout.burst_left > 0,
     };
-    if !wants || loadout.fire_cd > 0.0 || loadout.reload > 0.0 || cast.blocks_fire {
+    if !wants
+        || loadout.fire_cd > 0.0
+        || loadout.reload > 0.0
+        || cast.blocks_fire
+        || loadout.melee.is_some()
+    {
         return;
     }
     if gun.mag == 0 && !overdrive {
         loadout.burst_left = 0;
         if gun.reserve > 0 {
-            let speed = if has_perk(me.perks, Perk::QuickHands) { 2.0 } else { 1.0 };
-            loadout.reload = def.reload / speed;
+            let speed = if has_perk(me.perks, Perk::QuickHands) {
+                2.0
+            } else {
+                1.0
+            };
+            loadout.reload = def.reload * gun.attach.handling(gun.id).reload / speed;
             loadout.reload_total = loadout.reload;
         }
         return;
@@ -376,11 +495,15 @@ pub fn fire(
             loadout.burst_left = 3;
         }
         loadout.burst_left -= 1;
-        loadout.fire_cd = if loadout.burst_left == 0 { 0.3 } else { interval * 0.6 };
+        loadout.fire_cd = if loadout.burst_left == 0 {
+            0.3
+        } else {
+            interval * 0.6
+        };
     } else {
         loadout.fire_cd = interval;
     }
-    if !overdrive {
+    if !overdrive && !state.sandbox.god {
         if let Some(g) = loadout.slots[active].as_mut() {
             g.mag -= 1;
         }
@@ -389,7 +512,7 @@ pub fn fire(
     loadout.flash = 0.05;
     loadout.shots += 1;
 
-    let (cam, mut p) = player.into_inner();
+    let cam = cam_tf;
     let origin = cam.translation;
     let forward = cam.forward().as_vec3();
     let right = cam.right().as_vec3();
@@ -406,29 +529,38 @@ pub fn fire(
         }
     }
     // Aimed shots are much tighter; the laser tightens hip fire.
-    let hip = gun.attach.hip_spread();
+    let handling = gun.attach.handling(gun.id);
+    let hip = handling.hip_spread;
     let aimed = match def.class {
         GunClass::Sniper => 0.02,
         GunClass::Shotgun => 0.7,
         _ => 0.3,
-    };
+    } * handling.ads_spread;
     spread *= hip + (aimed - hip) * aim.amount;
     if def.class == GunClass::Sniper {
         // Snipers are wild from the hip.
         spread += 0.05 * (1.0 - aim.amount);
     }
-    let kick = match def.class {
-        GunClass::Sniper => 0.05,
-        GunClass::Shotgun => 0.045,
-        GunClass::Lmg => 0.012,
-        GunClass::Pistol => 0.018,
-        _ => 0.01,
-    };
-    p.kick += kick * gun.attach.recoil_scale() * (1.0 - 0.35 * aim.amount);
+    // Recoil: the muzzle climbs (and auto guns walk sideways the longer you
+    // hold), plus a jolt that snaps straight back. Aiming and crouching
+    // steady it; attachments change it.
+    let rc = crate::data::recoil(gun.id);
+    let steady = (1.0 - 0.3 * aim.amount) * if p.crouching { 0.8 } else { 1.0 };
+    let mut rng = rand::thread_rng();
+    let first = if loadout.spray == 0 { 1.25 } else { 1.0 };
+    let climb = rc.up * handling.recoil_up * steady * first;
+    let side = (rng.gen_range(-1.0..1.0) * rc.side
+        + rc.drift * (loadout.spray.min(12) as f32 / 4.0))
+        * handling.recoil_side
+        * steady;
+    p.pitch += climb;
+    p.yaw -= side;
+    loadout.climb += climb;
+    loadout.spray += 1;
+    p.kick += rc.kick * handling.recoil_up * steady;
 
     let boxes = collect_boxes(colliders.iter());
     let muzzle = origin + cam.rotation * view_muzzle.0;
-    let mut rng = rand::thread_rng();
     let mut any_hit = false;
     let mut head = false;
     for _ in 0..def.pellets {
@@ -440,9 +572,14 @@ pub fn fire(
             dir,
             GUN_RANGE,
             &boxes,
-            enemies
-                .iter()
-                .map(|(e, t, r)| (e, t.translation, crate::sim::enemy_scale(r.kind))),
+            enemies.iter().map(|(e, t, r, s)| {
+                (
+                    e,
+                    t.translation,
+                    crate::sim::enemy_scale(r.kind),
+                    s.is_some_and(|s| s.crawler),
+                )
+            }),
         );
         if let Some((_, h)) = hit.enemy {
             any_hit = true;

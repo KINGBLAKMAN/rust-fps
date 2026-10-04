@@ -15,8 +15,8 @@ use crate::kit::{c, Kit};
 use crate::physics::{collect_boxes, trace_shot};
 use crate::player::{can_act, LocalPlayer};
 use crate::{
-    ActionQueue, AppState, Collider, Enemy, InGameEntity, MatchState, Phase, PlayerAction, Replicated, Roster,
-    Session,
+    ActionQueue, AppState, Collider, Enemy, InGameEntity, MatchState, Phase, PlayerAction,
+    Replicated, Roster, Session,
 };
 
 pub struct PingPlugin;
@@ -27,7 +27,10 @@ impl Plugin for PingPlugin {
             .add_systems(Update, send_ping.in_set(Phase::Local))
             .add_systems(
                 Update,
-                (spawn_pings.before(crate::fx::play), place_pings.after(crate::fx::play))
+                (
+                    spawn_pings.before(crate::fx::play),
+                    place_pings.after(crate::fx::play),
+                )
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
             );
@@ -57,11 +60,27 @@ struct Ping {
 #[derive(Component)]
 struct PingLabel;
 
-fn setup(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<StandardMaterial>>) {
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
     // An upside-down diamond with a ring under it.
     let mut k = Kit::new();
-    k.cone(Vec3::new(0.0, 0.0, 0.0), 0.28, 0.5, Quat::from_rotation_x(std::f32::consts::PI), c(1.0, 1.0, 1.0));
-    k.cone(Vec3::new(0.0, 0.42, 0.0), 0.28, 0.34, Quat::IDENTITY, c(1.0, 1.0, 1.0));
+    k.cone(
+        Vec3::new(0.0, 0.0, 0.0),
+        0.28,
+        0.5,
+        Quat::from_rotation_x(std::f32::consts::PI),
+        c(1.0, 1.0, 1.0),
+    );
+    k.cone(
+        Vec3::new(0.0, 0.42, 0.0),
+        0.28,
+        0.34,
+        Quat::IDENTITY,
+        c(1.0, 1.0, 1.0),
+    );
     let glow = |materials: &mut Assets<StandardMaterial>, color: Color| {
         materials.add(StandardMaterial {
             base_color: color.with_alpha(0.85),
@@ -107,10 +126,18 @@ fn send_ping(
     *cooldown = 0.4;
     let (cam, p) = player.into_inner();
     // Aim from the eye even while the camera is out for an emote.
-    let origin = if p.third_person() { p.eye_pos() } else { cam.translation };
+    let origin = if p.third_person() {
+        p.eye_pos()
+    } else {
+        cam.translation
+    };
     let dir = if p.third_person() {
         let (yaw, pitch) = (p.yaw, p.pitch);
-        Vec3::new(-yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos())
+        Vec3::new(
+            -yaw.sin() * pitch.cos(),
+            pitch.sin(),
+            -yaw.cos() * pitch.cos(),
+        )
     } else {
         cam.forward().as_vec3()
     };
@@ -120,9 +147,14 @@ fn send_ping(
         dir,
         PING_RANGE,
         &boxes,
-        enemies.iter().map(|(e, t, r)| (e, t.translation, crate::sim::enemy_scale(r.kind))),
+        enemies
+            .iter()
+            .map(|(e, t, r)| (e, t.translation, crate::sim::enemy_scale(r.kind), false)),
     );
-    let target = hit.enemy.and_then(|(e, _)| enemies.get(e).ok()).map(|(_, _, r)| r.id);
+    let target = hit
+        .enemy
+        .and_then(|(e, _)| enemies.get(e).ok())
+        .map(|(_, _, r)| r.id);
     let pos = origin + dir * (hit.dist - 0.05).max(0.5);
     queue_action(
         &session,
@@ -144,7 +176,14 @@ fn spawn_pings(
     existing: Query<(Entity, &Ping)>,
 ) {
     for fx in &queue.0 {
-        let Fx::Ping { player, pos, target } = *fx else { continue };
+        let Fx::Ping {
+            player,
+            pos,
+            target,
+        } = *fx
+        else {
+            continue;
+        };
         for (e, ping) in &existing {
             if ping.player == player {
                 commands.entity(ping.label).despawn();
@@ -152,8 +191,15 @@ fn spawn_pings(
             }
         }
         let enemy = target != u32::MAX;
-        let name = roster.0.get(&player).map_or("?".to_string(), |p| p.name.clone());
-        let color = if enemy { Color::srgb(1.0, 0.35, 0.3) } else { Color::srgb(1.0, 0.85, 0.3) };
+        let name = roster
+            .0
+            .get(&player)
+            .map_or("?".to_string(), |p| p.name.clone());
+        let color = if enemy {
+            Color::srgb(1.0, 0.35, 0.3)
+        } else {
+            Color::srgb(1.0, 0.85, 0.3)
+        };
         let label = commands
             .spawn((
                 InGameEntity,
@@ -172,7 +218,11 @@ fn spawn_pings(
                 Visibility::Hidden,
             ))
             .id();
-        let mat = if enemy { assets.enemy.clone() } else { assets.place.clone() };
+        let mat = if enemy {
+            assets.enemy.clone()
+        } else {
+            assets.place.clone()
+        };
         commands
             .spawn((
                 InGameEntity,
@@ -251,7 +301,9 @@ fn place_pings(
                 }
             }
         }
-        let Ok((mut node, mut vis, mut text, computed)) = labels.get_mut(ping.label) else { continue };
+        let Ok((mut node, mut vis, mut text, computed)) = labels.get_mut(ping.label) else {
+            continue;
+        };
         let head = ping.pos + Vec3::Y * 1.3 * size;
         let in_front = cam_tf.forward().dot(head - cam_tf.translation()) > 0.0;
         match cam.world_to_viewport(cam_tf, head) {

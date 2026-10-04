@@ -6,8 +6,8 @@
 //! - Quick: hold the key to aim (with a preview), release to cast.
 //! - Confirm: press to aim, left-click to cast, right-click or press the key
 //!   again to cancel.
-//! Grenades are held in your hand while aiming and cook: the longer you hold,
-//! the sooner they go off after landing. Hold too long and you throw it.
+//! Grenades sit in your hand, pin pulled, while you aim; the fuse only starts
+//! when it leaves your hand, so you can hold one as long as you like.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -20,12 +20,21 @@ use crate::physics::{collect_boxes, line_of_sight, ray_world};
 use crate::player::{can_act, LocalPlayer};
 use crate::{ActionQueue, AppState, Collider, MatchState, Phase, PlayerAction, Roster, Session};
 
-/// Grenade fuse in seconds and how long it can be cooked in the hand.
+/// Grenade fuse in seconds, from the throw.
 pub const GRENADE_FUSE: f32 = 1.8;
-pub const MAX_COOK: f32 = 1.5;
 pub const GRENADE_SPEED: f32 = 16.0;
 pub const GRENADE_LIFT: f32 = 3.0;
 pub const GRENADE_GRAVITY: f32 = 18.0;
+/// Valkyrie: how far the Arc Spear flies and how wide it hits, where Storm
+/// Leap lands and how big the crash is, and the reach of Ragnarok.
+pub const SPEAR_RANGE: f32 = 32.0;
+pub const SPEAR_WIDTH: f32 = 1.4;
+pub const LEAP_RADIUS: f32 = 4.5;
+pub const RAGNAROK_RADIUS: f32 = 12.0;
+
+pub fn leap_length(tier: f32) -> f32 {
+    22.0 * (0.3 + 0.03 * tier)
+}
 
 pub struct AbilityPlugin;
 
@@ -62,7 +71,7 @@ pub struct ActionCounter(pub u32);
 pub struct CastState {
     /// Ability slot being aimed or held.
     pub aiming: Option<u8>,
-    /// Seconds it has been held (grenades cook).
+    /// Seconds it has been held.
     pub held: f32,
     /// The last cast: (slot, seconds since).
     pub cast: Option<(u8, f32)>,
@@ -82,11 +91,11 @@ pub fn queue_action(
     queue.0.push((session.my_id, counter.0, action));
 }
 
-fn is_grenade(character: Character, slot: u8) -> bool {
-    crate::data::is_thrown(character, slot)
-}
-
-const SLOTS: [(u8, Action); 3] = [(0, Action::Ability1), (1, Action::Ability2), (2, Action::Ultimate)];
+const SLOTS: [(u8, Action); 3] = [
+    (0, Action::Ability1),
+    (1, Action::Ability2),
+    (2, Action::Ultimate),
+];
 
 fn dash_direction(keys: &ButtonInput<KeyCode>, settings: &Settings, yaw: f32) -> Vec3 {
     let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
@@ -140,8 +149,8 @@ fn use_abilities(
         return;
     };
     if !can_act(&session, &roster, &state, &paused, &window) {
-        // Menus and going down cancel aiming (a cooked grenade is dropped
-        // safely back in your pocket).
+        // Menus and going down cancel aiming (a held grenade goes
+        // back in your pocket).
         cast.aiming = None;
         cast.blocks_fire = false;
         return;
@@ -167,7 +176,9 @@ fn use_abilities(
         let key = SLOTS[slot as usize].1;
         let mode = settings.cast_modes[slot as usize];
         let cancel = match mode {
-            CastMode::Confirm => mouse.just_pressed(MouseButton::Right) || keys.tapped(&settings, key),
+            CastMode::Confirm => {
+                mouse.just_pressed(MouseButton::Right) || keys.tapped(&settings, key)
+            }
             _ => false,
         };
         let release = match mode {
@@ -177,7 +188,7 @@ fn use_abilities(
         };
         if cancel || !ready(slot) {
             cast.aiming = None;
-        } else if release || (is_grenade(me.character, slot) && cast.held >= MAX_COOK) {
+        } else if release {
             fire_slot = Some(slot);
         }
     } else {
@@ -205,11 +216,6 @@ fn use_abilities(
     let Some(slot) = fire_slot else { return };
     // The local timer stops double-firing while the host catches up.
     local_cd[slot as usize] = 0.5;
-    let cook = if is_grenade(me.character, slot) && cast.aiming == Some(slot) {
-        cast.held.min(MAX_COOK)
-    } else {
-        0.0
-    };
     cast.aiming = None;
     cast.cast = Some((slot, 0.0));
     // A Confirm click shouldn't also fire the gun.
@@ -219,12 +225,23 @@ fn use_abilities(
     }
     if crate::data::is_dash(me.character, slot) {
         let ronin = me.character == Character::Ronin;
-        p.dash_dir = if ronin {
-            cam.forward().as_vec3().with_y(0.0).normalize_or(Vec3::NEG_Z)
+        let leap = me.character == Character::Valkyrie;
+        p.dash_dir = if ronin || leap {
+            cam.forward()
+                .as_vec3()
+                .with_y(0.0)
+                .normalize_or(Vec3::NEG_Z)
         } else {
             dash_direction(&keys, &settings, p.yaw)
         };
         p.dash_time = if ronin { 0.2 } else { 0.18 } + 0.03 * me.tiers[slot as usize] as f32;
+        if leap {
+            // Up into the air; the dash carries you forward, gravity brings
+            // you crashing down.
+            p.vel.y = 7.5;
+            p.on_ground = false;
+            p.dash_time += 0.12;
+        }
         let to = p.feet + p.dash_dir * 22.0 * p.dash_time;
         fx.0.push(crate::fx::Fx::Dash {
             player: session.my_id,
@@ -240,7 +257,6 @@ fn use_abilities(
             slot,
             origin: cam.translation.to_array(),
             dir: cam.forward().as_vec3().to_array(),
-            cook,
         },
     );
 }
@@ -265,7 +281,9 @@ fn draw_previews(
     mut gizmos: Gizmos,
 ) {
     let Some(slot) = cast.aiming else { return };
-    let Some(me) = roster.me(&session) else { return };
+    let Some(me) = roster.me(&session) else {
+        return;
+    };
     let (cam, p) = player.into_inner();
     let t = time.elapsed_secs();
     let pulse = 0.75 + 0.25 * (t * 6.0).sin();
@@ -301,10 +319,18 @@ fn draw_previews(
                 pos = next;
                 pts.push(pos);
             }
-            let cooked = if me.character == Character::Blaze { 1.0 } else { (cast.held / MAX_COOK).min(1.0) };
-            let color = Color::srgb(1.0, 0.6 - 0.45 * cooked, 0.15);
+            let color = if me.character == Character::Blaze {
+                Color::srgb(1.0, 0.35, 0.1)
+            } else {
+                Color::srgb(0.6, 1.0, 0.35)
+            };
             gizmos.linestrip(pts, color);
-            flat_circle(&mut gizmos, pos.with_y(0.0), 4.0 + 0.5 * tier, color.with_alpha(pulse));
+            flat_circle(
+                &mut gizmos,
+                pos.with_y(0.0),
+                4.0 + 0.5 * tier,
+                color.with_alpha(pulse),
+            );
         }
         (Character::Striker, _) => {
             flat_circle(&mut gizmos, feet, 1.2, Color::srgba(1.0, 0.5, 0.1, pulse));
@@ -385,6 +411,30 @@ fn draw_previews(
         }
         (Character::Blaze, _) => {
             flat_circle(&mut gizmos, feet, 6.0, Color::srgba(1.0, 0.45, 0.1, pulse));
+        }
+        (Character::Valkyrie, 0) => {
+            let boxes = collect_boxes(colliders.iter());
+            let dist = ray_world(cam.translation, forward, SPEAR_RANGE, &boxes);
+            let color = Color::srgba(0.5, 0.9, 1.0, pulse);
+            let a = cam.translation + forward * 0.8 - Vec3::Y * 0.3;
+            let b = cam.translation + forward * dist;
+            gizmos.line(a, b, color);
+            flat_circle(&mut gizmos, b.with_y(feet.y), SPEAR_WIDTH, color);
+        }
+        (Character::Valkyrie, 1) => {
+            let flat = forward.with_y(0.0).normalize_or(Vec3::NEG_Z);
+            let land = feet + flat * leap_length(tier);
+            let color = Color::srgba(0.5, 0.9, 1.0, pulse);
+            gizmos.line(feet + Vec3::Y * 0.1, land + Vec3::Y * 0.1, color);
+            flat_circle(&mut gizmos, land, LEAP_RADIUS, color);
+        }
+        (Character::Valkyrie, _) => {
+            flat_circle(
+                &mut gizmos,
+                feet,
+                RAGNAROK_RADIUS,
+                Color::srgba(0.6, 0.7, 1.0, pulse),
+            );
         }
         (Character::Warden, _) => {
             let boxes = collect_boxes(colliders.iter());

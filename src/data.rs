@@ -30,9 +30,13 @@ pub enum FireMode {
 pub enum GunSpecial {
     None,
     /// Explodes on impact.
-    Explosive { radius: f32 },
+    Explosive {
+        radius: f32,
+    },
     /// Arcs to nearby enemies.
-    Chain { jumps: u8 },
+    Chain {
+        jumps: u8,
+    },
 }
 
 pub struct GunDef {
@@ -93,7 +97,16 @@ const fn shotgun(
         pellets,
         spread,
         headshot: 1.5,
-        ..gun(name, GunClass::Shotgun, mode, damage, rpm, mag, reserve, reload)
+        ..gun(
+            name,
+            GunClass::Shotgun,
+            mode,
+            damage,
+            rpm,
+            mag,
+            reserve,
+            reload,
+        )
     }
 }
 
@@ -108,7 +121,16 @@ pub const GUNS: [GunDef; 23] = [
     gun("Hornet MP", Smg, Auto, 24.0, 900.0, 32, 192, 1.8),
     gun("Kestrel SMG", Smg, Auto, 28.0, 760.0, 30, 180, 1.7),
     gun("Wasp PDW", Smg, Auto, 21.0, 1000.0, 50, 250, 2.2),
-    gun("Mamba Machine Pistol", Pistol, Auto, 19.0, 1100.0, 20, 160, 1.3),
+    gun(
+        "Mamba Machine Pistol",
+        Pistol,
+        Auto,
+        19.0,
+        1100.0,
+        20,
+        160,
+        1.3,
+    ),
     gun("Falcon AR", Rifle, Auto, 36.0, 650.0, 30, 210, 2.0),
     gun("Ranger Rifle", Rifle, Auto, 40.0, 600.0, 30, 180, 2.2),
     gun("Tempest Burst", Rifle, Burst, 44.0, 820.0, 30, 180, 2.0),
@@ -205,6 +227,9 @@ impl Attach {
     pub fn ext_mag(self) -> bool {
         self.0 & 64 != 0
     }
+    pub fn new(optic: u8, muzzle: u8, under: u8, mag: bool) -> Self {
+        Self::make(optic, muzzle, under, mag)
+    }
     fn make(optic: u8, muzzle: u8, under: u8, mag: bool) -> Self {
         Attach(optic | (muzzle << 2) | (under << 4) | if mag { 64 } else { 0 })
     }
@@ -227,24 +252,329 @@ impl Attach {
         v
     }
 
-    /// How much recoil is left after the muzzle and grip (1 = none removed).
-    pub fn recoil_scale(self) -> f32 {
-        let m = match self.muzzle() {
-            1 => 0.85,
-            2 => 0.65,
-            _ => 1.0,
-        };
-        let u = if self.under() == 1 { 0.75 } else { 1.0 };
-        m * u
-    }
-
-    /// Hip-fire spread multiplier (the laser tightens it).
-    pub fn hip_spread(self) -> f32 {
-        if self.under() == 2 {
-            0.6
+    /// What the fitted attachments do to the gun, all together.
+    pub fn handling(self, gun: u8) -> Handling {
+        let mut h = Handling::default();
+        let optic = if self.optic() > 0 {
+            self.optic()
         } else {
-            1.0
+            builtin_optic(gun)
+        };
+        let (zoom, scoped) = optic_zoom(gun, optic);
+        h.zoom = zoom;
+        h.scoped = scoped;
+        let mut fx = |slot: Slot, id: u8| {
+            if let Some(a) = ATTACHMENTS.iter().find(|a| a.slot == slot && a.id == id) {
+                h.ads_time *= a.ads_time;
+                h.ads_spread *= a.ads_spread;
+                h.hip_spread *= a.hip_spread;
+                h.recoil_up *= a.recoil_up;
+                h.recoil_side *= a.recoil_side;
+                h.reload *= a.reload;
+                h.damage *= a.damage;
+                h.flash *= a.flash;
+            }
+        };
+        // Built-in sights handle like the attachment of the same kind.
+        fx(Slot::Optic, optic.min(3));
+        fx(Slot::Muzzle, self.muzzle());
+        fx(Slot::Under, self.under());
+        if self.ext_mag() {
+            fx(Slot::Mag, 1);
         }
+        h.quiet = self.muzzle() == 1 || matches!(gun, 3 | 16);
+        if h.quiet {
+            h.flash = 0.0;
+        }
+        h
+    }
+}
+
+/// How a gun handles once its attachments are fitted (1 = unchanged).
+#[derive(Clone, Copy, Debug)]
+pub struct Handling {
+    /// Field of view multiplier when aimed, and whether it's a magnified scope.
+    pub zoom: f32,
+    pub scoped: bool,
+    /// Time to raise the sights.
+    pub ads_time: f32,
+    pub ads_spread: f32,
+    pub hip_spread: f32,
+    pub recoil_up: f32,
+    pub recoil_side: f32,
+    pub reload: f32,
+    pub damage: f32,
+    /// Muzzle flash size (0 = hidden).
+    pub flash: f32,
+    /// Suppressed: quiet shots, no flash.
+    pub quiet: bool,
+}
+
+impl Default for Handling {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            scoped: false,
+            ads_time: 1.0,
+            ads_spread: 1.0,
+            hip_spread: 1.0,
+            recoil_up: 1.0,
+            recoil_side: 1.0,
+            reload: 1.0,
+            damage: 1.0,
+            flash: 1.0,
+            quiet: false,
+        }
+    }
+}
+
+/// Attachment slots, in the order the guide shows them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Slot {
+    Optic,
+    Muzzle,
+    Under,
+    Mag,
+}
+
+impl Slot {
+    pub const ALL: [Slot; 4] = [Slot::Optic, Slot::Muzzle, Slot::Under, Slot::Mag];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Slot::Optic => "Optics",
+            Slot::Muzzle => "Muzzle",
+            Slot::Under => "Underbarrel",
+            Slot::Mag => "Magazine",
+        }
+    }
+}
+
+/// One attachment and exactly what it changes.
+pub struct AttachInfo {
+    pub slot: Slot,
+    pub id: u8,
+    pub name: &'static str,
+    pub blurb: &'static str,
+    pub ads_time: f32,
+    pub ads_spread: f32,
+    pub hip_spread: f32,
+    pub recoil_up: f32,
+    pub recoil_side: f32,
+    pub reload: f32,
+    pub damage: f32,
+    pub flash: f32,
+    /// Magazine size multiplier.
+    pub mag: f32,
+}
+
+const NO_FX: AttachInfo = AttachInfo {
+    slot: Slot::Optic,
+    id: 0,
+    name: "",
+    blurb: "",
+    ads_time: 1.0,
+    ads_spread: 1.0,
+    hip_spread: 1.0,
+    recoil_up: 1.0,
+    recoil_side: 1.0,
+    reload: 1.0,
+    damage: 1.0,
+    flash: 1.0,
+    mag: 1.0,
+};
+
+pub const ATTACHMENTS: [AttachInfo; 8] = [
+    AttachInfo {
+        slot: Slot::Optic,
+        id: 1,
+        name: "Red Dot",
+        blurb: "A clean dot through clear glass. Slight zoom, quick to raise.",
+        ads_spread: 0.85,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Optic,
+        id: 2,
+        name: "Holo Sight",
+        blurb: "Ring-and-dot window. More zoom and tighter aimed fire, a touch slower to raise.",
+        ads_time: 1.08,
+        ads_spread: 0.75,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Optic,
+        id: 3,
+        name: "3x Scope",
+        blurb: "Magnified scope for long shots. Very accurate aimed, slow to raise.",
+        ads_time: 1.35,
+        ads_spread: 0.45,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Muzzle,
+        id: 1,
+        name: "Suppressor",
+        blurb: "Quiet shots and no muzzle flash in your face. Slightly less kick, slightly less damage.",
+        recoil_up: 0.88,
+        recoil_side: 0.88,
+        damage: 0.95,
+        flash: 0.0,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Muzzle,
+        id: 2,
+        name: "Compensator",
+        blurb: "Vents gas upward: much less muzzle climb, a little more sideways bounce and a bigger flash.",
+        recoil_up: 0.6,
+        recoil_side: 1.1,
+        flash: 1.4,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Under,
+        id: 1,
+        name: "Foregrip",
+        blurb: "Steadies the gun: half the sideways recoil and less climb. Slightly slower to aim.",
+        recoil_up: 0.85,
+        recoil_side: 0.5,
+        ads_time: 1.05,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Under,
+        id: 2,
+        name: "Laser",
+        blurb: "Visible beam. Much tighter hip fire and faster to raise the sights.",
+        hip_spread: 0.6,
+        ads_time: 0.9,
+        ..NO_FX
+    },
+    AttachInfo {
+        slot: Slot::Mag,
+        id: 1,
+        name: "Extended Mag",
+        blurb: "Half again as many rounds. Reloads and aiming take a little longer.",
+        mag: 1.5,
+        reload: 1.15,
+        ads_time: 1.05,
+        ..NO_FX
+    },
+];
+
+impl AttachInfo {
+    /// What it does, in words ("Aim time +8%"), each marked good or bad
+    /// (None for neutral facts).
+    pub fn effects(&self) -> Vec<(Option<bool>, String)> {
+        let mut out = Vec::new();
+        let mut add = |name: &str, k: f32, good_low: bool| {
+            if (k - 1.0).abs() < 0.001 {
+                return;
+            }
+            let pct = ((k - 1.0) * 100.0).round() as i32;
+            let good = (k < 1.0) == good_low;
+            let mut name = name.to_string();
+            name[..1].make_ascii_uppercase();
+            out.push((Some(good), format!("{name} {pct:+}%")));
+        };
+        add("aim time", self.ads_time, true);
+        add("spread when aimed", self.ads_spread, true);
+        add("spread from the hip", self.hip_spread, true);
+        add("muzzle climb", self.recoil_up, true);
+        add("sideways recoil", self.recoil_side, true);
+        add("reload time", self.reload, true);
+        add("damage", self.damage, false);
+        add("magazine size", self.mag, false);
+        if self.flash == 0.0 {
+            out.push((Some(true), "No muzzle flash, quiet shots".into()));
+        } else if self.flash > 1.0 {
+            out.push((Some(false), "Bigger muzzle flash".into()));
+        }
+        if self.slot == Slot::Optic {
+            let zoom = match self.id {
+                1 => "1.3x",
+                2 => "1.4x",
+                _ => "2.6x",
+            };
+            out.insert(0, (None, format!("{zoom} zoom when aimed")));
+        }
+        out
+    }
+}
+
+/// The sight a gun comes with: 0 iron sights, 1 red dot, 2 holo, 3 scope,
+/// 4 prism scope.
+pub fn builtin_optic(gun: u8) -> u8 {
+    match gun {
+        3 | 5 | 6 | 14 => 1,
+        4 | 8 => 2,
+        9 | 15 | 16 => 3,
+        17 => 4,
+        _ => 0,
+    }
+}
+
+/// Zoom (field of view multiplier) and whether it's a magnified scope.
+fn optic_zoom(gun: u8, optic: u8) -> (f32, bool) {
+    let class = gun_def(gun).class;
+    match (class, optic) {
+        (GunClass::Sniper, _) => (if gun == 15 { 0.25 } else { 0.4 }, true),
+        (_, 3) => (if gun == 9 { 0.55 } else { 0.38 }, true),
+        (_, 4) => (0.45, true),
+        (_, 2) => (0.7, false),
+        (_, 1) => (0.78, false),
+        (GunClass::Pistol | GunClass::Shotgun, _) => (0.88, false),
+        (GunClass::Smg | GunClass::Wonder, _) => (0.82, false),
+        _ => (0.78, false),
+    }
+}
+
+/// How a gun kicks: `up` and `side` are radians of muzzle climb per shot
+/// (the climb stays until you pull down or stop firing), `kick` is the
+/// camera jolt that snaps back, `visual` how hard the gun jumps on screen.
+#[derive(Clone, Copy, Debug)]
+pub struct Recoil {
+    pub up: f32,
+    pub side: f32,
+    /// Sideways drift: auto guns walk to one side as you hold the trigger.
+    pub drift: f32,
+    pub kick: f32,
+    pub visual: f32,
+}
+
+pub fn recoil(gun: u8) -> Recoil {
+    let r = |up, side, drift, kick, visual| Recoil {
+        up,
+        side,
+        drift,
+        kick,
+        visual,
+    };
+    match gun {
+        0 => r(0.012, 0.004, 0.0, 0.016, 1.0),
+        1 => r(0.02, 0.006, 0.0, 0.024, 1.3),
+        2 => r(0.0045, 0.0045, 0.001, 0.006, 0.6),
+        3 => r(0.0035, 0.003, -0.0005, 0.005, 0.5),
+        4 => r(0.004, 0.005, 0.0015, 0.005, 0.55),
+        5 => r(0.006, 0.007, -0.002, 0.006, 0.7),
+        6 => r(0.006, 0.0035, 0.001, 0.008, 0.7),
+        7 => r(0.0075, 0.004, -0.0012, 0.01, 0.8),
+        8 => r(0.007, 0.003, 0.0, 0.009, 0.75),
+        9 => r(0.0055, 0.004, 0.0008, 0.008, 0.7),
+        10 => r(0.05, 0.012, 0.0, 0.06, 1.6),
+        11 => r(0.022, 0.01, 0.0, 0.03, 1.2),
+        12 => r(0.06, 0.016, 0.0, 0.07, 1.8),
+        13 => r(0.0055, 0.0055, 0.0015, 0.008, 0.5),
+        14 => r(0.005, 0.0065, -0.0018, 0.007, 0.5),
+        15 => r(0.07, 0.01, 0.0, 0.08, 1.8),
+        16 => r(0.025, 0.006, 0.0, 0.03, 1.2),
+        17 => r(0.02, 0.005, 0.0, 0.024, 1.0),
+        18 => r(0.055, 0.012, 0.0, 0.06, 1.7),
+        19 => r(0.04, 0.01, 0.0, 0.045, 1.5),
+        20 => r(0.004, 0.006, 0.0, 0.005, 0.6),
+        21 => r(0.015, 0.004, 0.0, 0.02, 1.2),
+        _ => r(0.045, 0.008, 0.0, 0.06, 1.6),
     }
 }
 
@@ -252,9 +582,52 @@ impl Attach {
 pub fn mag_size(gun: u8, attach: Attach) -> u32 {
     let m = gun_def(gun).mag;
     if attach.ext_mag() {
-        (m as f32 * 1.5).round() as u32
+        (m as f32 * ATTACHMENTS[7].mag).round() as u32
     } else {
         m
+    }
+}
+
+/// Which attachments a gun can take.
+pub struct AttachOptions {
+    pub optics: &'static [u8],
+    pub muzzles: &'static [u8],
+    pub unders: &'static [u8],
+    pub mag: bool,
+}
+
+impl AttachOptions {
+    pub fn fits(&self, a: Attach) -> bool {
+        (a.optic() == 0 || self.optics.contains(&a.optic()))
+            && (a.muzzle() == 0 || self.muzzles.contains(&a.muzzle()))
+            && (a.under() == 0 || self.unders.contains(&a.under()))
+            && (!a.ext_mag() || self.mag)
+    }
+
+    /// The choices for one slot (0 = nothing fitted is always allowed).
+    pub fn for_slot(&self, slot: Slot) -> &'static [u8] {
+        match slot {
+            Slot::Optic => self.optics,
+            Slot::Muzzle => self.muzzles,
+            Slot::Under => self.unders,
+            Slot::Mag => {
+                if self.mag {
+                    &[1]
+                } else {
+                    &[]
+                }
+            }
+        }
+    }
+}
+
+pub fn attach_options_for(gun: u8) -> AttachOptions {
+    let (optics, muzzles, unders, mag) = attach_options(gun);
+    AttachOptions {
+        optics,
+        muzzles,
+        unders,
+        mag,
     }
 }
 
@@ -263,11 +636,10 @@ fn attach_options(gun: u8) -> (&'static [u8], &'static [u8], &'static [u8], bool
     let d = gun_def(gun);
     let (optics, muzzles, unders, mag) = attach_slots(gun, d.class);
     // Some models come with their own sight, suppressor or foregrip.
-    let builtin_optic = matches!(gun, 3 | 4 | 5 | 6 | 8 | 9 | 14 | 15 | 16 | 17);
     let builtin_muzzle = matches!(gun, 3 | 16);
     let builtin_grip = matches!(gun, 3 | 5 | 8 | 9 | 11);
     (
-        if builtin_optic { &[] } else { optics },
+        if builtin_optic(gun) > 0 { &[] } else { optics },
         if builtin_muzzle { &[] } else { muzzles },
         if builtin_grip { &[] } else { unders },
         mag,
@@ -311,7 +683,9 @@ pub fn roll_attachments(gun: u8, rng: &mut impl rand::Rng) -> Attach {
         let ext = mag && keep(rng);
         let a = Attach::make(optic, muzzle, under, ext);
         // "Some" means at least one; guns that take nothing stay bare.
-        if a != Attach::NONE || (optics.is_empty() && muzzles.is_empty() && unders.is_empty() && !mag) {
+        if a != Attach::NONE
+            || (optics.is_empty() && muzzles.is_empty() && unders.is_empty() && !mag)
+        {
             return a;
         }
     }
@@ -390,7 +764,13 @@ pub struct SkinDef {
     pub accent: [f32; 3],
 }
 
-const fn skin(name: &'static str, rarity: Rarity, color: [f32; 3], metallic: f32, glow: f32) -> SkinDef {
+const fn skin(
+    name: &'static str,
+    rarity: Rarity,
+    color: [f32; 3],
+    metallic: f32,
+    glow: f32,
+) -> SkinDef {
     SkinDef {
         name,
         rarity,
@@ -443,33 +823,240 @@ pub const SKINS: [SkinDef; 35] = [
     skin("Gold", Legendary, [1.0, 0.75, 0.2], 1.0, 0.3),
     skin("Galaxy", Legendary, [0.45, 0.15, 0.9], 0.3, 3.0),
     // 12: Field crate
-    gun_skin("Woodland", 0, Common, Camo, [0.3, 0.36, 0.2], [0.16, 0.13, 0.08], 0.1, 0.0),
-    gun_skin("Urban Pixel", 2, Common, Digital, [0.45, 0.47, 0.5], [0.18, 0.19, 0.22], 0.1, 0.0),
-    gun_skin("Jungle Tiger", 6, Rare, Tiger, [0.85, 0.5, 0.12], [0.08, 0.07, 0.05], 0.2, 0.0),
-    gun_skin("Rust Belt", 10, Common, Splatter, [0.45, 0.3, 0.2], [0.62, 0.3, 0.1], 0.5, 0.0),
-    gun_skin("Sandstorm", 13, Rare, Digital, [0.78, 0.66, 0.45], [0.5, 0.4, 0.26], 0.1, 0.0),
+    gun_skin(
+        "Woodland",
+        0,
+        Common,
+        Camo,
+        [0.3, 0.36, 0.2],
+        [0.16, 0.13, 0.08],
+        0.1,
+        0.0,
+    ),
+    gun_skin(
+        "Urban Pixel",
+        2,
+        Common,
+        Digital,
+        [0.45, 0.47, 0.5],
+        [0.18, 0.19, 0.22],
+        0.1,
+        0.0,
+    ),
+    gun_skin(
+        "Jungle Tiger",
+        6,
+        Rare,
+        Tiger,
+        [0.85, 0.5, 0.12],
+        [0.08, 0.07, 0.05],
+        0.2,
+        0.0,
+    ),
+    gun_skin(
+        "Rust Belt",
+        10,
+        Common,
+        Splatter,
+        [0.45, 0.3, 0.2],
+        [0.62, 0.3, 0.1],
+        0.5,
+        0.0,
+    ),
+    gun_skin(
+        "Sandstorm",
+        13,
+        Rare,
+        Digital,
+        [0.78, 0.66, 0.45],
+        [0.5, 0.4, 0.26],
+        0.1,
+        0.0,
+    ),
     // 17: Street crate
-    gun_skin("Carbon Fibre", 1, Rare, Carbon, [0.16, 0.16, 0.18], [0.04, 0.04, 0.05], 0.5, 0.0),
-    gun_skin("Zebra", 3, Common, Zebra, [0.92, 0.92, 0.9], [0.06, 0.06, 0.06], 0.1, 0.0),
-    gun_skin("Snowdrift", 7, Common, Camo, [0.9, 0.92, 0.96], [0.55, 0.6, 0.66], 0.1, 0.0),
-    gun_skin("Graffiti", 11, Rare, Splatter, [0.15, 0.15, 0.2], [1.0, 0.3, 0.6], 0.2, 0.0),
-    gun_skin("White Marble", 17, Epic, Marble, [0.95, 0.94, 0.92], [0.35, 0.33, 0.35], 0.3, 0.0),
+    gun_skin(
+        "Carbon Fibre",
+        1,
+        Rare,
+        Carbon,
+        [0.16, 0.16, 0.18],
+        [0.04, 0.04, 0.05],
+        0.5,
+        0.0,
+    ),
+    gun_skin(
+        "Zebra",
+        3,
+        Common,
+        Zebra,
+        [0.92, 0.92, 0.9],
+        [0.06, 0.06, 0.06],
+        0.1,
+        0.0,
+    ),
+    gun_skin(
+        "Snowdrift",
+        7,
+        Common,
+        Camo,
+        [0.9, 0.92, 0.96],
+        [0.55, 0.6, 0.66],
+        0.1,
+        0.0,
+    ),
+    gun_skin(
+        "Graffiti",
+        11,
+        Rare,
+        Splatter,
+        [0.15, 0.15, 0.2],
+        [1.0, 0.3, 0.6],
+        0.2,
+        0.0,
+    ),
+    gun_skin(
+        "White Marble",
+        17,
+        Epic,
+        Marble,
+        [0.95, 0.94, 0.92],
+        [0.35, 0.33, 0.35],
+        0.3,
+        0.0,
+    ),
     // 22: Forge crate
-    gun_skin("Hex Plate", 4, Rare, Hex, [0.3, 0.33, 0.38], [0.1, 0.11, 0.13], 0.8, 0.0),
-    gun_skin("Python", 5, Epic, Scales, [0.4, 0.6, 0.2], [0.12, 0.18, 0.06], 0.3, 0.0),
-    gun_skin("Damascus", 8, Epic, Damascus, [0.6, 0.62, 0.66], [0.22, 0.23, 0.26], 1.0, 0.0),
-    gun_skin("Bengal", 9, Common, Tiger, [0.95, 0.6, 0.2], [0.1, 0.06, 0.03], 0.1, 0.0),
-    gun_skin("Walnut Inlay", 12, Rare, Woodgrain, [0.45, 0.27, 0.13], [0.25, 0.13, 0.05], 0.1, 0.0),
+    gun_skin(
+        "Hex Plate",
+        4,
+        Rare,
+        Hex,
+        [0.3, 0.33, 0.38],
+        [0.1, 0.11, 0.13],
+        0.8,
+        0.0,
+    ),
+    gun_skin(
+        "Python",
+        5,
+        Epic,
+        Scales,
+        [0.4, 0.6, 0.2],
+        [0.12, 0.18, 0.06],
+        0.3,
+        0.0,
+    ),
+    gun_skin(
+        "Damascus",
+        8,
+        Epic,
+        Damascus,
+        [0.6, 0.62, 0.66],
+        [0.22, 0.23, 0.26],
+        1.0,
+        0.0,
+    ),
+    gun_skin(
+        "Bengal",
+        9,
+        Common,
+        Tiger,
+        [0.95, 0.6, 0.2],
+        [0.1, 0.06, 0.03],
+        0.1,
+        0.0,
+    ),
+    gun_skin(
+        "Walnut Inlay",
+        12,
+        Rare,
+        Woodgrain,
+        [0.45, 0.27, 0.13],
+        [0.25, 0.13, 0.05],
+        0.1,
+        0.0,
+    ),
     // 27: Inferno crate (premium)
-    gun_skin("Molten Core", 14, Legendary, Lava, [0.12, 0.08, 0.07], [1.0, 0.4, 0.05], 0.2, 1.6),
-    gun_skin("Dragonscale", 19, Epic, Scales, [0.6, 0.08, 0.06], [1.0, 0.72, 0.2], 0.8, 0.0),
-    gun_skin("Hellfire", 18, Epic, Lava, [0.2, 0.05, 0.04], [1.0, 0.2, 0.05], 0.4, 1.3),
-    gun_skin("Stormcaller", 22, Legendary, Circuit, [0.1, 0.12, 0.2], [0.3, 0.8, 1.0], 0.6, 2.0),
+    gun_skin(
+        "Molten Core",
+        14,
+        Legendary,
+        Lava,
+        [0.12, 0.08, 0.07],
+        [1.0, 0.4, 0.05],
+        0.2,
+        1.6,
+    ),
+    gun_skin(
+        "Dragonscale",
+        19,
+        Epic,
+        Scales,
+        [0.6, 0.08, 0.06],
+        [1.0, 0.72, 0.2],
+        0.8,
+        0.0,
+    ),
+    gun_skin(
+        "Hellfire",
+        18,
+        Epic,
+        Lava,
+        [0.2, 0.05, 0.04],
+        [1.0, 0.2, 0.05],
+        0.4,
+        1.3,
+    ),
+    gun_skin(
+        "Stormcaller",
+        22,
+        Legendary,
+        Circuit,
+        [0.1, 0.12, 0.2],
+        [0.3, 0.8, 1.0],
+        0.6,
+        2.0,
+    ),
     // 31: Cosmos crate (premium)
-    gun_skin("Nebula", 15, Legendary, Stars, [0.2, 0.06, 0.35], [0.9, 0.85, 1.0], 0.3, 3.0),
-    gun_skin("Mainframe", 16, Epic, Circuit, [0.04, 0.12, 0.06], [0.2, 1.0, 0.4], 0.4, 1.8),
-    gun_skin("Void Hex", 20, Epic, Hex, [0.08, 0.04, 0.14], [0.7, 0.2, 1.0], 0.6, 0.0),
-    gun_skin("Supernova", 21, Legendary, Stars, [0.05, 0.08, 0.25], [1.0, 0.9, 0.5], 0.3, 3.5),
+    gun_skin(
+        "Nebula",
+        15,
+        Legendary,
+        Stars,
+        [0.2, 0.06, 0.35],
+        [0.9, 0.85, 1.0],
+        0.3,
+        3.0,
+    ),
+    gun_skin(
+        "Mainframe",
+        16,
+        Epic,
+        Circuit,
+        [0.04, 0.12, 0.06],
+        [0.2, 1.0, 0.4],
+        0.4,
+        1.8,
+    ),
+    gun_skin(
+        "Void Hex",
+        20,
+        Epic,
+        Hex,
+        [0.08, 0.04, 0.14],
+        [0.7, 0.2, 1.0],
+        0.6,
+        0.0,
+    ),
+    gun_skin(
+        "Supernova",
+        21,
+        Legendary,
+        Stars,
+        [0.05, 0.08, 0.25],
+        [1.0, 0.9, 0.5],
+        0.3,
+        3.5,
+    ),
 ];
 
 pub fn skin_def(id: u8) -> &'static SkinDef {
@@ -480,7 +1067,11 @@ pub fn skin_def(id: u8) -> &'static SkinDef {
 pub fn skin_material(id: u8) -> StandardMaterial {
     let s = skin_def(id);
     let base = Color::srgb(s.color[0], s.color[1], s.color[2]);
-    let glow_color = if s.pattern == Plain { base } else { Color::BLACK };
+    let glow_color = if s.pattern == Plain {
+        base
+    } else {
+        Color::BLACK
+    };
     StandardMaterial {
         base_color: base,
         metallic: s.metallic,
@@ -589,7 +1180,12 @@ pub fn roll_crate(crate_id: usize, rng: &mut impl rand::Rng) -> u8 {
         }
         r -= pct;
     }
-    let pool: Vec<u8> = c.skins.iter().copied().filter(|i| SKINS[*i as usize].rarity == rarity).collect();
+    let pool: Vec<u8> = c
+        .skins
+        .iter()
+        .copied()
+        .filter(|i| SKINS[*i as usize].rarity == rarity)
+        .collect();
     pool[rng.gen_range(0..pool.len())]
 }
 
@@ -613,15 +1209,17 @@ pub enum Character {
     Ronin,
     Tinker,
     Blaze,
+    Valkyrie,
 }
 
 impl Character {
-    pub const ALL: [Character; 5] = [
+    pub const ALL: [Character; 6] = [
         Character::Striker,
         Character::Warden,
         Character::Ronin,
         Character::Tinker,
         Character::Blaze,
+        Character::Valkyrie,
     ];
 
     pub fn name(self) -> &'static str {
@@ -631,6 +1229,7 @@ impl Character {
             Character::Ronin => "Ronin",
             Character::Tinker => "Tinker",
             Character::Blaze => "Blaze",
+            Character::Valkyrie => "Valkyrie",
         }
     }
 
@@ -641,6 +1240,7 @@ impl Character {
             Character::Ronin => "Blade master who strikes up close",
             Character::Tinker => "Engineer with turrets and supplies",
             Character::Blaze => "Pyro who sets the horde ablaze",
+            Character::Valkyrie => "Storm-caller with a lightning spear",
         }
     }
 
@@ -659,18 +1259,47 @@ impl Character {
             ],
             Character::Ronin => [
                 ("Iaido Slash", "Draw and cut everything in front of you."),
-                ("Shadow Step", "Blink forward, slicing enemies you pass through."),
-                ("Blade Storm", "ULT: whirling blades shred enemies around you."),
+                (
+                    "Shadow Step",
+                    "Blink forward, slicing enemies you pass through.",
+                ),
+                (
+                    "Blade Storm",
+                    "ULT: whirling blades shred enemies around you.",
+                ),
             ],
             Character::Tinker => [
-                ("Sentry Turret", "Deploy a turret that shoots nearby enemies."),
+                (
+                    "Sentry Turret",
+                    "Deploy a turret that shoots nearby enemies.",
+                ),
                 ("Supply Drop", "Refill ammo and patch up teammates nearby."),
-                ("Tesla Coil", "ULT: plant a coil that shocks everything near it."),
+                (
+                    "Tesla Coil",
+                    "ULT: plant a coil that shocks everything near it.",
+                ),
             ],
             Character::Blaze => [
                 ("Firebomb", "Throw a bomb that leaves a pool of fire."),
-                ("Flame Wave", "Blast a cone of fire that sets enemies alight."),
+                (
+                    "Flame Wave",
+                    "Blast a cone of fire that sets enemies alight.",
+                ),
                 ("Inferno", "ULT: wreathe yourself in a ring of fire."),
+            ],
+            Character::Valkyrie => [
+                (
+                    "Arc Spear",
+                    "Hurl a lightning spear that shocks everything in a line.",
+                ),
+                (
+                    "Storm Leap",
+                    "Leap forward and crash down in a burst of lightning.",
+                ),
+                (
+                    "Ragnarok",
+                    "ULT: a storm follows you, striking nearby enemies with lightning.",
+                ),
             ],
         }
     }
@@ -682,6 +1311,7 @@ impl Character {
             Character::Ronin => Color::srgb(0.6, 0.08, 0.08),
             Character::Tinker => Color::srgb(0.95, 0.75, 0.12),
             Character::Blaze => Color::srgb(0.25, 0.22, 0.2),
+            Character::Valkyrie => Color::srgb(0.26, 0.2, 0.42),
         }
     }
 
@@ -692,6 +1322,7 @@ impl Character {
             Character::Ronin => Color::srgb(0.9, 0.7, 0.25),
             Character::Tinker => Color::srgb(0.3, 0.9, 1.0),
             Character::Blaze => Color::srgb(1.0, 0.45, 0.08),
+            Character::Valkyrie => Color::srgb(0.45, 0.9, 1.0),
         }
     }
 }
@@ -710,6 +1341,8 @@ pub fn ability_cooldown(c: Character, slot: usize, tier: u8) -> f32 {
         (Character::Tinker, _) => 16.0 - 2.0 * t,
         (Character::Blaze, 0) => 10.0 - 2.0 * t,
         (Character::Blaze, _) => 7.0 - t,
+        (Character::Valkyrie, 0) => 8.0 - 1.5 * t,
+        (Character::Valkyrie, _) => 11.0 - 2.0 * t,
     }
 }
 
@@ -720,9 +1353,65 @@ pub fn is_thrown(c: Character, slot: u8) -> bool {
     matches!((c, slot), (Character::Striker, 1) | (Character::Blaze, 0))
 }
 
+/// How a character's body moves when they use an ability.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CastStyle {
+    /// Movement only (dash, blink, leap).
+    Move,
+    /// Overhand throw of something held in the left hand.
+    Throw,
+    /// Palm pushed out at the target.
+    Push,
+    /// Hand raised to the sky.
+    Sky,
+    /// A sword drawn and swung (Ronin).
+    Sword,
+    /// Valkyrie's spear hurled overhand.
+    Spear,
+    /// Something set down on the ground in front (Tinker).
+    Deploy,
+}
+
+pub fn cast_style(c: Character, slot: u8) -> CastStyle {
+    use CastStyle::*;
+    match (c, slot) {
+        _ if is_dash(c, slot) => Move,
+        _ if is_thrown(c, slot) => Throw,
+        (Character::Ronin, 0) | (Character::Ronin, 2) => Sword,
+        (Character::Valkyrie, 0) => Spear,
+        (Character::Warden, 2) | (Character::Valkyrie, 2) => Sky,
+        (Character::Tinker, _) => Deploy,
+        _ => Push,
+    }
+}
+
+/// The colour of an ability's glow and aura.
+pub fn ability_color(c: Character, slot: u8) -> Color {
+    let rgb = |r, g, b| Color::srgb(r, g, b);
+    match (c, slot) {
+        (Character::Striker, 0) => rgb(0.4, 0.75, 1.0),
+        (Character::Striker, 1) => rgb(1.0, 0.7, 0.3),
+        (Character::Striker, _) => rgb(1.0, 0.5, 0.1),
+        (Character::Warden, 0) => rgb(0.35, 1.0, 0.5),
+        (Character::Warden, 1) => rgb(0.55, 0.85, 1.0),
+        (Character::Warden, _) => rgb(1.0, 0.35, 0.15),
+        (Character::Ronin, 0) => rgb(1.0, 0.8, 0.3),
+        (Character::Ronin, 1) => rgb(0.6, 0.5, 1.0),
+        (Character::Ronin, _) => rgb(1.0, 0.2, 0.25),
+        (Character::Tinker, 0) => rgb(0.3, 0.9, 1.0),
+        (Character::Tinker, 1) => rgb(1.0, 0.8, 0.2),
+        (Character::Tinker, _) => rgb(0.5, 0.8, 1.0),
+        (Character::Blaze, _) => rgb(1.0, 0.45, 0.1),
+        (Character::Valkyrie, _) => rgb(0.5, 0.8, 1.0),
+    }
+}
+
 /// Abilities that move you rather than use your hand.
 pub fn is_dash(c: Character, slot: u8) -> bool {
-    matches!((c, slot), (Character::Striker, 0) | (Character::Ronin, 1))
+    matches!(
+        (c, slot),
+        (Character::Striker, 0) | (Character::Ronin, 1) | (Character::Valkyrie, 1)
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -871,7 +1560,9 @@ impl Element {
 }
 
 pub fn elements_in(mask: u8) -> impl Iterator<Item = Element> {
-    Element::ALL.into_iter().filter(move |e| mask & e.bit() != 0)
+    Element::ALL
+        .into_iter()
+        .filter(move |e| mask & e.bit() != 0)
 }
 
 /// A level-up reward the player can pick.

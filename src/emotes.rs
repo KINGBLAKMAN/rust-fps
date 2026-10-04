@@ -27,7 +27,12 @@ impl Plugin for EmotePlugin {
             )
             .add_systems(
                 Update,
-                (emote_camera.after(crate::player::movement).in_set(Phase::Local), show_menu.in_set(Phase::Present))
+                (
+                    emote_camera
+                        .after(crate::player::movement)
+                        .in_set(Phase::Local),
+                    show_menu.in_set(Phase::Present),
+                )
                     .run_if(in_state(AppState::InGame)),
             );
     }
@@ -43,7 +48,13 @@ pub struct EmoteMenu {
 struct MenuPanel;
 
 const CAMERA_DISTANCE: f32 = 2.7;
-const DIGITS: [KeyCode; 5] = [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4, KeyCode::Digit5];
+const DIGITS: [KeyCode; 5] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+    KeyCode::Digit5,
+];
 
 fn spawn_menu(mut commands: Commands, mut menu: ResMut<EmoteMenu>) {
     menu.open = false;
@@ -96,7 +107,11 @@ fn spawn_menu(mut commands: Commands, mut menu: ResMut<EmoteMenu>) {
 
 fn show_menu(menu: Res<EmoteMenu>, mut panel: Query<&mut Visibility, With<MenuPanel>>) {
     for mut vis in &mut panel {
-        let want = if menu.open { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if menu.open {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != want {
             *vis = want;
         }
@@ -119,7 +134,8 @@ fn emote_input(
     mut player: Single<&mut LocalPlayer>,
 ) {
     let p = &mut **player;
-    if *app_state.get() != AppState::InGame || !can_act(&session, &roster, &state, &paused, &window) {
+    if *app_state.get() != AppState::InGame || !can_act(&session, &roster, &state, &paused, &window)
+    {
         menu.open = false;
         p.emote = None;
         return;
@@ -143,16 +159,33 @@ fn emote_input(
     let left = left - time.delta_secs();
     // Moving, jumping, shooting or using anything stops the emote (the
     // backflip carries on through its own jump).
-    let moved = [Action::Forward, Action::Back, Action::Left, Action::Right, Action::Jump, Action::Crouch]
-        .iter()
-        .any(|a| keys.held(&settings, *a))
+    let moved = [
+        Action::Forward,
+        Action::Back,
+        Action::Left,
+        Action::Right,
+        Action::Jump,
+        Action::Crouch,
+    ]
+    .iter()
+    .any(|a| keys.held(&settings, *a))
         && which != 5;
-    let busy = [Action::Ability1, Action::Ability2, Action::Ultimate, Action::Reload, Action::Interact]
-        .iter()
-        .any(|a| keys.tapped(&settings, *a))
+    let busy = [
+        Action::Ability1,
+        Action::Ability2,
+        Action::Ultimate,
+        Action::Reload,
+        Action::Interact,
+    ]
+    .iter()
+    .any(|a| keys.tapped(&settings, *a))
         || mouse.just_pressed(MouseButton::Left)
         || mouse.just_pressed(MouseButton::Right);
-    p.emote = if left <= 0.0 || moved || busy { None } else { Some((which, left)) };
+    p.emote = if left <= 0.0 || moved || busy {
+        None
+    } else {
+        Some((which, left))
+    };
 }
 
 /// Pulls the camera out in front of you while you emote, so you can
@@ -184,7 +217,11 @@ fn emote_camera(
     // Start in front of the character, looking back at them.
     let yaw = p.yaw + p.orbit.x;
     let pitch = p.orbit.y;
-    let dir = Vec3::new(-yaw.sin() * pitch.cos(), pitch.sin(), -yaw.cos() * pitch.cos());
+    let dir = Vec3::new(
+        -yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        -yaw.cos() * pitch.cos(),
+    );
     let focus = p.feet + Vec3::Y * 1.15;
     let boxes = collect_boxes(colliders.iter());
     let dist = (ray_world(focus, dir, CAMERA_DISTANCE, &boxes) - 0.25).clamp(0.6, CAMERA_DISTANCE);

@@ -5,7 +5,7 @@
 //! all the map props.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::math::primitives::{Triangle2d, Extrusion};
+use bevy::math::primitives::{Extrusion, Triangle2d};
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 
@@ -13,6 +13,8 @@ use bevy::render::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 #[derive(Default, Clone)]
 pub struct Kit {
     mesh: Option<Mesh>,
+    /// Smoother curves (more segments), for characters seen up close.
+    fine: bool,
 }
 
 fn to_u32(mesh: &mut Mesh) {
@@ -29,6 +31,14 @@ pub fn lin(c: Color) -> [f32; 4] {
 impl Kit {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A kit that builds round shapes with many more segments.
+    pub fn fine() -> Self {
+        Self {
+            mesh: None,
+            fine: true,
+        }
     }
 
     /// Adds any mesh, placed by `tf`, painted `color`.
@@ -74,7 +84,11 @@ impl Kit {
     }
 
     pub fn cuboid(&mut self, center: Vec3, size: Vec3, color: Color) {
-        self.add(Cuboid::from_size(size).into(), Transform::from_translation(center), color);
+        self.add(
+            Cuboid::from_size(size).into(),
+            Transform::from_translation(center),
+            color,
+        );
     }
 
     pub fn cuboid_rot(&mut self, center: Vec3, size: Vec3, rot: Quat, color: Color) {
@@ -93,12 +107,29 @@ impl Kit {
             return;
         }
         let rot = Quat::from_rotation_arc(Vec3::Y, d / len);
-        self.cuboid_rot((a + b) / 2.0, Vec3::new(thickness.x, len, thickness.y), rot, color);
+        self.cuboid_rot(
+            (a + b) / 2.0,
+            Vec3::new(thickness.x, len, thickness.y),
+            rot,
+            color,
+        );
     }
 
     /// Cylinder standing on Y, rotated by `rot`.
     pub fn cyl(&mut self, center: Vec3, radius: f32, height: f32, rot: Quat, color: Color) {
-        let res = if radius < 0.05 { 8 } else if radius < 0.6 { 12 } else { 20 };
+        let res = if self.fine {
+            if radius < 0.02 {
+                10
+            } else {
+                24
+            }
+        } else if radius < 0.05 {
+            8
+        } else if radius < 0.6 {
+            12
+        } else {
+            20
+        };
         self.add(
             Cylinder::new(radius, height).mesh().resolution(res).build(),
             Transform::from_translation(center).with_rotation(rot),
@@ -108,7 +139,26 @@ impl Kit {
 
     /// Cylinder running along Z (barrels).
     pub fn cyl_z(&mut self, center: Vec3, radius: f32, length: f32, color: Color) {
-        self.cyl(center, radius, length, Quat::from_rotation_x(std::f32::consts::FRAC_PI_2), color);
+        self.cyl(
+            center,
+            radius,
+            length,
+            Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+            color,
+        );
+    }
+
+    /// Hollow tube running along Z (sight housings you can see through).
+    pub fn tube_z(&mut self, center: Vec3, inner: f32, outer: f32, length: f32, color: Color) {
+        let res = if self.fine { 32 } else { 16 };
+        self.add(
+            Extrusion::new(Annulus::new(inner, outer), length)
+                .mesh()
+                .resolution(res)
+                .build(),
+            Transform::from_translation(center),
+            color,
+        );
     }
 
     /// Cylinder from `a` to `b`.
@@ -118,11 +168,27 @@ impl Kit {
         if len < 1e-4 {
             return;
         }
-        self.cyl((a + b) / 2.0, radius, len, Quat::from_rotation_arc(Vec3::Y, d / len), color);
+        self.cyl(
+            (a + b) / 2.0,
+            radius,
+            len,
+            Quat::from_rotation_arc(Vec3::Y, d / len),
+            color,
+        );
     }
 
     pub fn sphere(&mut self, center: Vec3, radius: f32, color: Color) {
-        let detail = if radius < 0.3 { 1 } else { 2 };
+        let detail = if self.fine {
+            if radius < 0.02 {
+                2
+            } else {
+                3
+            }
+        } else if radius < 0.3 {
+            1
+        } else {
+            2
+        };
         self.add(
             Sphere::new(radius).mesh().ico(detail).unwrap(),
             Transform::from_translation(center),
@@ -132,22 +198,46 @@ impl Kit {
 
     /// Sphere squashed or stretched by `scale`.
     pub fn blob(&mut self, center: Vec3, scale: Vec3, color: Color) {
+        let detail = if self.fine { 4 } else { 2 };
         self.add(
-            Sphere::new(1.0).mesh().ico(2).unwrap(),
+            Sphere::new(1.0).mesh().ico(detail).unwrap(),
             Transform::from_translation(center).with_scale(scale),
+            color,
+        );
+    }
+
+    /// Blob turned by `rot`.
+    pub fn blob_rot(&mut self, center: Vec3, scale: Vec3, rot: Quat, color: Color) {
+        let detail = if self.fine { 4 } else { 2 };
+        self.add(
+            Sphere::new(1.0).mesh().ico(detail).unwrap(),
+            Transform::from_translation(center)
+                .with_rotation(rot)
+                .with_scale(scale),
             color,
         );
     }
 
     pub fn cone(&mut self, center: Vec3, radius: f32, height: f32, rot: Quat, color: Color) {
         self.add(
-            Cone::new(radius, height).mesh().resolution(12).build(),
+            Cone::new(radius, height)
+                .mesh()
+                .resolution(if self.fine { 24 } else { 12 })
+                .build(),
             Transform::from_translation(center).with_rotation(rot),
             color,
         );
     }
 
-    pub fn frustum(&mut self, center: Vec3, top: f32, bottom: f32, height: f32, rot: Quat, color: Color) {
+    pub fn frustum(
+        &mut self,
+        center: Vec3,
+        top: f32,
+        bottom: f32,
+        height: f32,
+        rot: Quat,
+        color: Color,
+    ) {
         self.add(
             ConicalFrustum {
                 radius_top: top,
@@ -155,7 +245,7 @@ impl Kit {
                 height,
             }
             .mesh()
-            .resolution(14)
+            .resolution(if self.fine { 28 } else { 14 })
             .build(),
             Transform::from_translation(center).with_rotation(rot),
             color,
@@ -167,8 +257,8 @@ impl Kit {
         self.add(
             Torus::new(major - minor, major + minor)
                 .mesh()
-                .minor_resolution(8)
-                .major_resolution(18)
+                .minor_resolution(if self.fine { 12 } else { 8 })
+                .major_resolution(if self.fine { 32 } else { 18 })
                 .build(),
             Transform::from_translation(center).with_rotation(rot),
             color,
@@ -183,7 +273,11 @@ impl Kit {
             return;
         }
         self.add(
-            Capsule3d::new(radius, len).mesh().longitudes(10).latitudes(6).build(),
+            Capsule3d::new(radius, len)
+                .mesh()
+                .longitudes(if self.fine { 24 } else { 10 })
+                .latitudes(if self.fine { 12 } else { 6 })
+                .build(),
             Transform::from_translation((a + b) / 2.0)
                 .with_rotation(Quat::from_rotation_arc(Vec3::Y, d / len)),
             color,
@@ -212,7 +306,10 @@ impl Kit {
     /// Builds, or an empty placeholder mesh if nothing was added.
     pub fn build_or_empty(self) -> Mesh {
         self.mesh.unwrap_or_else(|| {
-            let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+            let mut m = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
             m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 3]);
             m.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0f32, 1.0, 0.0]; 3]);
             m.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32; 2]; 3]);
@@ -250,6 +347,18 @@ pub fn glow_material(strength: f32) -> StandardMaterial {
     StandardMaterial {
         base_color: Color::linear_rgb(strength, strength, strength),
         unlit: true,
+        ..default()
+    }
+}
+
+/// Clear glass for sight lenses: mostly see-through with a faint tint
+/// (from the vertex colour) and a glossy sheen.
+pub fn glass_material() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::srgba(1.0, 1.0, 1.0, 0.16),
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.04,
+        reflectance: 0.9,
         ..default()
     }
 }

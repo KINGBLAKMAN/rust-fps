@@ -37,7 +37,8 @@ pub fn material(id: u8, images: &mut Assets<Image>) -> StandardMaterial {
 /// Box-projects texture coordinates from each vertex's position, so a
 /// pattern runs continuously across every part of a gun.
 pub fn project_uvs(mesh: &mut Mesh) {
-    let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+    let Some(VertexAttributeValues::Float32x3(pos)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+    else {
         return;
     };
     let Some(VertexAttributeValues::Float32x3(nor)) = mesh.attribute(Mesh::ATTRIBUTE_NORMAL) else {
@@ -92,7 +93,11 @@ fn image(rgb: Vec<[f32; 3]>) -> Image {
 
 fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     let t = t.clamp(0.0, 1.0);
-    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
 }
 
 fn scale(a: [f32; 3], s: f32) -> [f32; 3] {
@@ -124,7 +129,14 @@ fn fbm(x: f32, y: f32, base: i32, seed: f32) -> f32 {
 /// Distances to the nearest and second-nearest of a tiling grid of jittered
 /// points, `cells` per side. `row_offset` shifts every other row half a cell
 /// (a honeycomb when jitter is 0). Returns (d1, d2, centre of nearest).
-fn cells(x: f32, y: f32, cells: i32, jitter: f32, row_offset: bool, seed: f32) -> (f32, f32, [f32; 2]) {
+fn cells(
+    x: f32,
+    y: f32,
+    cells: i32,
+    jitter: f32,
+    row_offset: bool,
+    seed: f32,
+) -> (f32, f32, [f32; 2]) {
     let size = N as f32 / cells as f32;
     let (cx, cy) = ((x / size).floor() as i32, (y / size).floor() as i32);
     let (mut d1, mut d2, mut best) = (f32::MAX, f32::MAX, [0.0, 0.0]);
@@ -132,7 +144,11 @@ fn cells(x: f32, y: f32, cells: i32, jitter: f32, row_offset: bool, seed: f32) -
         for i in -2..=2 {
             let (gx, gy) = (cx + i, cy + j);
             let (wx, wy) = (gx.rem_euclid(cells) as f32, gy.rem_euclid(cells) as f32);
-            let shift = if row_offset && gy.rem_euclid(2) == 1 { 0.5 } else { 0.0 };
+            let shift = if row_offset && gy.rem_euclid(2) == 1 {
+                0.5
+            } else {
+                0.0
+            };
             let px = (gx as f32 + 0.5 + shift + (hash(wx + seed, wy) - 0.5) * jitter) * size;
             let py = (gy as f32 + 0.5 + (hash(wx, wy + seed) - 0.5) * jitter) * size;
             let d = ((px - x).powi(2) + (py - y).powi(2)).sqrt();
@@ -256,7 +272,11 @@ fn paint(def: &SkinDef) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
                         let dy = (fy - py + nf * 1.5).rem_euclid(nf) - nf * 0.5;
                         let wobble = 1.0 + (dy.atan2(dx) * 5.0 + k).sin() * 0.2;
                         if (dx * dx + dy * dy).sqrt() < r * wobble {
-                            c = if hash(k, 4.5) > 0.3 { b } else { mix(b, a, 0.5) };
+                            c = if hash(k, 4.5) > 0.3 {
+                                b
+                            } else {
+                                mix(b, a, 0.5)
+                            };
                         }
                     }
                     if hash(fx, fy) > 0.985 {
@@ -306,7 +326,11 @@ fn paint(def: &SkinDef) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
                 Pattern::Stars => {
                     let neb = fbm(fx, fy, 4, 20.0);
                     let neb2 = fbm(fx, fy, 8, 21.0);
-                    let sky = mix(a, mix(scale(a, 2.2), [0.8, 0.2, 0.6], 0.3), smooth(0.45, 0.8, neb));
+                    let sky = mix(
+                        a,
+                        mix(scale(a, 2.2), [0.8, 0.2, 0.6], 0.3),
+                        smooth(0.45, 0.8, neb),
+                    );
                     let sky = mix(sky, [0.1, 0.4, 0.8], smooth(0.55, 0.85, neb2) * 0.4);
                     let star = hash(fx, fy);
                     if star > 0.988 {

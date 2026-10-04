@@ -5,33 +5,38 @@ use bevy::prelude::*;
 use std::f32::consts::FRAC_PI_2;
 
 use crate::data::{Character, PowerUp};
-use crate::humanoid::{self, HumanoidMeshes, Look, Pose};
+use crate::humanoid;
 use crate::player::LocalPlayer;
+use crate::rig::Model;
 use crate::rig::{Rig, RigAssets};
 use crate::sim::enemy_scale;
-use crate::{AppState, Enemy, EnemyStatus, InGameEntity, NetKind, Phase, Replicated, Roster, Session};
+use crate::{
+    AppState, Enemy, EnemyStatus, InGameEntity, NetKind, Phase, Replicated, Roster, Session,
+};
 
 pub struct AvatarPlugin;
 
 impl Plugin for AvatarPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup)
-            .add_systems(
-                Update,
-                (dress_new, sync_avatars, place_name_tags, enemy_colors, spin, tumble)
-                    .chain()
-                    .in_set(Phase::Present)
-                    .run_if(in_state(AppState::InGame)),
-            );
+        app.add_systems(Startup, setup).add_systems(
+            Update,
+            (
+                dress_new,
+                sync_avatars,
+                place_name_tags,
+                enemy_colors,
+                spin,
+                tumble,
+            )
+                .chain()
+                .in_set(Phase::Present)
+                .run_if(in_state(AppState::InGame)),
+        );
     }
 }
 
 #[derive(Resource)]
 pub struct ReplicatedAssets {
-    zombie_skin: [Color; 3],
-    zombie_shirt: [Color; 3],
-    zombie_pants: Handle<StandardMaterial>,
-    zombie_eyes: Handle<StandardMaterial>,
     ball: Handle<Mesh>,
     fireball: Handle<StandardMaterial>,
     grenade: Handle<StandardMaterial>,
@@ -46,21 +51,46 @@ pub struct ReplicatedAssets {
 }
 
 /// Blaze's firebomb: a bottle with a burning rag.
-fn firebomb_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+pub(crate) fn firebomb_kit() -> (crate::kit::Kit, crate::kit::Kit) {
     use crate::kit::{c, Kit};
     let (mut k, mut g) = (Kit::new(), Kit::new());
     let v = Vec3::new;
-    k.cyl(v(0.0, 0.0, 0.0), 0.045, 0.13, Quat::IDENTITY, c(0.55, 0.25, 0.08));
-    k.frustum(v(0.0, 0.085, 0.0), 0.016, 0.045, 0.04, Quat::IDENTITY, c(0.55, 0.25, 0.08));
-    k.cyl(v(0.0, 0.12, 0.0), 0.016, 0.04, Quat::IDENTITY, c(0.5, 0.22, 0.07));
-    k.cyl(v(0.0, 0.0, 0.0), 0.047, 0.05, Quat::IDENTITY, c(0.85, 0.8, 0.65));
+    k.cyl(
+        v(0.0, 0.0, 0.0),
+        0.045,
+        0.13,
+        Quat::IDENTITY,
+        c(0.55, 0.25, 0.08),
+    );
+    k.frustum(
+        v(0.0, 0.085, 0.0),
+        0.016,
+        0.045,
+        0.04,
+        Quat::IDENTITY,
+        c(0.55, 0.25, 0.08),
+    );
+    k.cyl(
+        v(0.0, 0.12, 0.0),
+        0.016,
+        0.04,
+        Quat::IDENTITY,
+        c(0.5, 0.22, 0.07),
+    );
+    k.cyl(
+        v(0.0, 0.0, 0.0),
+        0.047,
+        0.05,
+        Quat::IDENTITY,
+        c(0.85, 0.8, 0.65),
+    );
     k.blob(v(0.0, 0.15, 0.0), v(0.025, 0.03, 0.025), c(0.8, 0.75, 0.6));
     g.blob(v(0.0, 0.18, 0.0), v(0.03, 0.05, 0.03), c(1.0, 0.55, 0.1));
     (k, g)
 }
 
 /// Tinker's sentry: tripod, ammo box, twin barrels and a sensor eye.
-fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+pub(crate) fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
     use crate::kit::{c, Kit};
     let (mut k, mut g) = (Kit::new(), Kit::new());
     let v = Vec3::new;
@@ -69,8 +99,19 @@ fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
     let steel = c(0.55, 0.57, 0.6);
     for i in 0..3 {
         let a = i as f32 * std::f32::consts::TAU / 3.0 + 0.5;
-        k.cyl_between(v(0.0, 0.55, 0.0), v(a.cos() * 0.5, 0.0, a.sin() * 0.5), 0.025, dark);
-        k.cyl(v(a.cos() * 0.5, 0.02, a.sin() * 0.5), 0.05, 0.04, Quat::IDENTITY, dark);
+        k.cyl_between(
+            v(0.0, 0.55, 0.0),
+            v(a.cos() * 0.5, 0.0, a.sin() * 0.5),
+            0.025,
+            dark,
+        );
+        k.cyl(
+            v(a.cos() * 0.5, 0.02, a.sin() * 0.5),
+            0.05,
+            0.04,
+            Quat::IDENTITY,
+            dark,
+        );
     }
     k.cyl(v(0.0, 0.6, 0.0), 0.08, 0.12, Quat::IDENTITY, steel);
     k.cuboid(v(0.0, 0.82, 0.05), v(0.32, 0.26, 0.4), yellow);
@@ -88,28 +129,61 @@ fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
 }
 
 /// Tinker's tesla coil: a base, a column wound with copper and a charged ball.
-fn coil_kit() -> (crate::kit::Kit, crate::kit::Kit) {
+pub(crate) fn coil_kit() -> (crate::kit::Kit, crate::kit::Kit) {
     use crate::kit::{c, Kit};
     let (mut k, mut g) = (Kit::new(), Kit::new());
     let v = Vec3::new;
     let dark = c(0.18, 0.18, 0.2);
     let copper = c(0.85, 0.48, 0.22);
     k.cyl(v(0.0, 0.08, 0.0), 0.5, 0.16, Quat::IDENTITY, dark);
-    k.cyl(v(0.0, 0.2, 0.0), 0.38, 0.08, Quat::IDENTITY, c(0.95, 0.75, 0.12));
+    k.cyl(
+        v(0.0, 0.2, 0.0),
+        0.38,
+        0.08,
+        Quat::IDENTITY,
+        c(0.95, 0.75, 0.12),
+    );
     for i in 0..4 {
         let a = i as f32 * std::f32::consts::FRAC_PI_2;
-        k.cuboid_rot(v(a.cos() * 0.45, 0.12, a.sin() * 0.45), v(0.2, 0.12, 0.12), Quat::from_rotation_y(-a), dark);
+        k.cuboid_rot(
+            v(a.cos() * 0.45, 0.12, a.sin() * 0.45),
+            v(0.2, 0.12, 0.12),
+            Quat::from_rotation_y(-a),
+            dark,
+        );
     }
-    k.cyl(v(0.0, 1.2, 0.0), 0.1, 2.0, Quat::IDENTITY, c(0.35, 0.35, 0.38));
+    k.cyl(
+        v(0.0, 1.2, 0.0),
+        0.1,
+        2.0,
+        Quat::IDENTITY,
+        c(0.35, 0.35, 0.38),
+    );
     for i in 0..12 {
-        k.torus(v(0.0, 0.5 + i as f32 * 0.12, 0.0), 0.025, 0.15, Quat::IDENTITY, copper);
+        k.torus(
+            v(0.0, 0.5 + i as f32 * 0.12, 0.0),
+            0.025,
+            0.15,
+            Quat::IDENTITY,
+            copper,
+        );
     }
-    k.torus(v(0.0, 2.25, 0.0), 0.06, 0.32, Quat::IDENTITY, c(0.6, 0.62, 0.66));
+    k.torus(
+        v(0.0, 2.25, 0.0),
+        0.06,
+        0.32,
+        Quat::IDENTITY,
+        c(0.6, 0.62, 0.66),
+    );
     g.sphere(v(0.0, 2.5, 0.0), 0.22, c(0.55, 0.85, 1.0));
     (k, g)
 }
 
-fn glow(materials: &mut Assets<StandardMaterial>, color: Color, power: f32) -> Handle<StandardMaterial> {
+fn glow(
+    materials: &mut Assets<StandardMaterial>,
+    color: Color,
+    power: f32,
+) -> Handle<StandardMaterial> {
     materials.add(StandardMaterial {
         base_color: color,
         emissive: LinearRgba::from(color) * power,
@@ -123,19 +197,6 @@ fn setup(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.insert_resource(ReplicatedAssets {
-        // Grunt, Shooter, Brute.
-        zombie_skin: [
-            Color::srgb(0.45, 0.58, 0.38),
-            Color::srgb(0.55, 0.42, 0.5),
-            Color::srgb(0.5, 0.36, 0.3),
-        ],
-        zombie_shirt: [
-            Color::srgb(0.35, 0.3, 0.26),
-            Color::srgb(0.3, 0.12, 0.35),
-            Color::srgb(0.45, 0.12, 0.1),
-        ],
-        zombie_pants: materials.add(Color::srgb(0.18, 0.2, 0.26)),
-        zombie_eyes: glow(&mut materials, Color::srgb(1.0, 0.2, 0.1), 8.0),
         ball: meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()),
         fireball: glow(&mut materials, Color::srgb(1.0, 0.45, 0.1), 10.0),
         grenade: materials.add(crate::kit::vertex_material(0.5, 0.2)),
@@ -150,8 +211,12 @@ fn setup(
             emissive: LinearRgba::rgb(0.25, 0.25, 0.25),
             ..crate::kit::vertex_material(0.4, 0.3)
         }),
-        gadgets: [firebomb_kit(), turret_kit(), coil_kit()]
-            .map(|(k, g)| (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))),
+        gadgets: [firebomb_kit(), turret_kit(), coil_kit()].map(|(k, g)| {
+            (
+                meshes.add(k.build_or_empty()),
+                meshes.add(g.build_or_empty()),
+            )
+        }),
         gadget_mat: materials.add(crate::kit::vertex_material(0.5, 0.3)),
         gadget_glow: materials.add(crate::kit::glow_material(3.0)),
     });
@@ -159,12 +224,7 @@ fn setup(
 
 /// Per-enemy materials so hits, burning and slows can tint each one.
 #[derive(Component)]
-struct EnemyLook {
-    skin: Handle<StandardMaterial>,
-    shirt: Handle<StandardMaterial>,
-    base_skin: Color,
-    base_shirt: Color,
-}
+struct EnemyLook(Handle<StandardMaterial>);
 
 #[derive(Component)]
 struct Spin;
@@ -184,14 +244,31 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
             let body = c(0.25, 0.28, 0.22);
             k.blob(v(0.0, 0.0, 0.0), v(0.22, 0.22, 0.38), body);
             k.cyl_z(v(0.0, 0.0, 0.0), 0.225, 0.08, c(0.95, 0.75, 0.1));
-            k.cone(v(0.0, 0.0, 0.42), 0.12, 0.14, Quat::from_rotation_x(FRAC_PI_2), body);
+            k.cone(
+                v(0.0, 0.0, 0.42),
+                0.12,
+                0.14,
+                Quat::from_rotation_x(FRAC_PI_2),
+                body,
+            );
             for i in 0..4 {
                 let r = Quat::from_rotation_z(i as f32 * FRAC_PI_2);
-                k.cuboid_rot(r * v(0.0, 0.16, 0.42), v(0.02, 0.18, 0.16), r, c(0.2, 0.2, 0.2));
+                k.cuboid_rot(
+                    r * v(0.0, 0.16, 0.42),
+                    v(0.02, 0.18, 0.16),
+                    r,
+                    c(0.2, 0.2, 0.2),
+                );
             }
             // Radiation trefoil on each side.
             for s in [-1.0, 1.0] {
-                k.cyl(v(s * 0.2, 0.0, -0.08), 0.1, 0.02, Quat::from_rotation_z(FRAC_PI_2), c(0.95, 0.8, 0.1));
+                k.cyl(
+                    v(s * 0.2, 0.0, -0.08),
+                    0.1,
+                    0.02,
+                    Quat::from_rotation_z(FRAC_PI_2),
+                    c(0.95, 0.8, 0.1),
+                );
                 for i in 0..3 {
                     let a = i as f32 * 2.094 + 0.52;
                     k.cuboid_rot(
@@ -208,11 +285,25 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
             k.blob(v(0.0, 0.08, 0.0), v(0.24, 0.24, 0.26), bone);
             k.cuboid(v(0.0, -0.12, -0.08), v(0.24, 0.14, 0.16), bone);
             for s in [-1.0, 1.0] {
-                k.blob(v(s * 0.09, 0.05, -0.2), v(0.06, 0.07, 0.04), c(0.05, 0.02, 0.02));
+                k.blob(
+                    v(s * 0.09, 0.05, -0.2),
+                    v(0.06, 0.07, 0.04),
+                    c(0.05, 0.02, 0.02),
+                );
             }
-            k.cone(v(0.0, -0.04, -0.235), 0.03, 0.05, Quat::from_rotation_x(FRAC_PI_2), c(0.05, 0.02, 0.02));
+            k.cone(
+                v(0.0, -0.04, -0.235),
+                0.03,
+                0.05,
+                Quat::from_rotation_x(FRAC_PI_2),
+                c(0.05, 0.02, 0.02),
+            );
             for i in 0..5 {
-                k.cuboid(v(-0.08 + i as f32 * 0.04, -0.14, -0.165), v(0.03, 0.05, 0.01), c(0.98, 0.97, 0.9));
+                k.cuboid(
+                    v(-0.08 + i as f32 * 0.04, -0.14, -0.165),
+                    v(0.03, 0.05, 0.01),
+                    c(0.98, 0.97, 0.9),
+                );
             }
         }
         PowerUp::DoublePoints => {
@@ -234,8 +325,20 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
             k.cuboid(v(0.0, 0.1, 0.0), v(0.16, 0.03, 0.05), c(0.1, 0.1, 0.1));
             for i in 0..5 {
                 let x = -0.16 + i as f32 * 0.08;
-                k.cyl(v(x, 0.16, 0.0), 0.022, 0.16, Quat::IDENTITY, c(0.8, 0.62, 0.25));
-                k.cone(v(x, 0.27, 0.0), 0.022, 0.06, Quat::IDENTITY, c(0.75, 0.45, 0.25));
+                k.cyl(
+                    v(x, 0.16, 0.0),
+                    0.022,
+                    0.16,
+                    Quat::IDENTITY,
+                    c(0.8, 0.62, 0.25),
+                );
+                k.cone(
+                    v(x, 0.27, 0.0),
+                    0.022,
+                    0.06,
+                    Quat::IDENTITY,
+                    c(0.75, 0.45, 0.25),
+                );
             }
         }
     }
@@ -254,7 +357,7 @@ fn tumble(time: Res<Time>, mut q: Query<&mut Transform, With<Tumble>>) {
 pub fn spawn_replicated(
     commands: &mut Commands,
     assets: &ReplicatedAssets,
-    meshes: &HumanoidMeshes,
+    rigs: &RigAssets,
     materials: &mut Assets<StandardMaterial>,
     id: u32,
     kind: NetKind,
@@ -268,7 +371,7 @@ pub fn spawn_replicated(
             Visibility::default(),
         ))
         .id();
-    dress(commands, assets, meshes, materials, root, kind, pos);
+    dress(commands, assets, rigs, materials, root, kind, pos);
     root
 }
 
@@ -276,13 +379,21 @@ pub fn spawn_replicated(
 fn dress_new(
     mut commands: Commands,
     assets: Res<ReplicatedAssets>,
-    meshes: Res<HumanoidMeshes>,
+    rigs: Res<RigAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     new: Query<(Entity, &Replicated, &Transform), (Added<Replicated>, Without<Children>)>,
 ) {
     for (e, r, tf) in &new {
         commands.entity(e).insert(Visibility::default());
-        dress(&mut commands, &assets, &meshes, &mut materials, e, r.kind, tf.translation);
+        dress(
+            &mut commands,
+            &assets,
+            &rigs,
+            &mut materials,
+            e,
+            r.kind,
+            tf.translation,
+        );
     }
 }
 
@@ -290,7 +401,7 @@ fn dress_new(
 fn dress(
     commands: &mut Commands,
     assets: &ReplicatedAssets,
-    meshes: &HumanoidMeshes,
+    rigs: &RigAssets,
     materials: &mut Assets<StandardMaterial>,
     root: Entity,
     kind: NetKind,
@@ -298,47 +409,21 @@ fn dress(
 ) {
     match kind {
         NetKind::Grunt | NetKind::Shooter | NetKind::Brute => {
-            let i = match kind {
-                NetKind::Grunt => 0,
-                NetKind::Shooter => 1,
-                _ => 2,
+            let model = match kind {
+                NetKind::Grunt => Model::Walker((root.index() % 3) as u8),
+                NetKind::Shooter => Model::Spitter,
+                _ => Model::Brute,
             };
-            let skin = materials.add(StandardMaterial {
-                base_color: assets.zombie_skin[i],
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            let shirt = materials.add(StandardMaterial {
-                base_color: assets.zombie_shirt[i],
-                perceptual_roughness: 0.9,
-                ..default()
-            });
-            let scale = enemy_scale(kind);
+            // Each zombie gets its own copy of the body material so hits,
+            // burning and slows can tint just that one.
+            let body = materials.add(crate::kit::vertex_material(0.75, 0.05));
             commands.entity(root).insert((
                 Enemy,
                 EnemyStatus::default(),
-                EnemyLook {
-                    skin: skin.clone(),
-                    shirt: shirt.clone(),
-                    base_skin: assets.zombie_skin[i],
-                    base_shirt: assets.zombie_shirt[i],
-                },
-                Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+                EnemyLook(body.clone()),
+                Transform::from_translation(pos).with_scale(Vec3::splat(enemy_scale(kind))),
             ));
-            let _ = humanoid::build(
-                commands,
-                root,
-                meshes,
-                Look {
-                    skin,
-                    shirt,
-                    pants: assets.zombie_pants.clone(),
-                    eyes: assets.zombie_eyes.clone(),
-                    gun: None,
-                    visor: false,
-                    pose: Pose::Reach,
-                },
-            );
+            crate::rig::spawn_rig_with(commands, rigs, root, model, None, Some(body));
         }
         NetKind::Fireball => {
             commands.entity(root).with_children(|p| {
@@ -441,20 +526,25 @@ fn enemy_colors(
     let dt = time.delta_secs();
     for (mut status, look) in &mut enemies {
         status.flash -= dt;
-        let (tint, glow): (Option<Color>, LinearRgba) = if status.flash > 0.0 {
-            (None, LinearRgba::rgb(3.0, 3.0, 3.0))
+        let (tint, glow) = if status.flash > 0.0 {
+            (Color::WHITE, LinearRgba::rgb(0.6, 0.6, 0.6))
         } else if status.burning {
-            (None, LinearRgba::rgb(2.0, 0.6, 0.1) * (0.6 + 0.4 * (time.elapsed_secs() * 12.0).sin().abs()))
+            let flicker = 0.6 + 0.4 * (time.elapsed_secs() * 12.0).sin().abs();
+            (
+                Color::srgb(1.0, 0.75, 0.6),
+                LinearRgba::rgb(0.5, 0.15, 0.02) * flicker,
+            )
         } else if status.slowed {
-            (Some(Color::srgb(0.55, 0.8, 1.0)), LinearRgba::rgb(0.1, 0.3, 0.6))
+            (
+                Color::srgb(0.6, 0.85, 1.0),
+                LinearRgba::rgb(0.02, 0.08, 0.18),
+            )
         } else {
-            (None, LinearRgba::BLACK)
+            (Color::WHITE, LinearRgba::BLACK)
         };
-        for (handle, base) in [(&look.skin, look.base_skin), (&look.shirt, look.base_shirt)] {
-            if let Some(m) = materials.get_mut(handle) {
-                m.base_color = tint.unwrap_or(base);
-                m.emissive = glow;
-            }
+        if let Some(m) = materials.get_mut(&look.0) {
+            m.base_color = tint;
+            m.emissive = glow;
         }
     }
 }
@@ -472,8 +562,8 @@ fn spin(time: Res<Time>, mut q: Query<&mut Transform, With<Spin>>) {
 // ---------------------------------------------------------------------------
 
 #[derive(Component)]
-struct Avatar {
-    id: u8,
+pub(crate) struct Avatar {
+    pub(crate) id: u8,
     tag: Entity,
     character: Character,
     skin: u8,
@@ -506,7 +596,13 @@ fn sync_avatars(
     roster: Res<Roster>,
     rigs: Res<RigAssets>,
     local: Single<&LocalPlayer>,
-    mut avatars: Query<(Entity, &mut Avatar, &mut Transform, &mut Rig, &mut Visibility)>,
+    mut avatars: Query<(
+        Entity,
+        &mut Avatar,
+        &mut Transform,
+        &mut Rig,
+        &mut Visibility,
+    )>,
     mut tags: Query<&mut Text, With<NameTag>>,
     mut mounts: Query<&mut humanoid::GunMount>,
 ) {
@@ -534,7 +630,11 @@ fn sync_avatars(
             if m.skin != skin {
                 m.skin = skin;
             }
-            let slot = if p.guns[(p.active_slot as usize).min(1)].is_some() { (p.active_slot as usize).min(1) } else { 0 };
+            let slot = if p.guns[(p.active_slot as usize).min(1)].is_some() {
+                (p.active_slot as usize).min(1)
+            } else {
+                0
+            };
             let attach = p.attach[slot];
             if m.attach != attach {
                 m.attach = attach;
@@ -549,7 +649,11 @@ fn sync_avatars(
             (p.feet(), p.yaw, p.pitch, p.stance, p.emote, p.emote_seq)
         };
         let shown = !mine || local.cam_out > 0.05;
-        let want = if shown { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != want {
             *vis = want;
         }
@@ -579,7 +683,11 @@ fn sync_avatars(
         } else {
             tf.translation = tf.translation.lerp(target_pos, blend);
         }
-        tf.rotation = if mine { target_rot } else { tf.rotation.slerp(target_rot, blend) };
+        tf.rotation = if mine {
+            target_rot
+        } else {
+            tf.rotation.slerp(target_rot, blend)
+        };
         if let Ok(mut text) = tags.get_mut(avatar.tag) {
             let label = if mine {
                 String::new()

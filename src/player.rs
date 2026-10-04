@@ -144,6 +144,7 @@ pub fn spawn_camera(mut commands: Commands) {
             orbit: Vec2::ZERO,
         },
         Camera3d::default(),
+        bevy::audio::SpatialListener::new(0.25),
         Projection::from(PerspectiveProjection {
             fov: 80f32.to_radians(),
             near: 0.02,
@@ -276,7 +277,11 @@ pub fn movement(
     let alive = me.is_none_or(|m| m.alive);
     let active = can_act(&session, &roster, &state, &paused, &window);
     let perks = me.map(|m| m.perks).unwrap_or(0);
-    let stamina = if has_perk(perks, Perk::Stamina) { 1.3 } else { 1.0 };
+    let stamina = if has_perk(perks, Perk::Stamina) {
+        1.3
+    } else {
+        1.0
+    };
 
     let held = |a| active && keys.held(&settings, a);
     let tapped = |a| active && keys.tapped(&settings, a);
@@ -304,12 +309,16 @@ pub fn movement(
 
     // Start a slide: crouch while moving fast on the ground (also when landing
     // with crouch held, so jump-slide-jump-slide chains work).
-    let want_slide = tapped(Action::Crouch) || (crouch_held && p.on_ground && p.sliding <= 0.0 && p.slide_cd <= 0.0 && speed > 7.5);
-    if want_slide && p.on_ground && speed > SLIDE_MIN_SPEED && p.slide_cd <= 0.0 && p.sliding <= 0.0 {
+    let want_slide = tapped(Action::Crouch)
+        || (crouch_held && p.on_ground && p.sliding <= 0.0 && p.slide_cd <= 0.0 && speed > 7.5);
+    if want_slide && p.on_ground && speed > SLIDE_MIN_SPEED && p.slide_cd <= 0.0 && p.sliding <= 0.0
+    {
         p.sliding = SLIDE_TIME;
         p.slide_cd = 0.5;
         let dir = p.vel.with_y(0.0).normalize_or_zero();
-        let boosted = ((speed + 3.0) * stamina).max(11.0 * stamina).min(16.0 * stamina);
+        let boosted = ((speed + 3.0) * stamina)
+            .max(11.0 * stamina)
+            .min(16.0 * stamina);
         p.vel = dir * boosted + Vec3::Y * p.vel.y;
     }
     if p.sliding > 0.0 {

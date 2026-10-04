@@ -2,10 +2,15 @@
 //! cooldowns, perks, prompts for the box and perk machines, power-up and
 //! round banners, the scoreboard, the level-up picker and the end screen.
 
+/// Quiet text colour for the sandbox hint.
+const DIM_HINT: Color = Color::srgba(1.0, 1.0, 1.0, 0.55);
+
 use bevy::prelude::*;
 
 use crate::config::{key_name, Action, Settings};
-use crate::data::{elements_in, gun_def, wall_cost, has_perk, skin_def, xp_to_next, Perk, BOX_COST, MAX_LEVEL};
+use crate::data::{
+    elements_in, gun_def, has_perk, skin_def, wall_cost, xp_to_next, Perk, BOX_COST, MAX_LEVEL,
+};
 use crate::game::{match_ended, MatchResult, Overlay};
 use crate::maps::{map_name, CurrentMap};
 use crate::ui::{button, UiAction, ACCENT, PANEL};
@@ -18,20 +23,21 @@ pub struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(OnEnter(AppState::InGame), spawn_hud).add_systems(
-            Update,
-            (
-                update_hud,
-                update_sights,
-                update_prompt,
-                update_banner,
-                update_scoreboard,
-                upgrade_panel,
-                end_screen,
-            )
-                .in_set(Phase::Present)
-                .run_if(in_state(AppState::InGame)),
-        );
+        app.add_systems(OnEnter(AppState::InGame), spawn_hud)
+            .add_systems(
+                Update,
+                (
+                    update_hud,
+                    update_sights,
+                    update_prompt,
+                    update_banner,
+                    update_scoreboard,
+                    upgrade_panel,
+                    end_screen,
+                )
+                    .in_set(Phase::Present)
+                    .run_if(in_state(AppState::InGame)),
+            );
     }
 }
 
@@ -62,6 +68,10 @@ enum HudFill {
 struct AbilityBox(usize);
 #[derive(Component)]
 struct Hitmarker;
+
+/// One of the four slashes of the hit marker.
+#[derive(Component)]
+struct HitmarkerBar;
 #[derive(Component)]
 struct PromptText;
 #[derive(Component)]
@@ -151,10 +161,18 @@ fn update_sights(
 ) {
     let hide = aim.amount > 0.4 || player.third_person();
     for mut v in &mut lines {
-        *v = if hide { Visibility::Hidden } else { Visibility::Inherited };
+        *v = if hide {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
     }
     for mut v in &mut scope {
-        *v = if aim.scoped { Visibility::Inherited } else { Visibility::Hidden };
+        *v = if aim.scoped {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
@@ -176,7 +194,13 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Pickable::IGNORE,
         ))
         .with_children(|o| {
-            o.spawn((Node { flex_grow: 1.0, ..default() }, BackgroundColor(Color::BLACK)));
+            o.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    ..default()
+                },
+                BackgroundColor(Color::BLACK),
+            ));
             o.spawn((
                 Node {
                     height: Val::Percent(100.0),
@@ -185,7 +209,13 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 },
                 ImageNode::new(lens),
             ));
-            o.spawn((Node { flex_grow: 1.0, ..default() }, BackgroundColor(Color::BLACK)));
+            o.spawn((
+                Node {
+                    flex_grow: 1.0,
+                    ..default()
+                },
+                BackgroundColor(Color::BLACK),
+            ));
         });
     let white = Color::WHITE;
     let dim = Color::srgb(0.75, 0.78, 0.85);
@@ -242,15 +272,42 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.85)),
                 ));
             }
+            // Hit marker: four short slashes around the crosshair.
             c.spawn((
                 Hitmarker,
-                text("X", 26.0, Color::WHITE),
                 Node {
                     position_type: PositionType::Absolute,
+                    width: Val::Px(40.0),
+                    height: Val::Px(40.0),
                     ..default()
                 },
+                Transform::default(),
                 Visibility::Hidden,
-            ));
+            ))
+            .with_children(|h| {
+                for (x, y, a) in [
+                    (-1.0, -1.0, 1.0),
+                    (1.0, -1.0, -1.0),
+                    (-1.0, 1.0, -1.0),
+                    (1.0, 1.0, 1.0),
+                ] {
+                    h.spawn((
+                        HitmarkerBar,
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(20.0 + x * 10.0 - 1.5),
+                            top: Val::Px(20.0 + y * 10.0 - 6.0),
+                            width: Val::Px(3.0),
+                            height: Val::Px(12.0),
+                            ..default()
+                        },
+                        Transform::from_rotation(Quat::from_rotation_z(
+                            a * std::f32::consts::FRAC_PI_4,
+                        )),
+                        BackgroundColor(Color::WHITE),
+                    ));
+                }
+            });
         });
 
     // Top left: round and info.
@@ -328,7 +385,13 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             c.spawn((HudText::Level, text("", 16.0, dim)));
             bar(c, 240.0, 6.0, Color::srgb(0.45, 0.7, 1.0), HudFill::Xp);
             c.spawn((HudText::Health, text("", 18.0, white)));
-            bar(c, 240.0, 14.0, Color::srgb(0.25, 0.85, 0.35), HudFill::Health);
+            bar(
+                c,
+                240.0,
+                14.0,
+                Color::srgb(0.25, 0.85, 0.35),
+                HudFill::Health,
+            );
         });
 
     // Bottom centre: abilities.
@@ -434,7 +497,13 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         });
 }
 
-fn bar(c: &mut ChildSpawnerCommands, width: f32, height: f32, color: Color, marker: impl Component) {
+fn bar(
+    c: &mut ChildSpawnerCommands,
+    width: f32,
+    height: f32,
+    color: Color,
+    marker: impl Component,
+) {
     c.spawn((
         Node {
             width: Val::Px(width),
@@ -476,7 +545,11 @@ fn update_hud(
     mut texts: Query<(&HudText, &mut Text)>,
     mut fills: Query<(&HudFill, &mut Node, &mut BackgroundColor)>,
     mut ability_box: Query<(&AbilityBox, &mut BorderColor)>,
-    hitmarker: Single<(&mut Visibility, &mut TextColor), With<Hitmarker>>,
+    hitmarker: Single<(&mut Visibility, &mut Transform), With<Hitmarker>>,
+    mut hitmarker_bars: Query<
+        &mut BackgroundColor,
+        (With<HitmarkerBar>, Without<HurtFlash>, Without<HudFill>),
+    >,
     mut hurt: Single<&mut BackgroundColor, (With<HurtFlash>, Without<HudFill>)>,
     mut last_health: Local<f32>,
     mut flash: Local<f32>,
@@ -529,7 +602,12 @@ fn update_hud(
                 if me.level >= MAX_LEVEL {
                     format!("Level {} (max)", me.level)
                 } else {
-                    format!("Level {}  -  {} / {} XP", me.level, me.xp, xp_to_next(me.level))
+                    format!(
+                        "Level {}  -  {} / {} XP",
+                        me.level,
+                        me.xp,
+                        xp_to_next(me.level)
+                    )
                 }
             }
             HudText::Perks => {
@@ -557,8 +635,16 @@ fn update_hud(
                 .current()
                 .map(|g| {
                     let parts = g.attach.names();
-                    let extra = if parts.is_empty() { String::new() } else { format!("\n{}", parts.join(" + ")) };
-                    format!("{}  ({}){extra}", gun_def(g.id).name, skin_def(me.skin_for(g.id)).name)
+                    let extra = if parts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\n{}", parts.join(" + "))
+                    };
+                    format!(
+                        "{}  ({}){extra}",
+                        gun_def(g.id).name,
+                        skin_def(me.skin_for(g.id)).name
+                    )
                 })
                 .unwrap_or_default(),
             HudText::Ammo => match loadout.current() {
@@ -636,17 +722,32 @@ fn update_hud(
         };
     }
 
-    let (mut vis, mut color) = hitmarker.into_inner();
-    *vis = if loadout.hitmarker > 0.0 {
+    // White on a hit, orange on a headshot, red and bigger on a kill; it
+    // pops out and shrinks back.
+    let (mut vis, mut tf) = hitmarker.into_inner();
+    let kill = loadout.kill_marker > 0.0;
+    let showing = loadout.hitmarker > 0.0 || kill;
+    *vis = if showing {
         Visibility::Inherited
     } else {
         Visibility::Hidden
     };
-    color.0 = if loadout.headshot {
-        Color::srgb(1.0, 0.25, 0.2)
+    let pop = if kill {
+        1.0 + loadout.kill_marker * 1.6
+    } else {
+        1.0 + loadout.hitmarker.max(0.0) * 2.5
+    };
+    tf.scale = Vec3::splat(pop);
+    let color = if kill {
+        Color::srgb(1.0, 0.15, 0.1)
+    } else if loadout.headshot {
+        Color::srgb(1.0, 0.6, 0.15)
     } else {
         Color::WHITE
     };
+    for mut bar in &mut hitmarker_bars {
+        bar.0 = color;
+    }
 
     if me.health < *last_health - 0.5 {
         *flash = 0.35;
@@ -701,7 +802,12 @@ fn update_prompt(
                         "Someone is using the box".into()
                     }
                 }
-                BoxState::Offer { player, gun, attach, .. } => {
+                BoxState::Offer {
+                    player,
+                    gun,
+                    attach,
+                    ..
+                } => {
                     let def = gun_def(gun);
                     let rare = if def.rare { "RARE! " } else { "" };
                     let parts = attach.names();
@@ -714,7 +820,9 @@ fn update_prompt(
                         let slot = if me.guns[1].is_none() {
                             "into your empty slot".to_string()
                         } else {
-                            let cur = me.guns[me.active_slot as usize].map(|g| gun_def(g).name).unwrap_or("");
+                            let cur = me.guns[me.active_slot as usize]
+                                .map(|g| gun_def(g).name)
+                                .unwrap_or("");
                             format!("replacing your {cur}")
                         };
                         format!("[{key}] Take {rare}{} ({slot}){kit}", def.name)
@@ -747,15 +855,28 @@ fn update_prompt(
             }
         }
         let feet3 = me.feet();
-        if let Some(door) = map.0.doors.iter().find(|d| d.near(feet3) && state.doors & (1 << d.zone) == 0) {
+        if let Some(door) = map
+            .0
+            .doors
+            .iter()
+            .find(|d| d.near(feet3) && d.locked(state.doors))
+        {
             msg = if me.points >= door.cost {
-                format!("[{key}] Open the door to {} ({} pts)", door.name, door.cost)
+                format!("[{key}] Clear the way to {} ({} pts)", door.name, door.cost)
             } else {
-                format!("Door to {} - need {} pts", door.name, door.cost)
+                format!("Way to {} - need {} pts", door.name, door.cost)
             };
         }
         if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet3)) {
-            let name = gun_def(wall.gun).name;
+            // A gun someone brought shows whose it is and what's fitted.
+            let fitted = wall.attach.names();
+            let name = match (&wall.owner, fitted.is_empty()) {
+                (Some(o), true) => format!("{o}'s {}", gun_def(wall.gun).name),
+                (Some(o), false) => {
+                    format!("{o}'s {} ({})", gun_def(wall.gun).name, fitted.join(", "))
+                }
+                _ => gun_def(wall.gun).name.to_string(),
+            };
             let cost = wall_cost(wall.gun);
             msg = if me.guns.contains(&Some(wall.gun)) {
                 if me.points >= cost / 2 {
@@ -829,8 +950,16 @@ fn update_banner(
         color.0 = Color::srgb(0.3, 1.0, 0.5);
         return;
     }
+    if state.sandbox.on && !state.sandbox.waves {
+        set(&mut text, "Sandbox - F1 for tools".to_string());
+        color.0 = DIM_HINT;
+        return;
+    }
     if state.round == 0 {
-        set(&mut text, format!("Get ready... {:.0}", state.intermission.max(0.0).ceil()));
+        set(
+            &mut text,
+            format!("Get ready... {:.0}", state.intermission.max(0.0).ceil()),
+        );
         color.0 = ACCENT;
         return;
     }
@@ -851,7 +980,11 @@ fn update_scoreboard(
     mut text: Single<&mut Text, With<ScoreboardText>>,
 ) {
     let show = keys.pressed(settings.key(Action::Scoreboard)) && !match_ended(&state);
-    **board = if show { Visibility::Inherited } else { Visibility::Hidden };
+    **board = if show {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     if !show {
         return;
     }
@@ -928,7 +1061,11 @@ fn upgrade_panel(
                 BorderRadius::all(Val::Px(10.0)),
             ))
             .with_children(|p| {
-                p.spawn(text(format!("LEVEL {} - PICK AN UPGRADE", me.level), 28.0, ACCENT));
+                p.spawn(text(
+                    format!("LEVEL {} - PICK AN UPGRADE", me.level),
+                    28.0,
+                    ACCENT,
+                ));
                 let left = if me.pending_picks > 1 {
                     format!("{} picks waiting", me.pending_picks)
                 } else {
@@ -936,9 +1073,17 @@ fn upgrade_panel(
                 };
                 p.spawn(text(left, 16.0, Color::srgb(0.7, 0.75, 0.85)));
                 for (i, c) in choices.iter().enumerate() {
-                    button(p, c.label(me.character, me.tiers), UiAction::ChooseUpgrade(i as u8));
+                    button(
+                        p,
+                        c.label(me.character, me.tiers),
+                        UiAction::ChooseUpgrade(i as u8),
+                    );
                 }
-                p.spawn(text("Esc or B to close (you can pick later)", 14.0, Color::srgb(0.6, 0.6, 0.7)));
+                p.spawn(text(
+                    "Esc or B to close (you can pick later)",
+                    14.0,
+                    Color::srgb(0.6, 0.6, 0.7),
+                ));
             });
         });
 }
@@ -1028,6 +1173,22 @@ fn end_screen(
                         format!("+{} premium spin", crate::config::quarters_text(result.premium_quarters)),
                         20.0,
                         Color::srgb(1.0, 0.55, 0.9),
+                    ));
+                }
+                p.spawn(text(format!("+{} career XP", result.xp), 20.0, Color::srgb(0.55, 0.85, 1.0)));
+                let (before, after) = result.levels;
+                if after > before {
+                    let unlocked: Vec<String> = (before + 1..=after)
+                        .filter_map(|l| crate::progression::UNLOCKS.get(l as usize - 2))
+                        .map(|u| match *u {
+                            crate::progression::Unlock::Gun(g) => gun_def(g).name.to_string(),
+                            crate::progression::Unlock::Attachment(i) => crate::data::ATTACHMENTS[i].name.to_string(),
+                        })
+                        .collect();
+                    p.spawn(text(
+                        format!("Career level {after}! Unlocked for your loadout: {}", unlocked.join(", ")),
+                        18.0,
+                        ACCENT,
                     ));
                 }
                 p.spawn(text(

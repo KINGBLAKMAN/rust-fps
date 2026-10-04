@@ -7,7 +7,9 @@ use bevy::window::PrimaryWindow;
 
 use crate::config::{Action, InputExt, Profile, Settings};
 use crate::data::{spins_for_round, ROUNDS_PER_PREMIUM_QUARTER};
-use crate::maps::{spawn_map, BoxGlow, BoxLid, BoxPillar, CurrentMap, ExtractionBeacon, MysteryBox, BOX_HALF};
+use crate::maps::{
+    spawn_map, BoxGlow, BoxLid, BoxPillar, CurrentMap, ExtractionBeacon, MysteryBox, BOX_HALF,
+};
 use crate::nav::NavGrid;
 use crate::{
     cursor_locked, set_cursor_lock, AppState, BoxState, InGameEntity, MatchState, Phase, Roster,
@@ -52,6 +54,8 @@ pub enum Overlay {
     Pause,
     Settings,
     Upgrades,
+    /// The sandbox tools (F1 in sandbox mode).
+    Sandbox,
 }
 
 /// What the last match earned, for the end screen.
@@ -63,6 +67,9 @@ pub struct MatchResult {
     pub premium_quarters: u32,
     pub round: u32,
     pub new_best: bool,
+    /// Career XP earned, and career level before and after.
+    pub xp: u32,
+    pub levels: (u32, u32),
 }
 
 pub fn match_ended(state: &MatchState) -> bool {
@@ -90,8 +97,17 @@ fn start_match(
     guns: Res<crate::gunmodels::GunAssets>,
     mut ambient: ResMut<AmbientLight>,
     camera: Single<Entity, With<crate::player::LocalPlayer>>,
+    roster: Res<crate::Roster>,
 ) {
-    let layout = spawn_map(&mut commands, &mut meshes, &mut materials, &mut images, state.map, state.night);
+    let mut layout = spawn_map(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        state.map,
+        state.night,
+    );
+    crate::progression::apply_loadouts(&mut layout, &roster);
     clear.0 = layout.sky;
     // Night: dim blue ambient and a flashlight on your head.
     *ambient = if state.night {
@@ -142,11 +158,29 @@ fn start_match(
     let teddy = meshes.add(teddy_kit().build_or_empty());
     let teddy_mat = materials.add(crate::kit::vertex_material(0.95, 0.0));
     commands
-        .spawn((InGameEntity, BoxGun, Transform::default(), Visibility::Hidden))
+        .spawn((
+            InGameEntity,
+            BoxGun,
+            Transform::default(),
+            Visibility::Hidden,
+        ))
         .with_children(|p| {
             for id in 0..crate::data::GUNS.len() as u8 {
-                p.spawn((BoxGunModel(Some(id)), Transform::from_scale(Vec3::splat(1.3)), Visibility::Hidden))
-                    .with_children(|g| crate::gunmodels::spawn_gun(g, &guns, id, crate::data::Attach::NONE, glow.clone(), false));
+                p.spawn((
+                    BoxGunModel(Some(id)),
+                    Transform::from_scale(Vec3::splat(1.3)),
+                    Visibility::Hidden,
+                ))
+                .with_children(|g| {
+                    crate::gunmodels::spawn_gun(
+                        g,
+                        &guns,
+                        id,
+                        crate::data::Attach::NONE,
+                        glow.clone(),
+                        false,
+                    )
+                });
             }
             p.spawn((
                 BoxGunModel(None),
@@ -220,7 +254,13 @@ fn menu_keys(
         *overlay = match *overlay {
             Overlay::None => Overlay::Pause,
             Overlay::Settings => Overlay::Pause,
-            Overlay::Pause | Overlay::Upgrades => Overlay::None,
+            Overlay::Pause | Overlay::Upgrades | Overlay::Sandbox => Overlay::None,
+        };
+    } else if keys.just_pressed(KeyCode::F1) && state.sandbox.on {
+        *overlay = match *overlay {
+            Overlay::None => Overlay::Sandbox,
+            Overlay::Sandbox => Overlay::None,
+            other => other,
         };
     } else if keys.tapped(&settings, Action::Upgrades) {
         let has_choices = roster.me(&session).is_some_and(|m| !m.choices.is_empty());
@@ -271,6 +311,8 @@ fn award_spins(
     state: Res<MatchState>,
     mut result: ResMut<MatchResult>,
     mut profile: ResMut<Profile>,
+    session: Res<crate::Session>,
+    roster: Res<crate::Roster>,
 ) {
     if result.awarded || !match_ended(&state) {
         return;
@@ -294,12 +336,19 @@ fn award_spins(
     if state.extracted {
         profile.extractions += 1;
     }
+    let kills = roster.me(&session).map_or(0, |p| p.kills);
+    let xp = crate::progression::match_xp(survived, kills, state.extracted);
+    let before = crate::progression::career(profile.career_xp).0;
+    profile.career_xp += xp;
+    let after = crate::progression::career(profile.career_xp).0;
     *result = MatchResult {
         awarded: true,
         spins,
         premium_quarters,
         round: survived,
         new_best,
+        xp,
+        levels: (before, after),
     };
 }
 
@@ -310,12 +359,35 @@ fn box_visuals(
     map: Res<CurrentMap>,
     mut last_spot: Local<Option<Vec3>>,
     mut lid_angle: Local<f32>,
-    mut boxes: Query<(&mut Transform, &mut Visibility), (With<MysteryBox>, Without<BoxGun>, Without<BoxLid>)>,
-    mut lids: Query<&mut Transform, (With<BoxLid>, Without<MysteryBox>, Without<BoxGun>, Without<BoxGunModel>)>,
+    mut boxes: Query<
+        (&mut Transform, &mut Visibility),
+        (With<MysteryBox>, Without<BoxGun>, Without<BoxLid>),
+    >,
+    mut lids: Query<
+        &mut Transform,
+        (
+            With<BoxLid>,
+            Without<MysteryBox>,
+            Without<BoxGun>,
+            Without<BoxGunModel>,
+        ),
+    >,
     mut glow: Query<&mut PointLight, With<BoxGlow>>,
-    gun: Single<(&mut Transform, &mut Visibility), (With<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>)>,
+    gun: Single<
+        (&mut Transform, &mut Visibility),
+        (With<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>),
+    >,
     mut models: Query<(&BoxGunModel, &mut Visibility), (Without<BoxGun>, Without<MysteryBox>)>,
-    mut pillars: Query<(&mut Visibility, &mut Transform), (With<BoxPillar>, Without<BoxGun>, Without<MysteryBox>, Without<BoxGunModel>, Without<BoxLid>)>,
+    mut pillars: Query<
+        (&mut Visibility, &mut Transform),
+        (
+            With<BoxPillar>,
+            Without<BoxGun>,
+            Without<MysteryBox>,
+            Without<BoxGunModel>,
+            Without<BoxLid>,
+        ),
+    >,
 ) {
     let spot = map.0.box_spots[(state.box_spot as usize).min(4)];
     let t = time.elapsed_secs();
@@ -326,9 +398,17 @@ fn box_visuals(
             let from = last_spot.unwrap_or(spot);
             if time > 2.0 {
                 let k = 4.0 - time;
-                (from + Vec3::Y * (BOX_HALF.y + k * k * 4.0), k * k * 3.0, true)
+                (
+                    from + Vec3::Y * (BOX_HALF.y + k * k * 4.0),
+                    k * k * 3.0,
+                    true,
+                )
             } else {
-                (spot + Vec3::Y * (BOX_HALF.y + time * time * 5.0), time * 4.0, time < 1.9)
+                (
+                    spot + Vec3::Y * (BOX_HALF.y + time * time * 5.0),
+                    time * 4.0,
+                    time < 1.9,
+                )
             }
         }
         _ => {
@@ -339,13 +419,24 @@ fn box_visuals(
     for (mut tf, mut vis) in &mut boxes {
         tf.translation = pos;
         tf.rotation = Quat::from_rotation_y(spin);
-        *vis = if show_box { Visibility::Inherited } else { Visibility::Hidden };
+        *vis = if show_box {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
     }
-    let open = matches!(state.box_state, BoxState::Rolling { .. } | BoxState::Offer { .. });
+    let open = matches!(
+        state.box_state,
+        BoxState::Rolling { .. } | BoxState::Offer { .. }
+    );
     // The beam pulses so it catches the eye.
     let pulse = 1.0 + 0.25 * (t * 2.5).sin();
     for (mut vis, mut tf) in &mut pillars {
-        *vis = if open || !matches!(state.box_state, BoxState::Idle) { Visibility::Hidden } else { Visibility::Inherited };
+        *vis = if open || !matches!(state.box_state, BoxState::Idle) {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
         tf.scale = Vec3::new(pulse, 1.0, pulse);
     }
     let target = if open { -1.25 } else { 0.0 };
@@ -369,19 +460,34 @@ fn box_visuals(
             // Cycles through guns, slowing down as it "decides".
             let rate = 4.0 + time * 4.0;
             let k = (t * rate).floor() as usize;
-            (Some(Some(((k * 7) % 23) as u8)), 0.9 + (3.0 - time).clamp(0.0, 3.0) * 0.15)
+            (
+                Some(Some(((k * 7) % 23) as u8)),
+                0.9 + (3.0 - time).clamp(0.0, 3.0) * 0.15,
+            )
         }
         BoxState::Offer { gun, .. } => (Some(Some(gun)), 1.35),
         BoxState::Moving { time } if time > 2.6 => (Some(None), 0.9 + (4.0 - time) * 0.5),
         _ => (None, 0.0),
     };
-    *gvis = if shown.is_some() { Visibility::Inherited } else { Visibility::Hidden };
+    *gvis = if shown.is_some() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
     if let Some(which) = shown {
-        let base = if matches!(state.box_state, BoxState::Moving { .. }) { last_spot.unwrap_or(spot) } else { spot };
+        let base = if matches!(state.box_state, BoxState::Moving { .. }) {
+            last_spot.unwrap_or(spot)
+        } else {
+            spot
+        };
         gtf.translation = base + Vec3::Y * height;
         gtf.rotation = Quat::from_rotation_y(t * 1.5);
         for (model, mut vis) in &mut models {
-            *vis = if model.0 == which { Visibility::Inherited } else { Visibility::Hidden };
+            *vis = if model.0 == which {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         }
     }
 }
@@ -398,4 +504,3 @@ fn extraction_visuals(
         };
     }
 }
-

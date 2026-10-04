@@ -67,7 +67,11 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
                 if i == 0 && trigger {
                     finger(
                         &mut k,
-                        &[p(0.028, 0.03, -0.025), p(0.014, 0.032, -0.046), p(0.003, 0.03, -0.062)],
+                        &[
+                            p(0.028, 0.03, -0.025),
+                            p(0.014, 0.032, -0.046),
+                            p(0.003, 0.03, -0.062),
+                        ],
                         r,
                     );
                     continue;
@@ -86,7 +90,11 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
             // Thumb along the far side.
             finger(
                 &mut k,
-                &[p(0.022, 0.018, 0.03), p(-0.012, 0.03, 0.016), p(-0.024, 0.036, -0.012)],
+                &[
+                    p(0.022, 0.018, 0.03),
+                    p(-0.012, 0.03, 0.016),
+                    p(-0.024, 0.036, -0.012),
+                ],
                 0.0095,
             );
             // Cuff.
@@ -95,7 +103,11 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
         }
         HandPose::Under => {
             // Palm under the handguard, fingers round the far side, thumb near.
-            k.blob(p(0.006, -0.042, 0.004), Vec3::new(0.036, 0.015, 0.046), GLOVE);
+            k.blob(
+                p(0.006, -0.042, 0.004),
+                Vec3::new(0.036, 0.015, 0.046),
+                GLOVE,
+            );
             for (i, z) in [-0.033f32, -0.011, 0.011, 0.031].iter().enumerate() {
                 let r = if i == 3 { 0.0075 } else { 0.0088 };
                 finger(
@@ -111,7 +123,11 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
             }
             finger(
                 &mut k,
-                &[p(0.03, -0.034, 0.03), p(0.035, -0.008, 0.0), p(0.03, 0.01, -0.03)],
+                &[
+                    p(0.03, -0.034, 0.03),
+                    p(0.035, -0.008, 0.0),
+                    p(0.03, 0.01, -0.03),
+                ],
                 0.0095,
             );
             k.cyl_between(p(0.022, -0.05, 0.04), p(0.04, -0.085, 0.09), 0.027, GLOVE);
@@ -123,13 +139,21 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
                 let r = if i == 0 { 0.0075 } else { 0.0088 };
                 finger(
                     &mut k,
-                    &[p(*x, -0.046, -0.022), p(*x, -0.03, -0.044), p(*x, -0.004, -0.047)],
+                    &[
+                        p(*x, -0.046, -0.022),
+                        p(*x, -0.03, -0.044),
+                        p(*x, -0.004, -0.047),
+                    ],
                     r,
                 );
             }
             finger(
                 &mut k,
-                &[p(0.042, -0.036, 0.016), p(0.047, -0.012, -0.004), p(0.036, 0.008, -0.026)],
+                &[
+                    p(0.042, -0.036, 0.016),
+                    p(0.047, -0.012, -0.004),
+                    p(0.036, 0.008, -0.026),
+                ],
                 0.0095,
             );
             k.cyl_between(p(0.0, -0.05, 0.035), p(0.0, -0.08, 0.07), 0.027, GLOVE);
@@ -142,13 +166,21 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
                 let r = if i == 0 { 0.0075 } else { 0.0088 };
                 finger(
                     &mut k,
-                    &[p(*x, 0.04, 0.0), p(*x * 1.1, 0.07, -0.006), p(*x * 1.15, 0.095, -0.012)],
+                    &[
+                        p(*x, 0.04, 0.0),
+                        p(*x * 1.1, 0.07, -0.006),
+                        p(*x * 1.15, 0.095, -0.012),
+                    ],
                     r,
                 );
             }
             finger(
                 &mut k,
-                &[p(0.04, -0.01, 0.0), p(0.065, 0.015, -0.008), p(0.078, 0.035, -0.014)],
+                &[
+                    p(0.04, -0.01, 0.0),
+                    p(0.065, 0.015, -0.008),
+                    p(0.078, 0.035, -0.014),
+                ],
                 0.0095,
             );
             k.cyl_between(p(0.0, -0.035, 0.0), p(0.0, -0.08, 0.015), 0.027, GLOVE);
@@ -161,10 +193,38 @@ pub fn hand_kit(side: f32, pose: HandPose, trim: Color) -> Kit {
 /// in the viewmodel. Sleeve in the suit colour with a trim band.
 pub fn forearm_kit(suit: Color, trim: Color) -> Kit {
     let mut k = Kit::new();
-    k.frustum(Vec3::new(0.0, 0.5, 0.0), 0.042, 0.03, 1.0, Quat::IDENTITY, suit);
-    k.frustum(Vec3::new(0.0, 0.04, 0.0), 0.032, 0.031, 0.08, Quat::IDENTITY, GLOVE);
-    k.frustum(Vec3::new(0.0, 0.11, 0.0), 0.034, 0.033, 0.035, Quat::IDENTITY, trim);
+    k.frustum(
+        Vec3::new(0.0, 0.5, 0.0),
+        0.042,
+        0.03,
+        1.0,
+        Quat::IDENTITY,
+        suit,
+    );
+    k.frustum(
+        Vec3::new(0.0, 0.04, 0.0),
+        0.032,
+        0.031,
+        0.08,
+        Quat::IDENTITY,
+        GLOVE,
+    );
+    k.frustum(
+        Vec3::new(0.0, 0.11, 0.0),
+        0.034,
+        0.033,
+        0.035,
+        Quat::IDENTITY,
+        trim,
+    );
     // Elbow pad seam.
-    k.frustum(Vec3::new(0.0, 0.75, 0.0), 0.043, 0.039, 0.05, Quat::IDENTITY, suit.darker(0.12));
+    k.frustum(
+        Vec3::new(0.0, 0.75, 0.0),
+        0.043,
+        0.039,
+        0.05,
+        Quat::IDENTITY,
+        suit.darker(0.12),
+    );
     k
 }

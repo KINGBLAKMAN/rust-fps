@@ -3,13 +3,18 @@
 //! invisible boxes to collide with, a textured ground, lamps, and the spots
 //! for spawns, the mystery box, perk machines and extraction.
 
+pub mod interiors;
+pub mod nav;
+pub mod props;
+pub mod strips;
+
 use bevy::prelude::*;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
 
 use crate::data::Perk;
 use crate::kit::{glow_material, scale_uvs, vertex_material, Kit};
-use crate::props::{self, Art};
+use props::Art;
 use crate::{Collider, InGameEntity};
 
 pub const MAP_NAMES: [&str; 3] = ["Shipping Yard", "Central Park", "The Neighborhood"];
@@ -38,8 +43,9 @@ pub const INNER: f32 = 40.0;
 /// Half size of the whole map, including the areas behind the doors.
 pub const OUTER: f32 = 58.0;
 
-/// A door in the inner fence that players buy open. Opening it unlocks
-/// `zone` (1 north, 2 south, 3 east, 4 west).
+/// A blocked way through that players buy open: a gap in the inner fence,
+/// or the middle of a building joining two outer areas. Opening it unlocks
+/// `zone` (1 north, 2 south, 3 east, 4 west) and `zone2` (0 for none).
 #[derive(Clone)]
 pub struct DoorDef {
     pub pos: Vec3,
@@ -47,7 +53,23 @@ pub struct DoorDef {
     pub along_x: bool,
     pub cost: u32,
     pub zone: u8,
+    pub zone2: u8,
     pub name: &'static str,
+    /// What blocks the way until it's bought.
+    pub blocker: Blocker,
+}
+
+/// What blocks a way through until it's opened (it sinks away).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Blocker {
+    /// Crates and pallets strapped together.
+    Crates,
+    /// Boards nailed across, with sandbags.
+    Planks,
+    /// A toppled bookcase and loose books.
+    Books,
+    /// Tables, chairs and shopping carts piled up.
+    Furniture,
 }
 
 pub const DOOR_WIDTH: f32 = 4.0;
@@ -59,9 +81,23 @@ pub struct WallBuy {
     /// Which way the board faces (players stand on that side).
     pub yaw: f32,
     pub gun: u8,
+    /// Attachments on it (a gun someone brought in has theirs).
+    pub attach: crate::data::Attach,
+    /// Who brought it, if anyone.
+    pub owner: Option<String>,
 }
 
 impl DoorDef {
+    /// The areas this door opens, as bits.
+    pub fn opens(&self) -> u8 {
+        (1 << self.zone) | if self.zone2 > 0 { 1 << self.zone2 } else { 0 }
+    }
+
+    /// Still shut, given the areas open so far?
+    pub fn locked(&self, open: u8) -> bool {
+        open & self.opens() != self.opens()
+    }
+
     /// Close enough to buy it (from either side).
     pub fn near(&self, feet: Vec3) -> bool {
         let d = feet.with_y(0.0) - self.pos;
@@ -156,7 +192,14 @@ impl MapLayout {
     }
 
     /// Flat paint on the ground (roads, paths, markings).
-    pub(crate) fn ground_paint(&mut self, center: Vec3, size: Vec2, yaw: f32, color: Color, lift: f32) {
+    pub(crate) fn ground_paint(
+        &mut self,
+        center: Vec3,
+        size: Vec2,
+        yaw: f32,
+        color: Color,
+        lift: f32,
+    ) {
         self.art.paint.cuboid_rot(
             Vec3::new(center.x, lift, center.z),
             Vec3::new(size.x, 0.02, size.y),
@@ -267,7 +310,14 @@ fn shipping_yard() -> MapLayout {
     m.pallet_stack(35.0, 22.0, 0.4, 5.0);
     m.pallet_stack(-10.0, -35.0, 0.0, 6.0);
     m.pallet_stack(12.0, 35.0, 0.3, 7.0);
-    for (x, z) in [(2.0, -4.5), (3.5, -4.0), (-11.0, 3.0), (-11.5, 4.5), (18.0, 13.0), (-18.0, -13.0)] {
+    for (x, z) in [
+        (2.0, -4.5),
+        (3.5, -4.0),
+        (-11.0, 3.0),
+        (-11.5, 4.5),
+        (18.0, 13.0),
+        (-18.0, -13.0),
+    ] {
         m.traffic_cone(x, z);
     }
 
@@ -275,13 +325,24 @@ fn shipping_yard() -> MapLayout {
     for x in [-12.0, 12.0] {
         m.gantry(x, 0.0, 22.0, 14.0);
         for s in [-1.2, 1.2] {
-            m.ground_paint(Vec3::new(x + s, 0.0, 0.0), Vec2::new(0.25, 80.0), 0.0, Color::srgb(0.35, 0.33, 0.3), 0.012);
+            m.ground_paint(
+                Vec3::new(x + s, 0.0, 0.0),
+                Vec2::new(0.25, 80.0),
+                0.0,
+                Color::srgb(0.35, 0.33, 0.3),
+                0.012,
+            );
         }
     }
 
     // Site office and floodlights.
     m.site_office(-30.0, 8.0, 0.0);
-    for (x, z) in [(-34.0f32, -34.0f32), (34.0, -34.0), (-34.0, 34.0), (34.0, 34.0)] {
+    for (x, z) in [
+        (-34.0f32, -34.0f32),
+        (34.0, -34.0),
+        (-34.0, 34.0),
+        (34.0, 34.0),
+    ] {
         let yaw = (-x).atan2(-z) + std::f32::consts::PI;
         m.light_tower(x * 0.9, z * 0.9, yaw);
     }
@@ -292,24 +353,54 @@ fn shipping_yard() -> MapLayout {
     for z in [-11.5, 11.5] {
         let mut x = -38.0;
         while x < 38.0 {
-            m.ground_paint(Vec3::new(x, 0.0, z), Vec2::new(2.0, 0.18), 0.0, yellow, 0.014);
+            m.ground_paint(
+                Vec3::new(x, 0.0, z),
+                Vec2::new(2.0, 0.18),
+                0.0,
+                yellow,
+                0.014,
+            );
             x += 3.5;
         }
     }
     for x in [-30.0, -26.0, 26.0, 30.0] {
-        m.ground_paint(Vec3::new(x, 0.0, 0.0), Vec2::new(0.15, 14.0), 0.0, white, 0.014);
+        m.ground_paint(
+            Vec3::new(x, 0.0, 0.0),
+            Vec2::new(0.15, 14.0),
+            0.0,
+            white,
+            0.014,
+        );
     }
-    m.ground_paint(Vec3::new(0.0, 0.0, 34.0), Vec2::new(9.0, 9.0), 0.0, Color::srgb(0.22, 0.23, 0.24), 0.011);
+    m.ground_paint(
+        Vec3::new(0.0, 0.0, 34.0),
+        Vec2::new(9.0, 9.0),
+        0.0,
+        Color::srgb(0.22, 0.23, 0.24),
+        0.011,
+    );
     for i in 0..6 {
         let x = -4.0 + i as f32 * 1.6;
-        m.ground_paint(Vec3::new(x, 0.0, 34.0), Vec2::new(0.6, 8.0), 0.6, yellow, 0.015);
+        m.ground_paint(
+            Vec3::new(x, 0.0, 34.0),
+            Vec2::new(0.6, 8.0),
+            0.6,
+            yellow,
+            0.015,
+        );
     }
     // Oil stains.
     for i in 0..14 {
         let x = rng.gen_range(-30.0..30.0f32);
         let z = rng.gen_range(-12.0..12.0f32);
         let r = rng.gen_range(0.6..1.6);
-        m.art.paint.cyl(Vec3::new(x, 0.006, z), r, 0.01, Quat::IDENTITY, Color::srgb(0.13, 0.13, 0.14));
+        m.art.paint.cyl(
+            Vec3::new(x, 0.006, z),
+            r,
+            0.01,
+            Quat::IDENTITY,
+            Color::srgb(0.13, 0.13, 0.14),
+        );
         let _ = i;
     }
 
@@ -350,7 +441,11 @@ fn central_park() -> MapLayout {
     // Gravel paths with stone edging.
     let path = Color::srgb(0.7, 0.64, 0.52);
     let edge = Color::srgb(0.55, 0.53, 0.5);
-    for (yaw, len, w) in [(0.0f32, 80.0f32, 4.0f32), (FRAC_PI_2, 80.0, 4.0), (FRAC_PI_4, 100.0, 3.0)] {
+    for (yaw, len, w) in [
+        (0.0f32, 80.0f32, 4.0f32),
+        (FRAC_PI_2, 80.0, 4.0),
+        (FRAC_PI_4, 100.0, 3.0),
+    ] {
         m.ground_paint(Vec3::ZERO, Vec2::new(w, len), yaw, path, 0.008);
         for s in [-1.0f32, 1.0] {
             let off = Quat::from_rotation_y(yaw) * Vec3::new(s * (w / 2.0 + 0.1), 0.0, 0.0);
@@ -363,14 +458,30 @@ fn central_park() -> MapLayout {
         }
     }
     // Paved plaza around the fountain.
-    m.art.paint.cyl(Vec3::new(0.0, 0.012, 0.0), 7.0, 0.02, Quat::IDENTITY, Color::srgb(0.66, 0.63, 0.58));
-    m.art.paint.torus(Vec3::new(0.0, 0.03, 0.0), 0.08, 7.0, Quat::IDENTITY, edge);
+    m.art.paint.cyl(
+        Vec3::new(0.0, 0.012, 0.0),
+        7.0,
+        0.02,
+        Quat::IDENTITY,
+        Color::srgb(0.66, 0.63, 0.58),
+    );
+    m.art
+        .paint
+        .torus(Vec3::new(0.0, 0.03, 0.0), 0.08, 7.0, Quat::IDENTITY, edge);
     m.fountain(0.0, 0.0);
 
     // Pond with a stone rim (gaps let you walk in), lily pads and reeds.
     let water = Color::srgb(0.2, 0.42, 0.62);
-    m.art.glass.cuboid(Vec3::new(24.0, 0.04, -20.0), Vec3::new(14.0, 0.04, 10.0), water);
-    m.art.paint.cuboid(Vec3::new(24.0, 0.01, -20.0), Vec3::new(14.2, 0.02, 10.2), Color::srgb(0.18, 0.25, 0.2));
+    m.art.glass.cuboid(
+        Vec3::new(24.0, 0.04, -20.0),
+        Vec3::new(14.0, 0.04, 10.0),
+        water,
+    );
+    m.art.paint.cuboid(
+        Vec3::new(24.0, 0.01, -20.0),
+        Vec3::new(14.2, 0.02, 10.2),
+        Color::srgb(0.18, 0.25, 0.2),
+    );
     for (x, z, sx, sz) in [
         (20.0, -25.3, 7.0, 0.5),
         (29.0, -25.3, 3.5, 0.5),
@@ -382,25 +493,54 @@ fn central_park() -> MapLayout {
         let n = ((sx.max(sz)) / 0.7) as i32;
         for i in 0..=n {
             let t = i as f32 / n.max(1) as f32 - 0.5;
-            let p = if sx > sz { Vec3::new(x + t * sx, 0.22, z) } else { Vec3::new(x, 0.22, z + t * sz) };
+            let p = if sx > sz {
+                Vec3::new(x + t * sx, 0.22, z)
+            } else {
+                Vec3::new(x, 0.22, z + t * sz)
+            };
             let r = 0.32 + props::hash(p.x, p.z) * 0.12;
-            m.art.paint.blob(p, Vec3::new(r * 1.2, r * 0.8, r), Color::srgb(0.55 + r * 0.2, 0.55 + r * 0.2, 0.53 + r * 0.2));
+            m.art.paint.blob(
+                p,
+                Vec3::new(r * 1.2, r * 0.8, r),
+                Color::srgb(0.55 + r * 0.2, 0.55 + r * 0.2, 0.53 + r * 0.2),
+            );
         }
     }
     for i in 0..9 {
         let x = 19.0 + props::hash(i as f32, 1.0) * 10.0;
         let z = -24.0 + props::hash(i as f32, 2.0) * 8.0;
-        m.art.paint.cyl(Vec3::new(x, 0.07, z), 0.35, 0.02, Quat::IDENTITY, Color::srgb(0.25, 0.55, 0.2));
+        m.art.paint.cyl(
+            Vec3::new(x, 0.07, z),
+            0.35,
+            0.02,
+            Quat::IDENTITY,
+            Color::srgb(0.25, 0.55, 0.2),
+        );
         if i % 3 == 0 {
-            m.art.paint.sphere(Vec3::new(x + 0.1, 0.12, z), 0.08, Color::srgb(0.95, 0.75, 0.85));
+            m.art.paint.sphere(
+                Vec3::new(x + 0.1, 0.12, z),
+                0.08,
+                Color::srgb(0.95, 0.75, 0.85),
+            );
         }
     }
     for i in 0..14 {
         let x = 17.2 + (i % 2) as f32 * 0.3;
         let z = -24.5 + i as f32 * 0.65;
         let h = 1.0 + props::hash(i as f32, 3.0) * 0.6;
-        m.art.paint.cyl(Vec3::new(x, h / 2.0, z), 0.02, h, Quat::IDENTITY, Color::srgb(0.3, 0.45, 0.2));
-        m.art.paint.capsule_between(Vec3::new(x, h - 0.2, z), Vec3::new(x, h, z), 0.04, Color::srgb(0.35, 0.22, 0.12));
+        m.art.paint.cyl(
+            Vec3::new(x, h / 2.0, z),
+            0.02,
+            h,
+            Quat::IDENTITY,
+            Color::srgb(0.3, 0.45, 0.2),
+        );
+        m.art.paint.capsule_between(
+            Vec3::new(x, h - 0.2, z),
+            Vec3::new(x, h, z),
+            0.04,
+            Color::srgb(0.35, 0.22, 0.12),
+        );
     }
 
     m.bandstand(-22.0, 21.0);
@@ -443,16 +583,33 @@ fn central_park() -> MapLayout {
         (-30.0, -6.0, 6.0, 1.0),
     ] {
         m.collide(Vec3::new(x, 0.65, z), Vec3::new(sx, 1.3, sz));
-        m.art.paint.cuboid(Vec3::new(x, 0.55, z), Vec3::new(sx, 1.1, sz), hedge);
+        m.art
+            .paint
+            .cuboid(Vec3::new(x, 0.55, z), Vec3::new(sx, 1.1, sz), hedge);
         let n = (sx.max(sz) / 0.8) as i32;
         for i in 0..=n {
             let t = i as f32 / n as f32 - 0.5;
-            let p = if sx > sz { Vec3::new(x + t * (sx - 0.5), 1.1, z) } else { Vec3::new(x, 1.1, z + t * (sz - 0.5)) };
-            m.art.paint.blob(p, Vec3::new(0.62, 0.35, 0.62), Color::srgb(0.15, 0.37 + props::hash(p.x, p.z) * 0.06, 0.13));
+            let p = if sx > sz {
+                Vec3::new(x + t * (sx - 0.5), 1.1, z)
+            } else {
+                Vec3::new(x, 1.1, z + t * (sz - 0.5))
+            };
+            m.art.paint.blob(
+                p,
+                Vec3::new(0.62, 0.35, 0.62),
+                Color::srgb(0.15, 0.37 + props::hash(p.x, p.z) * 0.06, 0.13),
+            );
         }
     }
     // Benches facing the paths, bins, rocks, flower bushes and lamps.
-    for (x, z, yaw) in [(6.0, 3.0, 0.0), (-6.0, -3.0, std::f32::consts::PI), (3.0, 10.0, FRAC_PI_2), (-3.0, -10.0, -FRAC_PI_2), (8.5, -2.6, 0.0), (-8.5, 2.6, std::f32::consts::PI)] {
+    for (x, z, yaw) in [
+        (6.0, 3.0, 0.0),
+        (-6.0, -3.0, std::f32::consts::PI),
+        (3.0, 10.0, FRAC_PI_2),
+        (-3.0, -10.0, -FRAC_PI_2),
+        (8.5, -2.6, 0.0),
+        (-8.5, 2.6, std::f32::consts::PI),
+    ] {
         m.bench(x, z, yaw);
     }
     for (x, z) in [(7.5, 3.0), (-7.5, -3.0), (3.0, 12.0)] {
@@ -461,8 +618,27 @@ fn central_park() -> MapLayout {
     for (x, z) in [(-28.0, -26.0), (26.0, 24.0), (-8.0, -30.0)] {
         m.rock(x, z, 1.4, x + z);
     }
-    let flowers = [Color::srgb(0.95, 0.3, 0.4), Color::srgb(0.95, 0.85, 0.25), Color::srgb(0.65, 0.4, 0.95), Color::srgb(1.0, 1.0, 1.0)];
-    for (i, (x, z)) in [(5.5, 6.5), (-5.5, 6.5), (5.5, -6.5), (-5.5, -6.5), (6.5, 18.0), (-6.5, -18.0), (18.0, -6.0), (-18.0, 6.5), (-26.0, 12.0), (12.0, 26.0)].into_iter().enumerate() {
+    let flowers = [
+        Color::srgb(0.95, 0.3, 0.4),
+        Color::srgb(0.95, 0.85, 0.25),
+        Color::srgb(0.65, 0.4, 0.95),
+        Color::srgb(1.0, 1.0, 1.0),
+    ];
+    for (i, (x, z)) in [
+        (5.5, 6.5),
+        (-5.5, 6.5),
+        (5.5, -6.5),
+        (-5.5, -6.5),
+        (6.5, 18.0),
+        (-6.5, -18.0),
+        (18.0, -6.0),
+        (-18.0, 6.5),
+        (-26.0, 12.0),
+        (12.0, 26.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         m.bush(x, z, 1.0, i as f32, Some(flowers[i % 4]));
     }
     for (x, z) in [(5.0, 5.0), (-5.0, -5.0), (5.0, -5.0), (-5.0, 5.0)] {
@@ -516,25 +692,61 @@ fn neighborhood() -> MapLayout {
     m.boundary(2, 2.2);
 
     // Street: asphalt, centre dashes, curbs and sidewalks with seams.
-    m.ground_paint(Vec3::ZERO, Vec2::new(82.0, 8.0), 0.0, Color::srgb(0.17, 0.17, 0.19), 0.006);
+    m.ground_paint(
+        Vec3::ZERO,
+        Vec2::new(82.0, 8.0),
+        0.0,
+        Color::srgb(0.17, 0.17, 0.19),
+        0.006,
+    );
     for i in -9..=9 {
-        m.ground_paint(Vec3::new(i as f32 * 4.5, 0.0, 0.0), Vec2::new(2.0, 0.15), 0.0, Color::srgb(0.95, 0.82, 0.25), 0.018);
+        m.ground_paint(
+            Vec3::new(i as f32 * 4.5, 0.0, 0.0),
+            Vec2::new(2.0, 0.15),
+            0.0,
+            Color::srgb(0.95, 0.82, 0.25),
+            0.018,
+        );
     }
     for z in [-3.85, 3.85] {
-        m.ground_paint(Vec3::new(0.0, 0.0, z), Vec2::new(82.0, 0.12), 0.0, Color::srgb(0.9, 0.9, 0.88), 0.017);
+        m.ground_paint(
+            Vec3::new(0.0, 0.0, z),
+            Vec2::new(82.0, 0.12),
+            0.0,
+            Color::srgb(0.9, 0.9, 0.88),
+            0.017,
+        );
     }
     for s in [-1.0f32, 1.0] {
-        m.art.paint.cuboid(Vec3::new(0.0, 0.06, s * 4.05), Vec3::new(82.0, 0.12, 0.2), Color::srgb(0.6, 0.6, 0.58));
-        m.art.paint.cuboid(Vec3::new(0.0, 0.05, s * 5.15), Vec3::new(82.0, 0.1, 2.0), Color::srgb(0.68, 0.68, 0.65));
+        m.art.paint.cuboid(
+            Vec3::new(0.0, 0.06, s * 4.05),
+            Vec3::new(82.0, 0.12, 0.2),
+            Color::srgb(0.6, 0.6, 0.58),
+        );
+        m.art.paint.cuboid(
+            Vec3::new(0.0, 0.05, s * 5.15),
+            Vec3::new(82.0, 0.1, 2.0),
+            Color::srgb(0.68, 0.68, 0.65),
+        );
         let mut x = -40.0;
         while x < 40.0 {
-            m.art.paint.cuboid(Vec3::new(x, 0.1, s * 5.15), Vec3::new(0.04, 0.012, 2.0), Color::srgb(0.5, 0.5, 0.48));
+            m.art.paint.cuboid(
+                Vec3::new(x, 0.1, s * 5.15),
+                Vec3::new(0.04, 0.012, 2.0),
+                Color::srgb(0.5, 0.5, 0.48),
+            );
             x += 1.6;
         }
         // Grass verge strip trees are at the back; crosswalk near the middle.
     }
     for i in 0..8 {
-        m.ground_paint(Vec3::new(-12.0, 0.0, -3.2 + i as f32 * 0.9), Vec2::new(2.6, 0.45), 0.0, Color::srgb(0.92, 0.92, 0.9), 0.019);
+        m.ground_paint(
+            Vec3::new(-12.0, 0.0, -3.2 + i as f32 * 0.9),
+            Vec2::new(2.6, 0.45),
+            0.0,
+            Color::srgb(0.92, 0.92, 0.9),
+            0.019,
+        );
     }
 
     // Houses on both sides of the street, with yards in front.
@@ -554,18 +766,58 @@ fn neighborhood() -> MapLayout {
     for side in [-1.0f32, 1.0] {
         for x in [-28.0f32, -14.0, 0.0, 14.0, 28.0] {
             let z = side * 17.0;
-            let yaw = if side < 0.0 { 0.0 } else { std::f32::consts::PI };
-            m.house(x, z, yaw, walls[i % walls.len()], roofs[i % roofs.len()], i as f32);
+            let yaw = if side < 0.0 {
+                0.0
+            } else {
+                std::f32::consts::PI
+            };
+            m.house(
+                x,
+                z,
+                yaw,
+                walls[i % walls.len()],
+                roofs[i % roofs.len()],
+                i as f32,
+            );
             i += 1;
-            m.picket_fence(Vec3::new(x - 5.0, 0.0, side * 9.5), Vec3::new(x + 5.0, 0.0, side * 9.5), 2.6);
+            m.picket_fence(
+                Vec3::new(x - 5.0, 0.0, side * 9.5),
+                Vec3::new(x + 5.0, 0.0, side * 9.5),
+                2.6,
+            );
             // Front walk and driveway.
-            m.ground_paint(Vec3::new(x - 1.0 * if side < 0.0 { 1.0 } else { -1.0 }, 0.0, side * 8.0), Vec2::new(1.2, 4.2), 0.0, Color::srgb(0.68, 0.66, 0.62), 0.01);
+            m.ground_paint(
+                Vec3::new(
+                    x - 1.0 * if side < 0.0 { 1.0 } else { -1.0 },
+                    0.0,
+                    side * 8.0,
+                ),
+                Vec2::new(1.2, 4.2),
+                0.0,
+                Color::srgb(0.68, 0.66, 0.62),
+                0.01,
+            );
             let dx = x + 7.0;
             if dx < 38.0 {
-                m.ground_paint(Vec3::new(dx, 0.0, side * 9.0), Vec2::new(3.2, 7.0), 0.0, Color::srgb(0.45, 0.45, 0.45), 0.009);
+                m.ground_paint(
+                    Vec3::new(dx, 0.0, side * 9.0),
+                    Vec2::new(3.2, 7.0),
+                    0.0,
+                    Color::srgb(0.45, 0.45, 0.45),
+                    0.009,
+                );
             }
             let mx = x - 1.0 * if side < 0.0 { 1.0 } else { -1.0 } + 1.2;
-            m.mailbox(mx, side * 6.8, if side < 0.0 { 0.0 } else { std::f32::consts::PI }, Color::srgb(0.15, 0.2, 0.45));
+            m.mailbox(
+                mx,
+                side * 6.8,
+                if side < 0.0 {
+                    0.0
+                } else {
+                    std::f32::consts::PI
+                },
+                Color::srgb(0.15, 0.2, 0.45),
+            );
         }
     }
     // Parked cars along the street and in a couple of driveways.
@@ -576,8 +828,16 @@ fn neighborhood() -> MapLayout {
         Color::srgb(0.15, 0.15, 0.15),
         Color::srgb(0.2, 0.45, 0.3),
     ];
-    for (k, (x, z)) in [(-22.0, -2.6), (-6.0, 2.6), (10.0, -2.6), (24.0, 2.6)].into_iter().enumerate() {
-        m.car(x, z, if z < 0.0 { 0.0 } else { std::f32::consts::PI }, car_colors[k % car_colors.len()]);
+    for (k, (x, z)) in [(-22.0, -2.6), (-6.0, 2.6), (10.0, -2.6), (24.0, 2.6)]
+        .into_iter()
+        .enumerate()
+    {
+        m.car(
+            x,
+            z,
+            if z < 0.0 { 0.0 } else { std::f32::consts::PI },
+            car_colors[k % car_colors.len()],
+        );
     }
     m.car(-7.0, 11.0, FRAC_PI_2, car_colors[4]);
     m.car(7.0, -11.5, -FRAC_PI_2, car_colors[2]);
@@ -605,14 +865,31 @@ fn neighborhood() -> MapLayout {
                 m.bush(x + 3.0, side * 31.0, 1.2, x, None);
             }
         }
-        m.shed(-35.0, side * 26.0, if side < 0.0 { 0.0 } else { std::f32::consts::PI });
+        m.shed(
+            -35.0,
+            side * 26.0,
+            if side < 0.0 {
+                0.0
+            } else {
+                std::f32::consts::PI
+            },
+        );
         for x in [-32.0f32, -18.0, 4.0, 18.0, 32.0] {
             if m.clear(x, side * 34.5, 3.0) {
                 m.bush(x, side * 35.5, 1.1, x * side, None);
             }
         }
     }
-    for (i, (x, z)) in [(-24.0f32, -10.6), (-33.0, 10.6), (33.0, -10.6), (12.0, 10.6), (-3.5, 10.6)].into_iter().enumerate() {
+    for (i, (x, z)) in [
+        (-24.0f32, -10.6),
+        (-33.0, 10.6),
+        (33.0, -10.6),
+        (12.0, 10.6),
+        (-3.5, 10.6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         if m.clear(x, z, 2.0) {
             m.bush(x, z, 0.8, i as f32, Some(Color::srgb(0.95, 0.4, 0.55)));
         }
@@ -745,7 +1022,10 @@ fn ground_texture(kind: Ground) -> Image {
                 ang += (props::hash(crack as f32, step as f32) - 0.5) * 0.9;
                 px += ang.cos();
                 py += ang.sin();
-                let (ix, iy) = ((px as i32).rem_euclid(N as i32) as usize, (py as i32).rem_euclid(N as i32) as usize);
+                let (ix, iy) = (
+                    (px as i32).rem_euclid(N as i32) as usize,
+                    (py as i32).rem_euclid(N as i32) as usize,
+                );
                 let i = (iy * N + ix) * 4;
                 for c in 0..3 {
                     data[i + c] = (data[i + c] as f32 * 0.55) as u8;
@@ -796,7 +1076,11 @@ fn box_art() -> (Art, Art) {
     let (hx, hz) = (BOX_HALF.x, BOX_HALF.z);
     let bottom = -BOX_HALF.y;
     let top = BOX_HALF.y - 0.18;
-    let woods = [Color::srgb(0.42, 0.27, 0.14), Color::srgb(0.36, 0.22, 0.11), Color::srgb(0.46, 0.3, 0.16)];
+    let woods = [
+        Color::srgb(0.42, 0.27, 0.14),
+        Color::srgb(0.36, 0.22, 0.11),
+        Color::srgb(0.46, 0.3, 0.16),
+    ];
     let metal = Color::srgb(0.3, 0.3, 0.32);
     let blue = Color::srgb(0.45, 0.8, 1.0);
     // Planks.
@@ -804,46 +1088,113 @@ fn box_art() -> (Art, Art) {
     let ph = (top - bottom) / rows as f32;
     for i in 0..rows {
         let y0 = bottom + i as f32 * ph;
-        props::boxr(&mut body.paint, Vec3::new(-hx, y0 + 0.005, -hz), Vec3::new(hx, y0 + ph - 0.005, hz), woods[i % 3]);
-        props::boxr(&mut body.paint, Vec3::new(-hx - 0.004, y0 + ph - 0.012, -hz - 0.004), Vec3::new(hx + 0.004, y0 + ph, hz + 0.004), Color::srgb(0.2, 0.12, 0.06));
+        props::boxr(
+            &mut body.paint,
+            Vec3::new(-hx, y0 + 0.005, -hz),
+            Vec3::new(hx, y0 + ph - 0.005, hz),
+            woods[i % 3],
+        );
+        props::boxr(
+            &mut body.paint,
+            Vec3::new(-hx - 0.004, y0 + ph - 0.012, -hz - 0.004),
+            Vec3::new(hx + 0.004, y0 + ph, hz + 0.004),
+            Color::srgb(0.2, 0.12, 0.06),
+        );
     }
     // Metal corners and bands.
     for sx in [-1.0f32, 1.0] {
         for sz in [-1.0f32, 1.0] {
-            props::boxr(&mut body.metal, Vec3::new(sx * hx - 0.06, bottom, sz * hz - 0.06), Vec3::new(sx * hx + 0.02, top, sz * hz + 0.02), metal);
+            props::boxr(
+                &mut body.metal,
+                Vec3::new(sx * hx - 0.06, bottom, sz * hz - 0.06),
+                Vec3::new(sx * hx + 0.02, top, sz * hz + 0.02),
+                metal,
+            );
         }
-        props::boxr(&mut body.metal, Vec3::new(sx * 0.55 - 0.05, bottom, -hz - 0.015), Vec3::new(sx * 0.55 + 0.05, top, hz + 0.015), metal);
+        props::boxr(
+            &mut body.metal,
+            Vec3::new(sx * 0.55 - 0.05, bottom, -hz - 0.015),
+            Vec3::new(sx * 0.55 + 0.05, top, hz + 0.015),
+            metal,
+        );
         // Handles on the ends.
-        body.metal.torus(Vec3::new(sx * (hx + 0.03), 0.0, 0.0), 0.015, 0.09, Quat::from_rotation_z(FRAC_PI_2), metal);
+        body.metal.torus(
+            Vec3::new(sx * (hx + 0.03), 0.0, 0.0),
+            0.015,
+            0.09,
+            Quat::from_rotation_z(FRAC_PI_2),
+            metal,
+        );
     }
     // Glowing "?" on every side.
     for (pos, rot) in [
         (Vec3::new(0.0, -0.05, hz + 0.02), Quat::IDENTITY),
-        (Vec3::new(0.0, -0.05, -hz - 0.02), Quat::from_rotation_y(std::f32::consts::PI)),
-        (Vec3::new(hx + 0.02, -0.05, 0.0), Quat::from_rotation_y(FRAC_PI_2)),
-        (Vec3::new(-hx - 0.02, -0.05, 0.0), Quat::from_rotation_y(-FRAC_PI_2)),
+        (
+            Vec3::new(0.0, -0.05, -hz - 0.02),
+            Quat::from_rotation_y(std::f32::consts::PI),
+        ),
+        (
+            Vec3::new(hx + 0.02, -0.05, 0.0),
+            Quat::from_rotation_y(FRAC_PI_2),
+        ),
+        (
+            Vec3::new(-hx - 0.02, -0.05, 0.0),
+            Quat::from_rotation_y(-FRAC_PI_2),
+        ),
     ] {
         let mut q = Kit::new();
         question_mark(&mut q, 0.42, blue);
-        body.glow.append(q, Transform::from_translation(pos).with_rotation(rot));
+        body.glow
+            .append(q, Transform::from_translation(pos).with_rotation(rot));
     }
     // The glow inside, seen when the lid opens.
-    body.glow.cuboid(Vec3::new(0.0, top - 0.02, 0.0), Vec3::new(hx * 1.9, 0.02, hz * 1.8), Color::srgb(0.75, 0.92, 1.0));
+    body.glow.cuboid(
+        Vec3::new(0.0, top - 0.02, 0.0),
+        Vec3::new(hx * 1.9, 0.02, hz * 1.8),
+        Color::srgb(0.75, 0.92, 1.0),
+    );
     // Lid (pivot at the back top edge).
     let d = hz * 2.0;
-    props::boxr(&mut lid.paint, Vec3::new(-hx - 0.02, 0.0, 0.0), Vec3::new(hx + 0.02, 0.18, d + 0.02), woods[0]);
+    props::boxr(
+        &mut lid.paint,
+        Vec3::new(-hx - 0.02, 0.0, 0.0),
+        Vec3::new(hx + 0.02, 0.18, d + 0.02),
+        woods[0],
+    );
     for i in 0..4 {
         let z = 0.02 + i as f32 * d / 4.0;
-        props::boxr(&mut lid.paint, Vec3::new(-hx - 0.024, 0.17, z), Vec3::new(hx + 0.024, 0.19, z + 0.01), Color::srgb(0.2, 0.12, 0.06));
+        props::boxr(
+            &mut lid.paint,
+            Vec3::new(-hx - 0.024, 0.17, z),
+            Vec3::new(hx + 0.024, 0.19, z + 0.01),
+            Color::srgb(0.2, 0.12, 0.06),
+        );
     }
     for sx in [-1.0f32, 1.0] {
-        props::boxr(&mut lid.metal, Vec3::new(sx * 0.55 - 0.05, -0.005, -0.01), Vec3::new(sx * 0.55 + 0.05, 0.195, d + 0.03), metal);
-        props::boxr(&mut lid.metal, Vec3::new(sx * hx - 0.08, -0.005, -0.01), Vec3::new(sx * hx + 0.03, 0.195, d + 0.03), metal);
+        props::boxr(
+            &mut lid.metal,
+            Vec3::new(sx * 0.55 - 0.05, -0.005, -0.01),
+            Vec3::new(sx * 0.55 + 0.05, 0.195, d + 0.03),
+            metal,
+        );
+        props::boxr(
+            &mut lid.metal,
+            Vec3::new(sx * hx - 0.08, -0.005, -0.01),
+            Vec3::new(sx * hx + 0.03, 0.195, d + 0.03),
+            metal,
+        );
     }
     let mut q = Kit::new();
     question_mark(&mut q, 0.5, blue);
-    lid.glow.append(q, Transform::from_xyz(0.0, 0.2, d / 2.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)));
-    lid.metal.cuboid(Vec3::new(0.0, 0.06, d + 0.03), Vec3::new(0.2, 0.08, 0.04), metal);
+    lid.glow.append(
+        q,
+        Transform::from_xyz(0.0, 0.2, d / 2.0).with_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
+    );
+    lid.metal.cuboid(
+        Vec3::new(0.0, 0.06, d + 0.03),
+        Vec3::new(0.2, 0.08, 0.04),
+        metal,
+    );
     (body, lid)
 }
 
@@ -855,48 +1206,162 @@ fn perk_art(perk: Perk) -> Art {
     let body = Color::srgb(s.red * 0.55, s.green * 0.55, s.blue * 0.55);
     let black = Color::srgb(0.05, 0.05, 0.06);
     let chrome = Color::srgb(0.7, 0.7, 0.72);
-    props::boxr(&mut a.paint, Vec3::new(-0.65, 0.0, -0.52), Vec3::new(0.65, 0.12, 0.52), black);
-    props::boxr(&mut a.paint, Vec3::new(-0.6, 0.12, -0.5), Vec3::new(0.6, 2.3, 0.5), body);
+    props::boxr(
+        &mut a.paint,
+        Vec3::new(-0.65, 0.0, -0.52),
+        Vec3::new(0.65, 0.12, 0.52),
+        black,
+    );
+    props::boxr(
+        &mut a.paint,
+        Vec3::new(-0.6, 0.12, -0.5),
+        Vec3::new(0.6, 2.3, 0.5),
+        body,
+    );
     for sx in [-1.0f32, 1.0] {
-        props::boxr(&mut a.paint, Vec3::new(sx * 0.6 - 0.01, 0.3, -0.2), Vec3::new(sx * 0.6 + 0.01, 2.1, 0.2), col);
-        props::boxr(&mut a.metal, Vec3::new(sx * 0.6 - 0.03, 0.12, 0.47), Vec3::new(sx * 0.6 + 0.03, 2.3, 0.53), chrome);
+        props::boxr(
+            &mut a.paint,
+            Vec3::new(sx * 0.6 - 0.01, 0.3, -0.2),
+            Vec3::new(sx * 0.6 + 0.01, 2.1, 0.2),
+            col,
+        );
+        props::boxr(
+            &mut a.metal,
+            Vec3::new(sx * 0.6 - 0.03, 0.12, 0.47),
+            Vec3::new(sx * 0.6 + 0.03, 2.3, 0.53),
+            chrome,
+        );
     }
     // Lit sign on top with an emblem.
-    props::boxr(&mut a.glow, Vec3::new(-0.6, 2.33, -0.48), Vec3::new(0.6, 2.72, 0.5), col);
-    props::boxr(&mut a.metal, Vec3::new(-0.64, 2.3, -0.52), Vec3::new(0.64, 2.34, 0.54), chrome);
-    props::boxr(&mut a.metal, Vec3::new(-0.64, 2.72, -0.52), Vec3::new(0.64, 2.76, 0.54), chrome);
-    a.glow.cyl(Vec3::new(0.0, 2.52, 0.51), 0.15, 0.02, Quat::from_rotation_x(FRAC_PI_2), Color::WHITE);
-    a.glow.cyl(Vec3::new(0.0, 2.52, 0.525), 0.1, 0.02, Quat::from_rotation_x(FRAC_PI_2), col);
+    props::boxr(
+        &mut a.glow,
+        Vec3::new(-0.6, 2.33, -0.48),
+        Vec3::new(0.6, 2.72, 0.5),
+        col,
+    );
+    props::boxr(
+        &mut a.metal,
+        Vec3::new(-0.64, 2.3, -0.52),
+        Vec3::new(0.64, 2.34, 0.54),
+        chrome,
+    );
+    props::boxr(
+        &mut a.metal,
+        Vec3::new(-0.64, 2.72, -0.52),
+        Vec3::new(0.64, 2.76, 0.54),
+        chrome,
+    );
+    a.glow.cyl(
+        Vec3::new(0.0, 2.52, 0.51),
+        0.15,
+        0.02,
+        Quat::from_rotation_x(FRAC_PI_2),
+        Color::WHITE,
+    );
+    a.glow.cyl(
+        Vec3::new(0.0, 2.52, 0.525),
+        0.1,
+        0.02,
+        Quat::from_rotation_x(FRAC_PI_2),
+        col,
+    );
     // Window full of bottles, standing out from the cabinet front.
-    props::boxr(&mut a.paint, Vec3::new(-0.54, 0.88, 0.5), Vec3::new(0.26, 2.14, 0.52), Color::srgb(0.15, 0.15, 0.17));
+    props::boxr(
+        &mut a.paint,
+        Vec3::new(-0.54, 0.88, 0.5),
+        Vec3::new(0.26, 2.14, 0.52),
+        Color::srgb(0.15, 0.15, 0.17),
+    );
     for sx in [-0.54f32, 0.26] {
-        props::boxr(&mut a.metal, Vec3::new(sx - 0.025, 0.88, 0.5), Vec3::new(sx + 0.025, 2.14, 0.66), chrome);
+        props::boxr(
+            &mut a.metal,
+            Vec3::new(sx - 0.025, 0.88, 0.5),
+            Vec3::new(sx + 0.025, 2.14, 0.66),
+            chrome,
+        );
     }
     for y in [0.88f32, 2.14] {
-        props::boxr(&mut a.metal, Vec3::new(-0.565, y - 0.025, 0.5), Vec3::new(0.285, y + 0.025, 0.66), chrome);
+        props::boxr(
+            &mut a.metal,
+            Vec3::new(-0.565, y - 0.025, 0.5),
+            Vec3::new(0.285, y + 0.025, 0.66),
+            chrome,
+        );
     }
     for row in 0..3 {
         let y = 1.0 + row as f32 * 0.38;
-        props::boxr(&mut a.metal, Vec3::new(-0.52, y - 0.02, 0.52), Vec3::new(0.24, y, 0.64), chrome);
+        props::boxr(
+            &mut a.metal,
+            Vec3::new(-0.52, y - 0.02, 0.52),
+            Vec3::new(0.24, y, 0.64),
+            chrome,
+        );
         for i in 0..4 {
             let x = -0.42 + i as f32 * 0.18;
-            a.glow.cyl(Vec3::new(x, y + 0.12, 0.58), 0.045, 0.2, Quat::IDENTITY, col);
-            a.glow.cyl(Vec3::new(x, y + 0.26, 0.58), 0.018, 0.08, Quat::IDENTITY, Color::WHITE);
+            a.glow.cyl(
+                Vec3::new(x, y + 0.12, 0.58),
+                0.045,
+                0.2,
+                Quat::IDENTITY,
+                col,
+            );
+            a.glow.cyl(
+                Vec3::new(x, y + 0.26, 0.58),
+                0.018,
+                0.08,
+                Quat::IDENTITY,
+                Color::WHITE,
+            );
         }
     }
-    a.glass.cuboid(Vec3::new(-0.14, 1.51, 0.655), Vec3::new(0.78, 1.24, 0.01), Color::srgb(0.75, 0.85, 0.95));
+    a.glass.cuboid(
+        Vec3::new(-0.14, 1.51, 0.655),
+        Vec3::new(0.78, 1.24, 0.01),
+        Color::srgb(0.75, 0.85, 0.95),
+    );
     // Buttons, screen and coin slot.
-    a.glow.cuboid(Vec3::new(0.42, 1.9, 0.505), Vec3::new(0.18, 0.12, 0.02), Color::srgb(0.85, 1.0, 0.9));
+    a.glow.cuboid(
+        Vec3::new(0.42, 1.9, 0.505),
+        Vec3::new(0.18, 0.12, 0.02),
+        Color::srgb(0.85, 1.0, 0.9),
+    );
     for row in 0..4 {
         for c in 0..2 {
-            a.glow.cuboid(Vec3::new(0.37 + c as f32 * 0.1, 1.65 - row as f32 * 0.1, 0.505), Vec3::new(0.06, 0.05, 0.02), if (row + c) % 2 == 0 { col } else { Color::WHITE });
+            a.glow.cuboid(
+                Vec3::new(0.37 + c as f32 * 0.1, 1.65 - row as f32 * 0.1, 0.505),
+                Vec3::new(0.06, 0.05, 0.02),
+                if (row + c) % 2 == 0 {
+                    col
+                } else {
+                    Color::WHITE
+                },
+            );
         }
     }
-    props::boxr(&mut a.metal, Vec3::new(0.38, 1.1, 0.5), Vec3::new(0.46, 1.25, 0.52), chrome);
-    a.paint.cuboid(Vec3::new(0.42, 1.18, 0.525), Vec3::new(0.012, 0.08, 0.01), black);
+    props::boxr(
+        &mut a.metal,
+        Vec3::new(0.38, 1.1, 0.5),
+        Vec3::new(0.46, 1.25, 0.52),
+        chrome,
+    );
+    a.paint.cuboid(
+        Vec3::new(0.42, 1.18, 0.525),
+        Vec3::new(0.012, 0.08, 0.01),
+        black,
+    );
     // Dispenser.
-    props::boxr(&mut a.paint, Vec3::new(-0.45, 0.25, 0.48), Vec3::new(0.2, 0.62, 0.52), black);
-    props::boxr(&mut a.metal, Vec3::new(-0.43, 0.42, 0.51), Vec3::new(0.18, 0.6, 0.53), Color::srgb(0.25, 0.25, 0.27));
+    props::boxr(
+        &mut a.paint,
+        Vec3::new(-0.45, 0.25, 0.48),
+        Vec3::new(0.2, 0.62, 0.52),
+        black,
+    );
+    props::boxr(
+        &mut a.metal,
+        Vec3::new(-0.43, 0.42, 0.51),
+        Vec3::new(0.18, 0.6, 0.53),
+        Color::srgb(0.25, 0.25, 0.27),
+    );
     a
 }
 
@@ -908,9 +1373,16 @@ fn art_meshes(
     parent: Option<Entity>,
     marker: impl Fn(&mut EntityCommands),
 ) {
-    for (kit, mat) in [art.paint, art.metal, art.glow, art.glass].into_iter().zip(mats.iter()) {
+    for (kit, mat) in [art.paint, art.metal, art.glow, art.glass]
+        .into_iter()
+        .zip(mats.iter())
+    {
         if let Some(mesh) = kit.build() {
-            let mut e = commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(mat.clone()), Transform::default()));
+            let mut e = commands.spawn((
+                Mesh3d(meshes.add(mesh)),
+                MeshMaterial3d(mat.clone()),
+                Transform::default(),
+            ));
             marker(&mut e);
             if let Some(p) = parent {
                 let id = e.id();
@@ -998,7 +1470,11 @@ pub fn spawn_map(
     }
 
     // Sun by day, a pale moon by night.
-    let (sun, sun_color) = if night { (layout.sun * 0.04, Color::srgb(0.6, 0.7, 1.0)) } else { (layout.sun, Color::WHITE) };
+    let (sun, sun_color) = if night {
+        (layout.sun * 0.04, Color::srgb(0.6, 0.7, 1.0))
+    } else {
+        (layout.sun, Color::WHITE)
+    };
     commands.spawn((
         InGameEntity,
         DirectionalLight {
@@ -1015,7 +1491,11 @@ pub fn spawn_map(
         let to_center = -*spot;
         let quarter = (to_center.x.atan2(to_center.z) / FRAC_PI_2).round();
         let yaw = quarter * FRAC_PI_2;
-        let body = if (quarter as i32).rem_euclid(2) == 1 { Vec3::new(1.0, 2.4, 1.2) } else { Vec3::new(1.2, 2.4, 1.0) };
+        let body = if (quarter as i32).rem_euclid(2) == 1 {
+            Vec3::new(1.0, 2.4, 1.2)
+        } else {
+            Vec3::new(1.2, 2.4, 1.0)
+        };
         let root = commands
             .spawn((
                 InGameEntity,
@@ -1032,7 +1512,14 @@ pub fn spawn_map(
             ))
             .id();
         commands.entity(root).add_child(holder);
-        art_meshes(commands, meshes, &mats, perk_art(perk), Some(holder), |_| {});
+        art_meshes(
+            commands,
+            meshes,
+            &mats,
+            perk_art(perk),
+            Some(holder),
+            |_| {},
+        );
         let light = commands
             .spawn((
                 PointLight {

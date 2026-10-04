@@ -88,18 +88,51 @@ pub fn ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<
 
 /// Enemies are person-shaped with their origin at the feet. Returns the hit
 /// distance and whether it was a headshot.
-pub fn ray_enemy(origin: Vec3, dir: Vec3, feet: Vec3, scale: f32) -> Option<(f32, bool)> {
+pub fn ray_enemy(
+    origin: Vec3,
+    dir: Vec3,
+    feet: Vec3,
+    scale: f32,
+    crawl: bool,
+) -> Option<(f32, Zone)> {
+    if crawl {
+        // Lying on the ground: the head is low and the body is a long lump.
+        let head = ray_sphere(origin, dir, feet + Vec3::Y * 0.42 * scale, 0.24 * scale);
+        let body = ray_sphere(origin, dir, feet + Vec3::Y * 0.3 * scale, 0.5 * scale);
+        return match (head, body) {
+            (Some(h), Some(b)) if b < h - 0.15 => Some((b, Zone::Body)),
+            (Some(h), _) => Some((h, Zone::Head)),
+            (None, Some(b)) => Some((b, Zone::Body)),
+            _ => None,
+        };
+    }
     let head = ray_sphere(origin, dir, feet + Vec3::Y * 1.78 * scale, 0.24 * scale);
-    let body = [(1.3, 0.36), (0.95, 0.34), (0.45, 0.3)]
+    let parts = [
+        (1.3, 0.36, Zone::Body),
+        (0.95, 0.34, Zone::Body),
+        (0.62, 0.26, Zone::Legs),
+        (0.28, 0.24, Zone::Legs),
+    ];
+    let body = parts
         .iter()
-        .filter_map(|(y, r)| ray_sphere(origin, dir, feet + Vec3::Y * y * scale, r * scale))
-        .min_by(|a, b| a.total_cmp(b));
+        .filter_map(|(y, r, z)| {
+            ray_sphere(origin, dir, feet + Vec3::Y * y * scale, r * scale).map(|t| (t, *z))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
     match (head, body) {
-        (Some(h), Some(b)) if b < h => Some((b, false)),
-        (Some(h), _) => Some((h, true)),
-        (None, Some(b)) => Some((b, false)),
+        (Some(h), Some(b)) if b.0 < h => Some(b),
+        (Some(h), _) => Some((h, Zone::Head)),
+        (None, Some(b)) => Some(b),
         (None, None) => None,
     }
+}
+
+/// Where a shot hit an enemy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Zone {
+    Head,
+    Body,
+    Legs,
 }
 
 /// Distance to the first wall or floor hit along the ray.
@@ -128,7 +161,9 @@ pub fn line_of_sight(a: Vec3, b: Vec3, colliders: &Boxes) -> bool {
 
 pub struct ShotHit {
     pub dist: f32,
+    /// The enemy hit and whether it was a headshot.
     pub enemy: Option<(Entity, bool)>,
+    pub legs: bool,
 }
 
 /// Finds the closest enemy hit before any wall.
@@ -137,19 +172,21 @@ pub fn trace_shot(
     dir: Vec3,
     max: f32,
     colliders: &Boxes,
-    enemies: impl Iterator<Item = (Entity, Vec3, f32)>,
+    enemies: impl Iterator<Item = (Entity, Vec3, f32, bool)>,
 ) -> ShotHit {
     let wall = ray_world(origin, dir, max, colliders);
     let mut best = ShotHit {
         dist: wall,
         enemy: None,
+        legs: false,
     };
-    for (e, feet, scale) in enemies {
-        if let Some((t, head)) = ray_enemy(origin, dir, feet, scale) {
+    for (e, feet, scale, crawl) in enemies {
+        if let Some((t, zone)) = ray_enemy(origin, dir, feet, scale, crawl) {
             if t < best.dist {
                 best = ShotHit {
                     dist: t,
-                    enemy: Some((e, head)),
+                    enemy: Some((e, zone == Zone::Head)),
+                    legs: zone == Zone::Legs,
                 };
             }
         }

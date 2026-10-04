@@ -13,7 +13,7 @@ pub struct ConfigPlugin;
 
 impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(load::<Settings>("settings.json"))
+        app.insert_resource(load::<Settings>("settings.json").with_all_keys())
             .insert_resource(load::<Profile>("profile.json"))
             .add_systems(Startup, apply_display)
             .add_systems(Update, (apply_display, save_on_change));
@@ -39,10 +39,11 @@ pub enum Action {
     Scoreboard,
     Emote,
     Ping,
+    Melee,
 }
 
 impl Action {
-    pub const ALL: [Action; 17] = [
+    pub const ALL: [Action; 18] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -60,6 +61,7 @@ impl Action {
         Action::Scoreboard,
         Action::Emote,
         Action::Ping,
+        Action::Melee,
     ];
 
     pub fn label(self) -> &'static str {
@@ -81,6 +83,7 @@ impl Action {
             Action::Scoreboard => "Scoreboard",
             Action::Emote => "Emotes",
             Action::Ping => "Ping",
+            Action::Melee => "Melee",
         }
     }
 
@@ -98,11 +101,12 @@ impl Action {
             Action::Ability1 => KeyCode::KeyQ,
             Action::Ability2 => KeyCode::KeyE,
             Action::Ultimate => KeyCode::KeyX,
-            Action::SwapWeapon => KeyCode::KeyV,
+            Action::SwapWeapon => KeyCode::KeyT,
             Action::Upgrades => KeyCode::KeyB,
             Action::Scoreboard => KeyCode::Tab,
             Action::Emote => KeyCode::KeyG,
             Action::Ping => KeyCode::KeyZ,
+            Action::Melee => KeyCode::KeyV,
         }
     }
 }
@@ -196,9 +200,21 @@ pub const RESOLUTIONS: [(u32, u32); 6] = [
 pub struct Settings {
     pub fov: f32,
     pub sensitivity: f32,
+    /// Master volume, then one per sound group (all 0-100).
     pub volume: f32,
+    pub vol_guns: f32,
+    pub vol_enemies: f32,
+    pub vol_movement: f32,
+    pub vol_effects: f32,
+    pub vol_interface: f32,
     pub display: DisplayMode,
     pub resolution: usize,
+    /// Graphics: shadow quality (0 off, 1 normal, 2 high), smoothed edges,
+    /// glow on bright things, and soft shading in corners.
+    pub shadows: u8,
+    pub antialias: bool,
+    pub bloom: bool,
+    pub ambient_occlusion: bool,
     pub keys: Vec<(Action, KeyCode)>,
     /// Cast mode for ability 1, ability 2 and the ultimate.
     pub cast_modes: [CastMode; 3],
@@ -210,8 +226,17 @@ impl Default for Settings {
             fov: 80.0,
             sensitivity: 1.0,
             volume: 80.0,
+            vol_guns: 100.0,
+            vol_enemies: 100.0,
+            vol_movement: 100.0,
+            vol_effects: 100.0,
+            vol_interface: 100.0,
             display: DisplayMode::Windowed,
             resolution: 0,
+            shadows: 2,
+            antialias: true,
+            bloom: true,
+            ambient_occlusion: false,
             keys: Action::ALL.iter().map(|a| (*a, a.default_key())).collect(),
             cast_modes: [CastMode::Quick; 3],
         }
@@ -239,6 +264,29 @@ impl Settings {
             Some(entry) => entry.1 = key,
             None => self.keys.push((action, key)),
         }
+    }
+
+    /// Settings saved by an older version miss newer actions: give each one
+    /// its default key, or a free key if that one is taken.
+    fn with_all_keys(mut self) -> Self {
+        for action in Action::ALL {
+            if self.keys.iter().any(|(a, _)| *a == action) {
+                continue;
+            }
+            let taken = |k: KeyCode, keys: &[(Action, KeyCode)]| keys.iter().any(|(_, x)| *x == k);
+            let key = [
+                action.default_key(),
+                KeyCode::KeyT,
+                KeyCode::KeyH,
+                KeyCode::KeyN,
+                KeyCode::KeyM,
+            ]
+            .into_iter()
+            .find(|k| !taken(*k, &self.keys))
+            .unwrap_or(action.default_key());
+            self.keys.push((action, key));
+        }
+        self
     }
 
     pub fn reset_keys(&mut self) {
@@ -280,6 +328,11 @@ pub struct Profile {
     pub best_round: u32,
     pub extractions: u32,
     pub last_address: String,
+    /// Career experience from every match (see progression.rs).
+    pub career_xp: u32,
+    /// The gun brought into matches, and its attachments.
+    pub loadout_gun: Option<u8>,
+    pub loadout_attach: u8,
 }
 
 impl Default for Profile {
@@ -297,11 +350,30 @@ impl Default for Profile {
             best_round: 0,
             extractions: 0,
             last_address: String::new(),
+            career_xp: 0,
+            loadout_gun: None,
+            loadout_attach: 0,
         }
     }
 }
 
 impl Profile {
+    /// The loadout to send to the host, if one is picked and allowed.
+    pub fn loadout(&self) -> Option<(u8, crate::data::Attach)> {
+        let level = crate::progression::career(self.career_xp).0;
+        let gun = self
+            .loadout_gun
+            .filter(|g| crate::progression::gun_unlocked(level, *g))?;
+        Some((
+            gun,
+            crate::progression::allowed_attach(
+                level,
+                gun,
+                crate::data::Attach(self.loadout_attach),
+            ),
+        ))
+    }
+
     /// The skin this player shows on `gun`.
     pub fn skin_for(&self, gun: u8) -> u8 {
         crate::data::skin_for(self.skin, &self.gun_skins, gun)

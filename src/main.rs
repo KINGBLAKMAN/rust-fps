@@ -4,34 +4,39 @@
 //! command line with `host` or `join <address>`. See README.md.
 
 /// The game's version, from Cargo.toml (major.minor, e.g. "v4.0").
-pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"));
+pub const VERSION: &str = concat!(
+    "v",
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
 
 mod abilities;
-mod avatars;
+mod audio;
 mod config;
 mod data;
 mod emotes;
 mod fx;
 mod game;
-mod gunmodels;
-mod hands;
-mod humanoid;
-mod kit;
+mod graphics;
 mod hud;
 mod maps;
-mod nav;
+mod models;
+// Shorter paths for the most used pieces of the map and model folders.
+use fx::auras;
+use maps::{nav, props, strips};
+use models::{avatars, gunmodels, hands, humanoid, kit, skins};
 mod net;
 mod physics;
 mod pings;
 mod player;
-mod props;
+mod progression;
 mod rig;
-mod strips;
 mod sim;
-mod skins;
 mod ui;
 mod viewmodel;
 mod weapons;
+mod zombies;
 
 use bevy::prelude::*;
 use bevy::window::CursorGrabMode;
@@ -121,6 +126,8 @@ pub struct PlayerInfo {
     pub skin: u8,
     /// Gun-specific skins per gun id (255 for none).
     pub gun_skins: Vec<u8>,
+    /// The gun (and attachments) this player brought for a wall board.
+    pub loadout: Option<(u8, data::Attach)>,
     pub ready: bool,
 
     /// Feet position.
@@ -179,6 +186,7 @@ impl PlayerInfo {
             character,
             skin,
             gun_skins: Vec::new(),
+            loadout: None,
             ready: false,
             pos: [0.0; 3],
             yaw: 0.0,
@@ -265,9 +273,19 @@ impl Roster {
 pub enum BoxState {
     #[default]
     Idle,
-    Rolling { player: u8, time: f32 },
-    Offer { player: u8, gun: u8, attach: data::Attach, time: f32 },
-    Moving { time: f32 },
+    Rolling {
+        player: u8,
+        time: f32,
+    },
+    Offer {
+        player: u8,
+        gun: u8,
+        attach: data::Attach,
+        time: f32,
+    },
+    Moving {
+        time: f32,
+    },
 }
 
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
@@ -302,6 +320,42 @@ pub struct MatchState {
     pub doors: u8,
     /// Night version of the map (picked by the host in the lobby).
     pub night: bool,
+    pub sandbox: Sandbox,
+}
+
+/// Sandbox mode: a solo practice match with tools (F1) to spawn zombies,
+/// try any gun and attachments, and switch waves, damage and cooldowns off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sandbox {
+    pub on: bool,
+    /// Rounds run on their own (off: only the zombies you spawn).
+    pub waves: bool,
+    /// No damage taken and endless ammo.
+    pub god: bool,
+    /// No ability cooldowns and the ultimate always ready.
+    pub free_abilities: bool,
+}
+
+/// A sandbox tool used by a player (only works in sandbox mode).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum DevCmd {
+    /// Zombies in front of `at`: kind 0 walker, 1 spitter, 2 brute, 3 crawler.
+    Spawn {
+        kind: u8,
+        count: u8,
+        at: [f32; 3],
+        dir: [f32; 3],
+    },
+    Gun {
+        gun: u8,
+        attach: data::Attach,
+    },
+    /// 0 waves, 1 god mode, 2 free abilities.
+    Toggle(u8),
+    Points,
+    NextRound,
+    KillAll,
+    LevelUp,
 }
 
 impl MatchState {
@@ -330,11 +384,23 @@ pub struct ShotQueue(pub Vec<(u8, Shot)>);
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum PlayerAction {
     Interact,
-    /// `cook`: seconds a grenade was held before the throw.
-    Ability { slot: u8, origin: [f32; 3], dir: [f32; 3], cook: f32 },
+    /// A knife slash from `origin` facing `dir`.
+    Melee {
+        origin: [f32; 3],
+        dir: [f32; 3],
+    },
+    Ability {
+        slot: u8,
+        origin: [f32; 3],
+        dir: [f32; 3],
+    },
     Choose(u8),
     /// Mark a spot (or an enemy by net id; u32::MAX for none).
-    Ping { pos: [f32; 3], target: u32 },
+    Ping {
+        pos: [f32; 3],
+        target: u32,
+    },
+    Dev(DevCmd),
 }
 
 /// Actions waiting for the host: (player, sequence number, action).
@@ -377,6 +443,10 @@ pub struct EnemyStatus {
     pub flash: f32,
     pub burning: bool,
     pub slowed: bool,
+    /// Legs shot out.
+    pub crawler: bool,
+    /// Mid-swing (or spitting).
+    pub attacking: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -475,6 +545,15 @@ fn main() {
         gunmodels::GunModelPlugin,
         viewmodel::ViewModelPlugin,
     ))
-    .add_plugins((rig::RigPlugin, emotes::EmotePlugin, pings::PingPlugin))
+    .add_plugins(audio::AudioPlugin)
+    .add_plugins((
+        rig::RigPlugin,
+        zombies::ZombiePlugin,
+        auras::AuraPlugin,
+        progression::ProgressionPlugin,
+        graphics::GraphicsPlugin,
+        emotes::EmotePlugin,
+        pings::PingPlugin,
+    ))
     .run();
 }
