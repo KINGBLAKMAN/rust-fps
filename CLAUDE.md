@@ -22,7 +22,7 @@ Rust FPS: a co-op zombie wave-survival shooter in Rust with Bevy 0.16. Solo, or 
 
 ## Code map
 
-- `main.rs`: app setup, shared state (`Roster`, `MatchState`, `PlayerAction`) and system ordering. Systems run in `Phase` sets in this order: NetIn, Local, Sim, NetOut, Present.
+- `main.rs`: app setup, shared state (`Roster`, `MatchState`, `PlayerAction`) and system ordering. Systems run in `Phase` sets in this order: NetIn, Local (only in a match), Sim (only on the host, while the match runs), NetOut, Present.
 - `data.rs`: all tables (guns, attachments, characters, abilities, skins, perks). Start here when balancing.
 - `sim.rs`: the host-only simulation (rounds, zombie AI, damage, box, perks, sandbox). Clients never run it.
 - `net.rs`: UDP and serde messages. The host is authoritative; clients send actions, and the host sends snapshots.
@@ -31,6 +31,12 @@ Rust FPS: a co-op zombie wave-survival shooter in Rust with Bevy 0.16. Solo, or 
 - `models/`: the shape kit (`kit.rs`) that everything is modelled with, gun models, skins, hands and other players.
 - `rig/`: skeleton and animation for heroes and zombies. `fx/`: effects and auras. `audio/`: synthesised sounds. `ui/`: menus.
 - `progression.rs`: career XP, unlocks and loadouts. `graphics.rs`: applies the graphics settings.
+
+## Working with Jonah
+
+- Jonah owns the game and plays it on Windows. Every build they get must carry a version number.
+- Jonah sends feature lists as markdown files. Flesh the ideas out properly, but don't go overboard.
+- Deliver the Windows zip, push to GitHub, and say plainly what changed and what couldn't be tested.
 
 ## Conventions
 

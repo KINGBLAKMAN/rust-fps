@@ -34,15 +34,16 @@ Released: the Windows zip, the all-versions zip (v1 to v6), and the code pushed 
 ## Known issues and loose ends
 
 - The public IP lookup (api.ipify.org, then checkip.amazonaws.com, then icanhazip.com) could only be tested against a fake service. Check it on a real PC.
-- Multiplayer has only been tested on one machine with several game instances. FX and pings are not resent if a packet is lost (purchases and abilities are).
-- Spawning in the sandbox ignores walls: zombies always appear 9 m in front of you.
+- Multiplayer has only been tested on one machine running several copies of the game.
+- Effects the host sends out (tracers, explosions, other players' pings) ride in snapshots and aren't resent if a packet is lost. Actions sent to the host (purchases, abilities, pings) are resent until confirmed.
+- Sandbox spawns ignore walls: zombies always appear 9 m in front of you, even if that's inside a wall.
 - Soft corner shading (SSAO) is untested on real GPUs.
 
 ## Ideas not done yet
 
-- Reliable resend for FX and pings.
+- Resend important effects (pings, power-up pickups) until clients confirm them.
 - More loadout slots (a second gun, a perk).
-- An end-of-match screen that shows the unlock you just earned with a model preview.
+- Show a 3D preview of a newly unlocked gun on the end screen (it only lists the name now).
 
 ## Next session
 
