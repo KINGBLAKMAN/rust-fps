@@ -2,7 +2,7 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v6.0 (2026-10-04)
+## Current version: v6.1 (2026-10-04)
 
 Released: the Windows zip, the all-versions zip (v1 to v6), and the code pushed to GitHub.
 
@@ -30,6 +30,7 @@ Released: the Windows zip, the all-versions zip (v1 to v6), and the code pushed 
   - Career unlocks and loadouts, an attachment guide and sandbox mode.
   - Click-to-reveal public IP and working graphics settings.
   - Code split into folders.
+- v6.1: Ctrl+V pastes into the join address box (it used to type a "v", which made Windows report os error 11001), typed addresses are tidied (spaces, http://, commas), and clearer join errors.
 
 ## Known issues and loose ends
 

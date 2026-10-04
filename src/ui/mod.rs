@@ -1360,16 +1360,19 @@ fn autostart(
 
 fn text_input(
     mut events: EventReader<KeyboardInput>,
+    mut ctrl: Local<bool>,
     mut focus: ResMut<Focus>,
     mut profile: ResMut<Profile>,
     mut requests: EventWriter<PartyRequest>,
 ) {
-    if *focus == Focus::None {
-        events.clear();
-        return;
-    }
     for ev in events.read() {
-        if ev.state != ButtonState::Pressed {
+        // Ctrl is tracked from the events in order: a quick Ctrl+V can press
+        // and release both keys within one frame.
+        if matches!(ev.key_code, KeyCode::ControlLeft | KeyCode::ControlRight) {
+            *ctrl = ev.state == ButtonState::Pressed;
+            continue;
+        }
+        if ev.state != ButtonState::Pressed || *focus == Focus::None {
             continue;
         }
         let (value, max) = match *focus {
@@ -1377,6 +1380,19 @@ fn text_input(
             Focus::Address => (&mut profile.last_address, 64),
             Focus::None => return,
         };
+        // Ctrl+V pastes; other Ctrl shortcuts type nothing.
+        if *ctrl {
+            if ev.key_code == KeyCode::KeyV {
+                let pasted = arboard::Clipboard::new().and_then(|mut c| c.get_text()).unwrap_or_default();
+                for ch in pasted.trim().chars() {
+                    let ok = ch.is_ascii_graphic() || (ch == ' ' && *focus == Focus::Name);
+                    if ok && value.chars().count() < max {
+                        value.push(ch);
+                    }
+                }
+            }
+            continue;
+        }
         match &ev.logical_key {
             Key::Enter => {
                 if *focus == Focus::Address {

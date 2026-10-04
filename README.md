@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v6.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v6); small updates bump the minor number (v6.1, v6.2...).
+Current version: **v6.1** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v6); small updates bump the minor number (v6.1, v6.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -23,7 +23,7 @@ sudo apt install g++ pkg-config libx11-dev libasound2-dev libudev-dev libxkbcomm
 
 Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the menus:
 
-- **Play Solo**, **Host a Party** or **Join a Party** (type the host's address).
+- **Play Solo**, **Host a Party** or **Join a Party** (type or paste the host's address with Ctrl+V).
 - **Loadout**: pick the gun you bring into matches and its attachments (see Career below).
 - **Characters**: pick one of 6 characters (Striker, Warden, Ronin, Tinker, Blaze, Valkyrie).
 - **Gun Skins**: open crates with your spins and equip skins.

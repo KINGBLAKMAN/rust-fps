@@ -462,8 +462,20 @@ fn apply_launch(
     }
 }
 
+/// Tidies up a typed or pasted address: drops spaces, a leading
+/// "http://", a trailing "/" and turns commas into dots.
+pub fn clean_address(target: &str) -> String {
+    let mut t: String = target.chars().filter(|c| !c.is_whitespace()).collect();
+    for scheme in ["http://", "https://", "udp://"] {
+        if let Some(rest) = t.strip_prefix(scheme) {
+            t = rest.to_string();
+        }
+    }
+    t.replace(',', ".").trim_end_matches(['/', '.']).to_string()
+}
+
 fn resolve(target: &str) -> Result<SocketAddr, String> {
-    let target = target.trim();
+    let target = clean_address(target);
     if target.is_empty() {
         return Err("Type the host's address first".into());
     }
@@ -472,9 +484,19 @@ fn resolve(target: &str) -> Result<SocketAddr, String> {
     } else {
         format!("{target}:{DEFAULT_PORT}")
     };
+    if let Ok(addr) = with_port.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    let looks_like_ip = target.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':');
     with_port
         .to_socket_addrs()
-        .map_err(|e| format!("Can't find {with_port}: {e}"))?
+        .map_err(|_| {
+            if looks_like_ip {
+                format!("\"{target}\" isn't a valid address. It should be four numbers with dots, like 192.168.1.20")
+            } else {
+                format!("Couldn't find a computer called \"{target}\". Type the host's address as numbers, like 192.168.1.20")
+            }
+        })?
         .find(SocketAddr::is_ipv4)
         .ok_or_else(|| format!("No IPv4 address for {with_port}"))
 }
@@ -1093,5 +1115,20 @@ fn say_goodbye(net: Res<Net>, mut exit: EventReader<AppExit>) {
         for addr in net.clients.keys() {
             net.send_to(&ServerMsg::Closed, *addr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses_are_tidied() {
+        assert_eq!(clean_address(" 47.12.34.56 "), "47.12.34.56");
+        assert_eq!(clean_address("http://47.12.34.56/"), "47.12.34.56");
+        assert_eq!(clean_address("47,12,34,56."), "47.12.34.56");
+        assert_eq!(clean_address("47. 12.34.56:7777"), "47.12.34.56:7777");
+        assert!(resolve("47.12.34.56").is_ok());
+        assert!(resolve("v47.12.34.56").is_err());
     }
 }
