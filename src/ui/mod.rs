@@ -757,7 +757,7 @@ fn character_screen(commands: &mut Commands, profile: &Profile, settings: &Setti
                 let level = profile.char_level(c).0;
                 button_sized(
                     r,
-                    format!("{}  Lv {level}", c.name()),
+                    format!("{}\nLv {level}", c.name()),
                     UiAction::SelectCharacter(c),
                     Some(150.0),
                     profile.character == c,
@@ -1847,7 +1847,7 @@ fn handle_buttons(
                 }
                 kit[slot] = a;
                 if crate::data::valid_kit(c, profile.char_level(c).0, kit) {
-                    profile.kits.insert(c, kit);
+                    profile.class_kits.insert(c, kit);
                 }
             }
             UiAction::SelectCrate(i) => {

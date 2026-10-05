@@ -2,9 +2,9 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v11.0 (2026-10-05)
+## Current version: v12.0 (2026-10-05)
 
-Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
+Released: the v12 Windows zip, and the code pushed to GitHub on branch `claude/ecstatic-maxwell-eersoc` (v11.0 and earlier are on `claude/project-thread-7oz85t`; main still has v7.0). The all-versions zip lives outside this cloud session and wasn't updated for v12.
 
 ## Version history
 
@@ -71,6 +71,13 @@ Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed
   - Charges: `PlayerInfo::charges`; `cooldowns[s]` is now the time to the next charge, refilled in `player_timers`. Clients check `charges > 0`.
   - Copies: the host calls `powers::cast` once per copy with the aim turned by `COPY_SPREAD` (0.2 rad) steps either side. Self-centred abilities just stack.
   - Zombie health +10% per map (`spawn_zombie`).
+- v12 (Game Overhaul part 5, new classes):
+  - Six classes replace the old ones: Bulwark, Medic, Revenant, Demolisher, Chemist and Ranger (`Character` in `data.rs`; serde aliases carry old saves over). New hero models in `rig/heroes.rs`.
+  - 30 new abilities, 5 per class: two abilities and an ultimate at level 1, an ability at 3 and an ultimate at 6 (`Ability`, `ABILITY_DEFS`). Host logic in `sim/powers.rs`: thrown gadgets (`GrenadeBrain`, `Nade`), claymores and bear traps (`MineBrain`), the med drone and Army of the Dead warriors (`TurretBrain`), delayed strikes, pull/push `Forces`, and zones (`powers::zone`: Fortress, heal, fire, Reaper, acid, toxic, Plague Bloom, which grows).
+  - Zombie status effects: poison, Hunter's Mark (+50% damage taken) and drain healing (`powers::effect` bits in the damage element mask).
+  - Looks: one-shot ability effects in `fx/spells.rs` (`Fx::Spell`: pos/dir/size meaning is written in `cast()`), things falling from the sky (`Fx::Falling`), zone visuals in `fx/mod.rs` (`zone_fx`; Reaper's whirling scythes are `Scythe` children; Catalyst ends zones early with `Fx::ZoneEnd`). Auras stay lit for Chain Reaction, Rally Cry and Fortress.
+  - First person: the left hand holds the real gadget models (`projectiles::missile_kit`, the drone), and the Revenant swings a two-handed scythe for Scythe Sweep and Reaper (`viewmodel.rs`).
+  - Gadget models in `models/projectiles.rs`, warrior and drone in `models/avatars.rs`. `PROTOCOL_VERSION` 12.
 
 ## Known issues and loose ends
 
@@ -89,10 +96,13 @@ Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed
 - v10 weapon abilities, alt fire and the Armory were checked solo under lavapipe (buff timer, grenade and its recharge, loadout screen). Balance (buff numbers, grenade damage, slug damage, Armory price) is a first pass. Not yet tested in co-op.
 - Assault rifles lost aim down sights to the grenade; the Falcon AR still shows its built-in scope.
 - v11 augments were tested with a hook giving full augments (4 fanned grenades, 4 dash charges). Copies of self-centred abilities (Frost Nova, Thunder Clap, Heal Pulse) simply stack their damage or healing; the aiming preview still shows one copy. Balance untested.
+- v12 abilities were each cast once, solo, under lavapipe at about 2 fps, with a test hook that put every ability in turn into slot 1 and cast it at spawned zombies. Every one goes off with its look, but the numbers (first guesses plus one balance pass: Fortress burn 60 to 80, Earthshaker waves 450 to 700, Healing Grenade mist 12 to 8 a tick, Scythe Sweep 110 to 140, Toxic Cloud 20 to 28 a tick, Arrow Storm 36 arrows of 260 to 48 of 420) haven't been played properly, solo or in co-op. Resurrection could only be tested solo (no one to revive). Augmented copies of v12 abilities weren't tried.
+- The first-person scythe swing and the held gadgets (canister, sticky bomb, flask, trap, claymore, dart, drone) were checked at 2 fps; their exact angles and sizes in the hand may want tweaking on a real PC.
+- The six v12 hero models were checked in the lookdev lineup, side and heads views. The Ranger's mantle and hood were fixed; the others are as first built.
 
 ## Ideas not done yet
 
-- Game Overhaul plan still to do: v12 character kit and model rework, v13 procedural maps plus 10 more map themes, v14 sound design and a menu rework (bigger text).
+- Game Overhaul plan still to do: v13 procedural maps plus 10 more map themes, v14 sound design and a menu rework (bigger text).
 
 - Part 7 of the art brief: skin rarity looks (a different finish per rarity).
 - Jonah likes big maps with many rooms to traverse and explore; keep new maps that way.
@@ -102,14 +112,8 @@ Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed
 
 ## Next session
 
-Jonah's "Game Overhaul" list is split into versions (agreed plan, 2026-10-05):
+v12.0 is released. Next on the Game Overhaul plan:
+- v13.0: procedural maps for each run, plus 10 new map themes. Jonah likes big maps with many rooms to explore.
+- v14.0: a sound design pass and a menu rework (bigger text, decorative but simple).
 
-- v8.1: fewer power-ups, slower cooldowns (done).
-- v9.0: the run: no COD doors, survive rounds, level up and pick upgrades, map boss, teleporter to the next map, 5 maps then a final boss, harder each map (done).
-- v10.0: classes (the 6 characters): 2 primaries and 2 secondaries each, 2 weapon abilities, 2 class abilities, weapon upgrades; alt fire on some guns instead of ADS.
-- v11.0: ability upgrades that scale (more daggers in a fan, two fireballs, extra dashes, more grenades), tuned over a 5-map run.
-- v12.0: character rework: detailed models, new ability visuals and animations.
-- v13.0: procedural maps per run, plus 10 new map themes.
-- v14.0: sound design pass and a menu rework (bigger text, decorative but simple).
-
-Start v10.0 (classes and alt fire) next.
+Small cleanups left from v12: `Fx::Spear`, `Fx::Beam`, `Fx::Nova` and `Fx::Cone` (and their meshes, `Pending`, `spear_kit`) are no longer sent by any ability; only the effects warm-up in `feel.rs` and the audio still mention them.

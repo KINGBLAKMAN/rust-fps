@@ -15,26 +15,27 @@ pub enum Unlock {
 }
 
 /// Guns you can bring from the start: every class's first choices.
-pub const STARTING_GUNS: [u8; 12] = [6, 9, 3, 13, 11, 16, 0, 1, 19, 4, 18, 2];
+pub const STARTING_GUNS: [u8; 11] = [10, 3, 20, 13, 6, 16, 1, 0, 19, 4, 2];
 
 /// What each career level unlocks (level 2 onwards): attachments, and the
 /// second gun choice of each class.
-pub const UNLOCKS: [Unlock; 15] = [
+pub const UNLOCKS: [Unlock; 16] = [
     Unlock::Attachment(0), // 2: Red Dot
-    Unlock::Gun(8),        // 3: Tempest Burst (Striker)
+    Unlock::Gun(11),       // 3: Stormfront Auto (Bulwark)
     Unlock::Attachment(3), // 4: Suppressor
-    Unlock::Gun(10),       // 5: Breacher 12 (Warden)
+    Unlock::Gun(8),        // 5: Tempest Burst (Medic)
     Unlock::Attachment(5), // 6: Foregrip
-    Unlock::Gun(20),       // 7: Twin Fangs (Ronin)
+    Unlock::Gun(7),        // 7: Ranger Rifle (Revenant)
     Unlock::Attachment(1), // 8: Holo Sight
-    Unlock::Gun(14),       // 9: Ripsaw LMG (Tinker)
+    Unlock::Gun(14),       // 9: Ripsaw LMG (Demolisher)
     Unlock::Attachment(7), // 10: Extended Mag
-    Unlock::Gun(12),       // 11: Double Barrel (Blaze)
+    Unlock::Gun(12),       // 11: Double Barrel (Chemist)
     Unlock::Attachment(4), // 12: Compensator
-    Unlock::Gun(15),       // 13: Longbow Sniper (Valkyrie)
+    Unlock::Gun(15),       // 13: Longbow Sniper (Ranger)
     Unlock::Attachment(6), // 14: Laser
-    Unlock::Gun(5),        // 15: Mamba Machine Pistol (Striker, Blaze)
+    Unlock::Gun(18),       // 15: Judge Revolver (Bulwark, Chemist)
     Unlock::Attachment(2), // 16: 3x Scope
+    Unlock::Gun(5),        // 17: Mamba Machine Pistol (Ranger)
 ];
 
 pub const MAX_CAREER_LEVEL: u32 = UNLOCKS.len() as u32 + 1;

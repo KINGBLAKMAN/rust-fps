@@ -299,7 +299,7 @@ pub fn movement(
     } else {
         1.0
     };
-    // Combat Stim: a third faster on your feet.
+    // Rally Cry: a third faster on your feet.
     let swift = 1.0
         + me.map_or(0.0, |m| m.stat(Stat::Swift)) * Stat::Swift.per_stack();
     let stim = if me.is_some_and(|m| m.stim > 0.0) {

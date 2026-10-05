@@ -124,6 +124,13 @@ pub enum Snd {
     MeleeSwing,
     MeleeHit,
     Throw,
+    Chain,
+    Twang,
+    Snap,
+    Shatter,
+    Hiss,
+    Wail,
+    Warcry,
 }
 
 impl Snd {
@@ -137,7 +144,9 @@ impl Snd {
             | ZombieDeath | Spit => Group::Enemies,
             Step | StepSoft | Jump | Land | Slide | PlayerHurt => Group::Movement,
             Explosion | BigExplosion | Fire | Ice | Heal | Zap | Slash | Whoosh | Orbital
-            | BladeStorm | Throw => Group::Effects,
+            | BladeStorm | Throw | Chain | Twang | Snap | Shatter | Hiss | Wail | Warcry => {
+                Group::Effects
+            }
             _ => Group::Interface,
         }
     }
@@ -484,6 +493,29 @@ fn build_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>) 
     );
     add(Whoosh, whoosh(0.35, 400.0, 1600.0, 550));
     add(Throw, whoosh(0.25, 500.0, 1300.0, 551));
+    add(Chain, chain(0.45, 580));
+    add(Twang, twang(196.0, 585));
+    add(Snap, snap(590));
+    add(Shatter, shatter(595));
+    add(Hiss, hiss(1.0, 600));
+    add(Wail, wail(1.2, 605));
+    add(
+        Warcry,
+        voice(
+            &Voice {
+                pitch: 150.0,
+                pitch_end: 120.0,
+                formants: (650.0, 1100.0),
+                formants_end: (750.0, 1200.0),
+                rasp: 0.35,
+                len: 0.9,
+                attack: 0.1,
+            },
+            610,
+        )
+        .mix(&thud(80.0, 0.3, 611), 0.0, 0.5)
+        .normalize(0.85),
+    );
     add(
         Orbital,
         render(1.0, {
@@ -738,32 +770,77 @@ fn fx_sounds(
             Fx::Dash { a, .. } => sounds.at(Snd::Whoosh, Vec3::from_array(a)),
             Fx::Slash { pos, .. } => sounds.at(Snd::Slash, Vec3::from_array(pos)),
             Fx::Cone { pos, .. } => sounds.at(Snd::Fire, Vec3::from_array(pos)),
-            Fx::Zone { pos, kind, .. } => sounds.at(
-                match kind {
-                    0 => Snd::BladeStorm,
-                    1 => Snd::Zap,
-                    4 => Snd::ShotThunder,
-                    _ => Snd::Fire,
-                },
-                Vec3::from_array(pos),
-            ),
+            Fx::Zone { pos, kind, .. } => {
+                use crate::sim::powers::zone;
+                let (snd, gain, pitch) = match kind {
+                    zone::FORTRESS => (Snd::MeleeHit, 1.0, 0.5),
+                    zone::FIRE => (Snd::Fire, 1.0, 1.0),
+                    zone::REAPER => (Snd::BladeStorm, 1.0, 0.75),
+                    zone::ACID => (Snd::Hiss, 0.7, 0.8),
+                    zone::PLAGUE => (Snd::Hiss, 0.8, 0.6),
+                    // Healing and toxic clouds come with their own sounds.
+                    _ => continue,
+                };
+                sounds.push(snd, Some(Vec3::from_array(pos)), gain, pitch);
+            }
+            Fx::ZoneEnd { .. } => {}
             Fx::Ping { pos, .. } => sounds.push(Snd::Ping, Some(Vec3::from_array(pos)), 1.0, 1.0),
             Fx::Cast { .. } => {}
-            Fx::Spell { ability, pos, .. } => {
+            Fx::Spell { ability, pos, size, .. } => {
                 use crate::data::Ability as A;
-                let snd = match ability {
-                    A::Dash | A::ShadowStep | A::ThousandCuts => Snd::Whoosh,
-                    A::Iaido | A::RisingDragon => Snd::Slash,
-                    A::Overdrive | A::CombatStim | A::SupplyDrop => Snd::PowerUp,
-                    A::RocketBarrage | A::Airstrike | A::MortarBattery => Snd::Throw,
-                    A::GlacierSpike => Snd::Ice,
-                    A::Fireball | A::FlameDash | A::MeteorShower | A::MagmaGeyser => Snd::Fire,
-                    A::ThunderClap | A::Bifrost | A::SpearRain => Snd::ShotThunder,
-                    _ => Snd::Whoosh,
+                let at = Some(Vec3::from_array(pos));
+                let first = size == 0.0;
+                let (snd, gain, pitch) = match ability {
+                    A::ShieldCharge => (Snd::MeleeHit, 1.0, 0.6),
+                    A::GroundPound => (Snd::ShotThunder, 1.0, 0.75),
+                    A::Fortress => (Snd::PowerUp, 1.0, 0.8),
+                    A::RallyCry => (Snd::Warcry, 1.0, 1.0),
+                    A::Earthshaker if first => (Snd::BigExplosion, 1.0, 0.7),
+                    A::Earthshaker => (Snd::ShotThunder, 0.7, 0.6),
+                    A::HealingGrenade => (Snd::Heal, 1.0, 1.0),
+                    A::NeurotoxinDart => (Snd::Hiss, 0.4, 1.5),
+                    A::Resurrection if first => (Snd::Heal, 1.0, 0.75),
+                    A::Resurrection => (Snd::PowerUp, 1.0, 1.0),
+                    A::MedDrone => (Snd::Heal, 0.25, 1.6),
+                    A::Sterilize => (Snd::Zap, 1.0, 0.55),
+                    A::ScytheSweep => (Snd::Slash, 1.0, 0.7),
+                    A::SoulChains => (Snd::Chain, 1.0, 1.0),
+                    A::Reaper => (Snd::BladeStorm, 1.0, 0.75),
+                    A::WraithStep => (Snd::Wail, 0.6, 1.3),
+                    A::ArmyOfTheDead if first => (Snd::Wail, 1.0, 0.7),
+                    A::ArmyOfTheDead => (Snd::Wail, 0.4, 1.1),
+                    A::StickyBomb => (Snd::Snap, 0.5, 1.5),
+                    A::BlastJump => (Snd::Whoosh, 0.6, 0.8),
+                    // The warning comes first, then the bomb lands.
+                    A::Payload if first => (Snd::BigExplosion, 1.0, 0.8),
+                    A::Payload => (Snd::Ping, 1.0, 0.6),
+                    A::Claymore => (Snd::ShotShotgun, 1.0, 0.8),
+                    A::ChainReaction => (Snd::PowerUp, 1.0, 0.7),
+                    A::AcidFlask => (Snd::Shatter, 1.0, 1.2),
+                    A::ToxicCloud => (Snd::Hiss, 1.0, 1.0),
+                    A::PlagueBloom => (Snd::Hiss, 1.0, 0.6),
+                    A::Catalyst if first => (Snd::Snap, 0.6, 1.4),
+                    A::Catalyst => (Snd::Explosion, 0.8, 1.3),
+                    A::Petrify if first => (Snd::Shatter, 0.8, 0.5),
+                    A::Petrify => (Snd::Ice, 1.0, 0.6),
+                    A::Grapple => (Snd::Throw, 1.0, 1.3),
+                    A::HuntersMark if first => (Snd::Twang, 1.0, 1.2),
+                    A::HuntersMark => (Snd::Ping, 0.4, 1.4),
+                    A::Deadeye if first => (Snd::Ping, 0.5, 1.6),
+                    A::Deadeye => (Snd::ShotSniper, 1.0, 1.0),
+                    A::BearTrap => (Snd::Snap, 1.0, 1.0),
+                    A::ArrowStorm => (Snd::Twang, 1.0, 0.9),
                 };
-                sounds.at(snd, Vec3::from_array(pos));
+                sounds.push(snd, at, gain, pitch);
             }
-            Fx::Falling { to, .. } => sounds.push(Snd::Whoosh, Some(Vec3::from_array(to)), 0.4, 0.6),
+            Fx::Falling { kind, to, .. } => {
+                let (gain, pitch) = if kind == crate::sim::powers::falling::BOMB {
+                    (1.0, 0.45)
+                } else {
+                    (0.25, 1.8)
+                };
+                sounds.push(Snd::Whoosh, Some(Vec3::from_array(to)), gain, pitch);
+            }
             Fx::Ring { pos, .. } => sounds.push(Snd::Whoosh, Some(Vec3::from_array(pos)), 0.5, 1.2),
         }
     }
@@ -964,6 +1041,7 @@ fn enemy_sounds(
         keep
     });
     // Fireballs spat by shooters.
+    use crate::sim::powers::look;
     let mut now: Vec<u32> = Vec::new();
     for (r, tf) in &projectiles {
         if r.kind == NetKind::Fireball {
@@ -972,11 +1050,19 @@ fn enemy_sounds(
                 sounds.at(Snd::Spit, tf.translation);
             }
         }
-        if r.kind == NetKind::Grenade && !shots.contains(&r.id) {
+        // Grenades and ability gadgets leaving a hand.
+        let snd = match r.kind {
+            NetKind::Grenade => Some((Snd::Throw, 1.0)),
+            NetKind::Missile(look::DART) => Some((Snd::Throw, 1.8)),
+            NetKind::Missile(look::CLAYMORE) => Some((Snd::Bolt, 0.8)),
+            NetKind::Missile(_) => Some((Snd::Throw, 1.0)),
+            _ => None,
+        };
+        if let Some((snd, pitch)) = snd {
             now.push(r.id);
-            sounds.at(Snd::Throw, tf.translation);
-        } else if r.kind == NetKind::Grenade {
-            now.push(r.id);
+            if !shots.contains(&r.id) {
+                sounds.push(snd, Some(tf.translation), 1.0, pitch);
+            }
         }
     }
     *shots = now;

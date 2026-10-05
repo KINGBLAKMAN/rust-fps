@@ -355,14 +355,15 @@ pub struct Profile {
     /// XP earned with each character (their character level).
     pub char_xp: HashMap<Character, u32>,
     /// The abilities picked for each character.
-    pub kits: HashMap<Character, [Ability; 3]>,
+    /// Renamed from `kits` in v12, when every ability changed.
+    pub class_kits: HashMap<Character, [Ability; 3]>,
 }
 
 impl Default for Profile {
     fn default() -> Self {
         Self {
             name: "Player".into(),
-            character: Character::Striker,
+            character: Character::Bulwark,
             spins: 1,
             owned_skins: vec![0],
             shards: 0,
@@ -377,7 +378,7 @@ impl Default for Profile {
             class_guns: HashMap::new(),
             gun_attach: HashMap::new(),
             char_xp: HashMap::new(),
-            kits: HashMap::new(),
+            class_kits: HashMap::new(),
         }
     }
 }
@@ -416,7 +417,7 @@ impl Profile {
     /// the saved one isn't allowed (yet).
     pub fn kit(&self, c: Character) -> [Ability; 3] {
         let level = self.char_level(c).0;
-        self.kits
+        self.class_kits
             .get(&c)
             .copied()
             .filter(|k| crate::data::valid_kit(c, level, *k))

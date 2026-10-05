@@ -12,9 +12,10 @@ use bevy::pbr::NotShadowCaster;
 use bevy::prelude::*;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::f32::consts::{FRAC_PI_2, TAU};
+use std::f32::consts::TAU;
 
 use crate::kit::{c, vertex_material, Kit};
+use crate::sim::powers::{zone as zk, PLAGUE_GROW, PLAGUE_MAX};
 use crate::{AppState, InGameEntity, Phase};
 
 pub struct FxPlugin;
@@ -40,9 +41,9 @@ impl Plugin for FxPlugin {
                     particles,
                     markers,
                     spells::fall,
-                    spells::movers,
-                    spells::sweeps,
-                    spells::rumbles,
+                    spells::warns,
+                    spells::twirls,
+                    spells::hooks,
                     spells::trails,
                     draw_lines,
                 )
@@ -118,13 +119,18 @@ pub enum Fx {
         dir: [f32; 3],
         range: f32,
     },
-    /// A lasting area effect: 0 blade storm, 1 tesla field, 2 fire pool,
-    /// 3 inferno. `follow` is a player id (255 stays put).
+    /// A lasting area effect (see `sim::powers::zone` for the kinds).
+    /// `follow` is a player id (255 stays put).
     Zone {
         pos: [f32; 3],
         radius: f32,
         life: f32,
         follow: u8,
+        kind: u8,
+    },
+    /// A zone of this kind at `pos` was used up early (Catalyst).
+    ZoneEnd {
+        pos: [f32; 3],
         kind: u8,
     },
     /// A player used an ability (for their cast animation and aura).
@@ -192,11 +198,6 @@ pub struct FxAssets {
     beam_outer: Handle<StandardMaterial>,
     marker_mat: Handle<StandardMaterial>,
     ghost_mat: Handle<StandardMaterial>,
-    blade: Handle<Mesh>,
-    /// Blade Storm kunai (crimson and gold) and their glowing trails.
-    blade_mats: [Handle<StandardMaterial>; 2],
-    trail_mats: [Handle<StandardMaterial>; 2],
-    tesla_mat: Handle<StandardMaterial>,
     tracer: Handle<StandardMaterial>,
     tracer_mesh: Handle<Mesh>,
     bolt: Handle<StandardMaterial>,
@@ -237,54 +238,6 @@ pub(crate) fn spear_kit() -> Kit {
             c(0.9, 0.95, 1.0),
         );
     }
-    k
-}
-
-/// A kunai for the Blade Storm: a leaf blade with a ridge and glowing edge,
-/// a cord-wrapped handle and a ring, pointing along -Z.
-fn kunai_kit() -> Kit {
-    let mut k = Kit::fine();
-    let steel = c(0.55, 0.57, 0.62);
-    let edge = c(1.0, 1.0, 1.0);
-    k.blob(
-        Vec3::new(0.0, 0.0, -0.32),
-        Vec3::new(0.11, 0.018, 0.3),
-        steel,
-    );
-    k.blob(
-        Vec3::new(0.0, 0.0, -0.32),
-        Vec3::new(0.125, 0.008, 0.31),
-        edge,
-    );
-    k.cuboid(
-        Vec3::new(0.0, 0.0, -0.3),
-        Vec3::new(0.016, 0.03, 0.5),
-        c(0.3, 0.3, 0.34),
-    );
-    k.cone(
-        Vec3::new(0.0, 0.0, -0.62),
-        0.03,
-        0.1,
-        Quat::from_rotation_x(-FRAC_PI_2),
-        edge,
-    );
-    k.cyl_z(Vec3::new(0.0, 0.0, 0.06), 0.025, 0.2, c(0.1, 0.08, 0.08));
-    for i in 0..5 {
-        k.torus(
-            Vec3::new(0.0, 0.0, -0.02 + i as f32 * 0.035),
-            0.008,
-            0.026,
-            Quat::from_rotation_x(FRAC_PI_2),
-            c(0.5, 0.08, 0.1),
-        );
-    }
-    k.torus(
-        Vec3::new(0.0, 0.0, 0.2),
-        0.012,
-        0.045,
-        Quat::IDENTITY,
-        steel,
-    );
     k
 }
 
@@ -342,18 +295,34 @@ const TRACER_LEN: f32 = 3.2;
 
 /// A lasting area effect on screen (see `Fx::Zone`).
 #[derive(Component)]
-struct ZoneFx {
+pub struct ZoneFx {
     life: f32,
     max: f32,
     radius: f32,
     follow: Option<u8>,
     kind: u8,
     emit: f32,
+    /// The radius its rings were built at (Plague Bloom grows from it).
+    start: f32,
 }
 
-/// Spinning blades of the Blade Storm.
+/// One of the Reaper's scythes: its zone and its starting angle.
 #[derive(Component)]
-struct StormBlade(Entity, f32, u8);
+struct Scythe(Entity, f32);
+
+/// A zone's colour and the colour of its light.
+fn zone_colors(kind: u8) -> ([f32; 3], Color) {
+    let c = match kind {
+        zk::FORTRESS => [1.0, 0.8, 0.3],
+        zk::HEAL => [0.35, 1.0, 0.5],
+        zk::REAPER => [0.4, 1.0, 0.8],
+        zk::ACID => [0.55, 1.0, 0.15],
+        zk::TOXIC => [0.7, 0.85, 0.2],
+        zk::PLAGUE => [0.45, 0.85, 0.1],
+        _ => [1.0, 0.45, 0.1],
+    };
+    (c, Color::srgb(c[0], c[1], c[2]))
+}
 
 /// How a one-shot shape changes over its life.
 #[derive(Clone, Copy)]
@@ -569,22 +538,6 @@ fn setup(
             ..default()
         }),
         ghost_mat: unlit(&mut materials, Color::srgba(0.4, 0.75, 1.0, 0.3)),
-        blade: meshes.add(kunai_kit().build_or_empty()),
-        blade_mats: [
-            materials.add(StandardMaterial {
-                emissive: LinearRgba::rgb(1.6, 0.1, 0.15),
-                ..crate::kit::vertex_material(0.25, 0.6)
-            }),
-            materials.add(StandardMaterial {
-                emissive: LinearRgba::rgb(1.4, 0.9, 0.2),
-                ..crate::kit::vertex_material(0.25, 0.6)
-            }),
-        ],
-        trail_mats: [
-            glow_material(&mut materials, [1.0, 0.15, 0.2], 0.7),
-            glow_material(&mut materials, [1.0, 0.75, 0.25], 0.7),
-        ],
-        tesla_mat: glow_material(&mut materials, [0.45, 0.8, 1.0], 0.25),
     };
     commands.insert_resource(assets);
 }
@@ -818,6 +771,7 @@ pub fn play(
     roster: Res<crate::Roster>,
     mut auras: ResMut<crate::auras::Auras>,
     spell_assets: Res<spells::SpellAssets>,
+    mut zone_q: Query<(&Transform, &mut ZoneFx)>,
 ) {
     let mut rng = rand::thread_rng();
     let a = &*assets;
@@ -1243,29 +1197,16 @@ pub fn play(
                             follow: (follow != 255).then_some(follow),
                             kind,
                             emit: 0.0,
+                            start: radius,
                         },
                         Transform::from_translation(p),
                         Visibility::default(),
                     ))
                     .id();
-                let (color, light) = match kind {
-                    0 => ([1.0, 0.25, 0.3], Color::srgb(1.0, 0.4, 0.35)),
-                    1 => ([0.45, 0.8, 1.0], Color::srgb(0.5, 0.8, 1.0)),
-                    4 => ([0.5, 0.7, 1.0], Color::srgb(0.55, 0.7, 1.0)),
-                    5 => ([0.4, 0.95, 1.0], Color::srgb(0.4, 0.95, 1.0)),
-                    6 => ([0.75, 0.9, 1.0], Color::srgb(0.7, 0.85, 1.0)),
-                    7 => ([0.55, 0.5, 0.65], Color::srgb(0.5, 0.45, 0.6)),
-                    8 => ([0.75, 0.4, 1.0], Color::srgb(0.7, 0.35, 1.0)),
-                    _ => ([1.0, 0.45, 0.1], Color::srgb(1.0, 0.5, 0.15)),
-                };
-                // Ultimates that follow a player keep their aura lit.
+                let (color, light) = zone_colors(kind);
+                // Zones that follow a player keep their aura lit.
                 if follow != 255 {
-                    let aura = if kind == 0 {
-                        Color::srgb(1.0, 0.2, 0.25)
-                    } else {
-                        light
-                    };
-                    auras.hold(follow, aura, life);
+                    auras.hold(follow, light, life);
                 }
                 commands.entity(zone).with_children(|z| {
                     z.spawn((
@@ -1276,88 +1217,11 @@ pub fn play(
                         NotShadowCaster,
                     ));
                     let floor = match kind {
-                        1 => a.tesla_mat.clone(),
-                        6 => a.frost.clone(),
-                        0 | 4 | 5 | 7 | 8 => glow_material(&mut materials, color, 0.12),
-                        _ => a.scorch.clone(),
+                        zk::FIRE => a.scorch.clone(),
+                        zk::TOXIC => glow_material(&mut materials, color, 0.06),
+                        zk::ACID | zk::PLAGUE => glow_material(&mut materials, color, 0.3),
+                        _ => glow_material(&mut materials, color, 0.12),
                     };
-                    match kind {
-                        5 => {
-                            // Barrier Dome: a see-through shell banded with
-                            // glowing rings.
-                            z.spawn((
-                                Mesh3d(a.ball.clone()),
-                                MeshMaterial3d(glow_material(&mut materials, color, 0.14)),
-                                Transform::from_scale(Vec3::new(radius, radius * 0.8, radius)),
-                                NotShadowCaster,
-                            ));
-                            for i in 1..4 {
-                                let h = i as f32 * 0.2;
-                                let r = (1.0 - h * h).sqrt() * radius;
-                                z.spawn((
-                                    Mesh3d(a.ring.clone()),
-                                    MeshMaterial3d(glow_material(&mut materials, color, 0.5)),
-                                    Transform::from_xyz(0.0, h * radius * 0.8, 0.0)
-                                        .with_scale(Vec3::new(r, 1.0, r)),
-                                    NotShadowCaster,
-                                ));
-                            }
-                        }
-                        6 => {
-                            // Blizzard: a heavy icy cloud overhead.
-                            for i in 0..8 {
-                                let ang = i as f32 / 8.0 * TAU;
-                                let r = if i == 0 { 0.0 } else { radius * 0.5 };
-                                z.spawn((
-                                    Mesh3d(a.ball.clone()),
-                                    MeshMaterial3d(sa.frost_cloud.clone()),
-                                    Transform::from_xyz(ang.cos() * r, 9.0 + (i % 3) as f32 * 0.7, ang.sin() * r)
-                                        .with_scale(Vec3::new(radius * 0.5, 1.8, radius * 0.5)),
-                                    NotShadowCaster,
-                                ));
-                            }
-                        }
-                        8 => {
-                            // Singularity: a black core in a violet ring.
-                            z.spawn((
-                                Mesh3d(a.ball.clone()),
-                                MeshMaterial3d(sa.void.clone()),
-                                Transform::from_xyz(0.0, 1.0, 0.0).with_scale(Vec3::splat(0.55)),
-                                NotShadowCaster,
-                            ));
-                            z.spawn((
-                                Mesh3d(a.ring.clone()),
-                                MeshMaterial3d(glow_material(&mut materials, color, 0.8)),
-                                Transform::from_xyz(0.0, 1.0, 0.0)
-                                    .with_rotation(Quat::from_rotation_x(0.4))
-                                    .with_scale(Vec3::new(1.1, 6.0, 1.1)),
-                                NotShadowCaster,
-                            ));
-                        }
-                        _ => {}
-                    }
-                    if kind == 4 {
-                        // Ragnarok: a dark storm cloud hangs overhead.
-                        for i in 0..7 {
-                            let ang = i as f32 / 7.0 * TAU;
-                            let r = if i == 0 { 0.0 } else { radius * 0.45 };
-                            z.spawn((
-                                Mesh3d(a.ball.clone()),
-                                MeshMaterial3d(a.smoke.clone()),
-                                Transform::from_xyz(
-                                    ang.cos() * r,
-                                    11.0 + (i % 3) as f32 * 0.6,
-                                    ang.sin() * r,
-                                )
-                                .with_scale(Vec3::new(
-                                    radius * 0.45,
-                                    1.6,
-                                    radius * 0.45,
-                                )),
-                                NotShadowCaster,
-                            ));
-                        }
-                    }
                     z.spawn((
                         Mesh3d(a.disc.clone()),
                         MeshMaterial3d(floor),
@@ -1374,22 +1238,54 @@ pub fn play(
                         },
                         Transform::from_xyz(0.0, 1.5, 0.0),
                     ));
-                    if kind == 0 {
-                        // An outer ring of crimson kunai and an inner ring of
-                        // gold ones spinning the other way.
-                        for i in 0..12 {
-                            let inner = i >= 8;
-                            let n = if inner { 4.0 } else { 8.0 };
+                    match kind {
+                        zk::FORTRESS => {
+                            // A see-through golden shell banded with rings.
                             z.spawn((
-                                StormBlade(zone, (i % 8) as f32 / n * TAU, inner as u8),
-                                Mesh3d(a.blade.clone()),
-                                MeshMaterial3d(a.blade_mats[inner as usize].clone()),
-                                Transform::default(),
+                                Mesh3d(a.ball.clone()),
+                                MeshMaterial3d(glow_material(&mut materials, color, 0.1)),
+                                Transform::from_scale(Vec3::new(radius, radius * 0.7, radius)),
                                 NotShadowCaster,
                             ));
+                            for i in 1..4 {
+                                let h = i as f32 * 0.22;
+                                let r = (1.0 - h * h).sqrt() * radius;
+                                z.spawn((
+                                    Mesh3d(a.ring.clone()),
+                                    MeshMaterial3d(glow_material(&mut materials, color, 0.45)),
+                                    Transform::from_xyz(0.0, h * radius * 0.7, 0.0)
+                                        .with_scale(Vec3::new(r, 1.0, r)),
+                                    NotShadowCaster,
+                                ));
+                            }
                         }
+                        zk::REAPER => {
+                            // Three spectral scythes whirling round.
+                            for i in 0..3 {
+                                z.spawn((
+                                    Scythe(zone, i as f32 / 3.0 * TAU),
+                                    Mesh3d(sa.scythe.clone()),
+                                    MeshMaterial3d(sa.teal.clone()),
+                                    Transform::default(),
+                                    NotShadowCaster,
+                                ));
+                            }
+                        }
+                        _ => {}
                     }
                 });
+            }
+            Fx::ZoneEnd { pos, kind } => {
+                // A zone used up early (Catalyst): the host already showed
+                // the blast, so just fade it out.
+                let p = Vec3::from_array(pos);
+                if let Some((_, mut z)) = zone_q
+                    .iter_mut()
+                    .filter(|(tf, z)| z.kind == kind && z.follow.is_none() && tf.translation.distance(p) < 1.0)
+                    .min_by(|a, b| a.0.translation.distance(p).total_cmp(&b.0.translation.distance(p)))
+                {
+                    z.life = z.life.min(0.3);
+                }
             }
             Fx::Ping { .. } => {}
             Fx::Spell {
@@ -1416,7 +1312,6 @@ pub fn play(
             } => spells::falling(
                 &mut commands,
                 sa,
-                a,
                 kind,
                 Vec3::from_array(from),
                 Vec3::from_array(to),
@@ -1770,23 +1665,24 @@ fn markers(
     }
 }
 
-/// Moves lasting zones with their player, spins the blades and keeps
-/// flames and sparks coming.
+/// Moves lasting zones with their player, grows the Plague Bloom, whirls
+/// the Reaper's scythes and keeps flames, gas and motes coming.
+#[allow(clippy::too_many_arguments)]
 fn zone_fx(
     mut commands: Commands,
     time: Res<Time>,
     roster: Res<crate::Roster>,
     assets: Res<FxAssets>,
     mut lines: ResMut<Lines>,
-    mut zones: Query<(Entity, &mut ZoneFx, &mut Transform), Without<StormBlade>>,
-    mut blades: Query<(&StormBlade, &mut Transform, &GlobalTransform), Without<ZoneFx>>,
+    mut zones: Query<(Entity, &mut ZoneFx, &mut Transform), Without<Scythe>>,
+    mut scythes: Query<(&Scythe, &mut Transform, &GlobalTransform), Without<ZoneFx>>,
     sa: Res<spells::SpellAssets>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
     let a = &*assets;
     let mut rng = rand::thread_rng();
-    let mut sizes = Vec::new();
+    let mut live = Vec::new();
     for (e, mut z, mut tf) in &mut zones {
         z.life -= dt;
         if z.life <= 0.0 {
@@ -1796,207 +1692,128 @@ fn zone_fx(
         if let Some(p) = z.follow.and_then(|id| roster.0.get(&id)) {
             tf.translation = p.feet();
         }
+        if z.kind == zk::PLAGUE {
+            z.radius = (z.radius + PLAGUE_GROW * dt).min(PLAGUE_MAX);
+        }
         let fade = (z.life / 0.4)
             .min(1.0)
             .min((z.max - z.life) / 0.25 + 0.2)
             .min(1.0);
-        tf.scale = Vec3::new(fade, 1.0, fade);
-        sizes.push((e, z.radius));
+        let grow = z.radius / z.start.max(0.1);
+        tf.scale = Vec3::new(fade * grow, 1.0, fade * grow);
+        live.push((e, z.radius));
         z.emit -= dt;
         if z.emit > 0.0 {
             continue;
         }
         let p = tf.translation;
+        let ang = rng.gen_range(0.0..TAU);
+        let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+        // A random spot inside the zone.
+        let inside = p + out * z.radius * rng.gen_range(0.0f32..1.0).sqrt();
+        let mote = |vel: Vec3, life: f32, size: (f32, f32)| Particle {
+            vel,
+            life,
+            max: life,
+            gravity: 0.0,
+            drag: 0.5,
+            size,
+            pop: 0.15,
+            spin: Vec3::ZERO,
+            lands: false,
+        };
         match z.kind {
-            0 => {
-                z.emit = 0.05;
-                let ang = rng.gen_range(0.0..TAU);
-                let r = z.radius * rng.gen_range(0.3..1.0);
-                let q = p + Vec3::new(ang.cos() * r, rng.gen_range(0.4..1.6), ang.sin() * r);
-                let tan = Vec3::new(-ang.sin(), 0.0, ang.cos());
-                let col = if rng.gen_bool(0.5) {
-                    Color::srgb(1.0, 0.3, 0.3)
-                } else {
-                    Color::srgb(1.0, 0.85, 0.4)
-                };
-                lines.0.push((q, q + tan * 1.2, col, 0.1));
-            }
-            1 => {
-                z.emit = 0.12;
-                let top = p + Vec3::Y * 2.5;
-                let ang = rng.gen_range(0.0..TAU);
-                let r = z.radius * rng.gen_range(0.3..1.0);
-                let end = p + Vec3::new(ang.cos() * r, 0.05, ang.sin() * r);
-                let mut prev = top;
-                for i in 1..=6 {
-                    let f = i as f32 / 6.0;
-                    let mut q = top.lerp(end, f);
-                    if i < 6 {
-                        q += Vec3::new(
-                            rng.gen_range(-0.3..0.3),
-                            rng.gen_range(-0.3..0.3),
-                            rng.gen_range(-0.3..0.3),
-                        );
-                    }
-                    lines.0.push((prev, q, Color::srgb(0.7, 0.9, 1.0), 0.08));
-                    prev = q;
-                }
-            }
-            4 => {
-                // Crackling storm: little arcs along the ring, flickers in
-                // the cloud.
-                z.emit = 0.06;
-                let ang = rng.gen_range(0.0..TAU);
-                let q = p + Vec3::new(ang.cos(), 0.0, ang.sin()) * z.radius + Vec3::Y * 0.2;
-                let tan = Vec3::new(-ang.sin(), rng.gen_range(0.2..0.8), ang.cos());
-                bolt(
-                    &mut commands,
-                    a,
-                    q,
-                    q + tan * rng.gen_range(0.6..1.4),
-                    0.02,
-                    &mut rng,
-                );
-                if rng.gen_bool(0.3) {
-                    let c0 =
-                        p + Vec3::new(rng.gen_range(-4.0..4.0), 11.0, rng.gen_range(-4.0..4.0));
-                    let c1 = c0
-                        + Vec3::new(
-                            rng.gen_range(-3.0..3.0),
-                            rng.gen_range(-1.0..0.5),
-                            rng.gen_range(-3.0..3.0),
-                        );
-                    bolt(&mut commands, a, c0, c1, 0.04, &mut rng);
-                }
-            }
-            5 => {
-                // Motes drift up inside the dome.
-                z.emit = 0.06;
-                let ang = rng.gen_range(0.0..TAU);
-                let r = z.radius * rng.gen_range(0.0f32..0.9).sqrt();
+            zk::FORTRESS => {
+                // Gold sparks rising and embers licking round the rim.
+                z.emit = 0.04;
                 particle(
                     &mut commands,
                     &a.cube,
-                    &sa.cyan,
-                    p + Vec3::new(ang.cos() * r, 0.1, ang.sin() * r),
+                    &a.spark,
+                    inside + Vec3::Y * 0.1,
+                    mote(Vec3::Y * rng.gen_range(2.0..4.0), 0.8, (0.05, 0.0)),
+                );
+                let q = p + out * z.radius * 0.95 + Vec3::Y * 0.1;
+                particle(&mut commands, &a.ball, &a.fire, q, mote(Vec3::Y * 2.5, 0.5, (0.25, 0.05)));
+            }
+            zk::HEAL => {
+                // Crosses and soft green motes drifting up.
+                z.emit = 0.12;
+                particle(
+                    &mut commands,
+                    &a.cross,
+                    &a.heal,
+                    inside + Vec3::Y * 0.2,
                     Particle {
-                        vel: Vec3::Y * rng.gen_range(1.0..2.0),
-                        life: 1.2,
-                        max: 1.2,
-                        gravity: 0.0,
-                        drag: 0.2,
-                        size: (0.06, 0.0),
-                        pop: 0.0,
-                        spin: Vec3::ONE * 3.0,
-                        lands: false,
+                        spin: Vec3::Y * 2.0,
+                        ..mote(Vec3::Y * rng.gen_range(0.8..1.6), 1.2, (0.0, 0.5))
                     },
                 );
+                particle(&mut commands, &a.ball, &a.heal_soft, inside, mote(Vec3::Y * 0.6, 1.4, (0.2, 0.6)));
             }
-            6 => {
-                // Driving snow and gusts.
-                z.emit = 0.012;
-                let ang = rng.gen_range(0.0..TAU);
-                let r = z.radius * rng.gen_range(0.0f32..1.0).sqrt();
-                let wind = Vec3::new(4.0, -6.0, 2.0);
+            zk::REAPER => {
+                // Spectral mist curling round the edge.
+                z.emit = 0.05;
+                let tan = Vec3::new(-ang.sin(), 0.0, ang.cos());
                 particle(
                     &mut commands,
                     &a.ball,
-                    &sa.snow,
-                    p + Vec3::new(ang.cos() * r, 8.0, ang.sin() * r) - wind * 0.5,
-                    Particle {
-                        vel: wind + Vec3::new(rng.gen_range(-1.0..1.0), 0.0, rng.gen_range(-1.0..1.0)),
-                        life: 1.3,
-                        max: 1.3,
-                        gravity: 0.0,
-                        drag: 0.0,
-                        size: (0.06, 0.06),
-                        pop: 0.0,
-                        spin: Vec3::ZERO,
-                        lands: true,
-                    },
+                    &sa.spirit,
+                    p + out * z.radius * rng.gen_range(0.6..1.0) + Vec3::Y * rng.gen_range(0.2..1.4),
+                    mote(tan * 3.0 + Vec3::Y * 0.3, 0.9, (0.3, 0.8)),
                 );
-                if rng.gen_bool(0.2) {
-                    let q = p + Vec3::new(rng.gen_range(-1.0..1.0), 0.0, rng.gen_range(-1.0..1.0)) * z.radius
-                        + Vec3::Y * rng.gen_range(0.3..2.5);
-                    lines.0.push((q, q + Vec3::new(2.0, -0.3, 1.0), Color::srgba(0.9, 0.95, 1.0, 0.5), 0.15));
+            }
+            zk::ACID | zk::PLAGUE => {
+                // Bubbles that swell and pop, and a little gas.
+                z.emit = if z.kind == zk::PLAGUE { 0.03 } else { 0.06 };
+                particle(
+                    &mut commands,
+                    &a.ball,
+                    &sa.toxic,
+                    inside + Vec3::Y * 0.05,
+                    mote(Vec3::Y * 0.3, rng.gen_range(0.4..0.8), (0.05, rng.gen_range(0.12..0.25))),
+                );
+                if rng.gen_bool(0.35) {
                     particle(
                         &mut commands,
                         &a.ball,
-                        &a.mist,
-                        q,
-                        Particle {
-                            vel: Vec3::new(3.0, 0.0, 1.5),
-                            life: 1.0,
-                            max: 1.0,
-                            gravity: 0.0,
-                            drag: 0.5,
-                            size: (0.4, 1.5),
-                            pop: 0.2,
-                            spin: Vec3::ZERO,
-                            lands: false,
-                        },
+                        &sa.gas,
+                        inside + Vec3::Y * 0.3,
+                        mote(Vec3::Y * rng.gen_range(0.4..1.0), 1.6, (0.4, 1.2)),
                     );
                 }
+                if z.kind == zk::PLAGUE && rng.gen_bool(0.3) {
+                    // Rot creeping out along the ground.
+                    let a0 = p + out * z.radius * 0.3 + Vec3::Y * 0.05;
+                    let a1 = p + Quat::from_rotation_y(rng.gen_range(-0.3..0.3)) * out * z.radius + Vec3::Y * 0.05;
+                    lines.0.push((a0, a1, Color::srgb(0.4, 0.75, 0.1), 0.4));
+                }
             }
-            7 => {
-                // Thick rolling smoke.
-                z.emit = 0.09;
-                let ang = rng.gen_range(0.0..TAU);
-                let r = z.radius * rng.gen_range(0.0f32..0.9).sqrt();
+            zk::TOXIC => {
+                // Rolling yellow-green gas, kept low so it doesn't blind you.
+                z.emit = 0.1;
                 particle(
                     &mut commands,
                     &a.ball,
-                    &a.smoke,
-                    p + Vec3::new(ang.cos() * r, rng.gen_range(0.3..1.5), ang.sin() * r),
+                    &sa.gas,
+                    inside + Vec3::Y * rng.gen_range(0.2..0.9),
                     Particle {
-                        vel: Vec3::new(rng.gen_range(-0.4..0.4), rng.gen_range(0.1..0.5), rng.gen_range(-0.4..0.4)),
-                        life: 2.6,
-                        max: 2.6,
-                        gravity: 0.0,
                         drag: 0.3,
-                        size: (0.8, 2.4),
                         pop: 0.25,
-                        spin: Vec3::ZERO,
-                        lands: false,
+                        ..mote(
+                            Vec3::new(rng.gen_range(-0.4..0.4), rng.gen_range(0.1..0.4), rng.gen_range(-0.4..0.4)),
+                            2.0,
+                            (0.5, 1.3),
+                        )
                     },
                 );
             }
-            8 => {
-                // Everything spirals into the core.
-                z.emit = 0.02;
-                let ang = rng.gen_range(0.0..TAU);
-                let out = Vec3::new(ang.cos(), 0.0, ang.sin());
-                let tan = Vec3::new(-ang.sin(), 0.0, ang.cos());
-                let start = p + Vec3::Y * 1.0 + out * z.radius + Vec3::Y * rng.gen_range(-0.8..1.2);
-                particle(
-                    &mut commands,
-                    &a.cube,
-                    &sa.violet,
-                    start,
-                    Particle {
-                        vel: -out * z.radius * 1.6 + tan * 4.0,
-                        life: 0.6,
-                        max: 0.6,
-                        gravity: 0.0,
-                        drag: 0.0,
-                        size: (0.05, 0.02),
-                        pop: 0.0,
-                        spin: Vec3::ZERO,
-                        lands: false,
-                    },
-                );
-                lines.0.push((start, start - out * 1.5 + tan * 0.8, Color::srgb(0.8, 0.5, 1.0), 0.1));
-            }
-            kind => {
-                // Fire pool or a ring of flame around the player.
+            _ => {
+                // A pool of fire.
                 z.emit = 0.025;
                 for _ in 0..2 {
                     let ang = rng.gen_range(0.0..TAU);
-                    let r = if kind == 3 {
-                        z.radius * rng.gen_range(0.85..1.0)
-                    } else {
-                        z.radius * rng.gen_range(0.0f32..1.0).sqrt()
-                    };
+                    let r = z.radius * rng.gen_range(0.0f32..1.0).sqrt();
                     let q = p + Vec3::new(ang.cos() * r, 0.1, ang.sin() * r);
                     particle(
                         &mut commands,
@@ -2004,59 +1821,40 @@ fn zone_fx(
                         &a.fire,
                         q,
                         Particle {
-                            vel: Vec3::Y * rng.gen_range(1.5..3.5),
-                            life: rng.gen_range(0.35..0.7),
-                            max: 0.7,
                             gravity: -1.0,
-                            drag: 0.5,
-                            size: (0.3, 0.05),
                             pop: 0.1,
-                            spin: Vec3::ZERO,
-                            lands: false,
+                            ..mote(Vec3::Y * rng.gen_range(1.5..3.5), rng.gen_range(0.35..0.7), (0.3, 0.05))
                         },
                     );
                 }
             }
         }
     }
-    // Kunai whirl round, pointing along their path, each tumbling a little,
-    // and leave glowing trails.
+    // The Reaper's scythes whirl round, handles pointing in, leaving
+    // spectral trails.
     let trail = rng.gen_bool((dt * 30.0).min(1.0) as f64);
-    for (b, mut tf, gt) in &mut blades {
-        let Some((_, r)) = sizes.iter().find(|(e, _)| *e == b.0) else {
+    for (s, mut tf, gt) in &mut scythes {
+        let Some(&(_, r)) = live.iter().find(|(e, _)| *e == s.0) else {
             continue;
         };
-        let inner = b.2 == 1;
-        let (speed, r, h) = if inner {
-            (-9.0, r * 0.3, 1.5)
-        } else {
-            (6.5, r * 0.62, 0.9)
-        };
-        let ang = b.1 + t * speed;
-        tf.translation = Vec3::new(
-            ang.cos() * r,
-            h + 0.3 * (t * 4.0 + b.1 * 3.0).sin(),
-            ang.sin() * r,
-        );
-        // Facing along the direction of travel.
-        let travel = Vec3::new(-ang.sin(), 0.0, ang.cos()) * speed.signum();
-        tf.rotation = Transform::IDENTITY.looking_to(travel, Vec3::Y).rotation
-            * Quat::from_rotation_z(t * 10.0 + b.1)
-            * Quat::from_rotation_x(-0.15);
-        tf.scale = Vec3::splat(if inner { 0.75 } else { 1.0 });
+        let ang = s.1 + t * 7.0;
+        let out = Vec3::new(ang.cos(), 0.0, ang.sin());
+        tf.translation = out * r * 0.55 + Vec3::Y * (1.0 + 0.25 * (t * 3.0 + s.1).sin());
+        tf.rotation = Transform::IDENTITY.looking_to(out, Vec3::Y).rotation * Quat::from_rotation_z(0.25);
+        tf.scale = Vec3::splat(1.6);
         if trail {
             particle(
                 &mut commands,
                 &a.ball,
-                &a.trail_mats[b.2 as usize],
+                &sa.spirit,
                 gt.translation(),
                 Particle {
                     vel: Vec3::ZERO,
-                    life: 0.25,
-                    max: 0.25,
+                    life: 0.3,
+                    max: 0.3,
                     gravity: 0.0,
                     drag: 0.0,
-                    size: (0.09, 0.0),
+                    size: (0.25, 0.0),
                     pop: 0.0,
                     spin: Vec3::ZERO,
                     lands: false,

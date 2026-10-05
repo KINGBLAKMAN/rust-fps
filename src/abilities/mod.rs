@@ -20,23 +20,26 @@ use crate::{ActionQueue, AppState, MatchState, Phase, PlayerAction, Roster, Sess
 
 mod preview;
 
-/// Grenade fuse in seconds, from the throw.
-pub const GRENADE_FUSE: f32 = 1.8;
 pub const GRENADE_SPEED: f32 = 16.0;
 pub const GRENADE_LIFT: f32 = 3.0;
 pub const GRENADE_GRAVITY: f32 = 18.0;
-/// Valkyrie: how far the Arc Spear flies and how wide it hits, where Storm
-/// Leap lands and how big the crash is, and the reach of Ragnarok.
-pub const SPEAR_RANGE: f32 = 32.0;
-pub const SPEAR_WIDTH: f32 = 1.4;
-pub const LEAP_RADIUS: f32 = 4.5;
-pub const RAGNAROK_RADIUS: f32 = 12.0;
+/// How far the Ranger's grapple reaches.
+pub const GRAPPLE_RANGE: f32 = 30.0;
+/// Speed of every dash (matches player.rs).
+pub const DASH_SPEED: f32 = 22.0;
 
-/// Seconds of holding to fully charge Iaido.
+/// Seconds of holding to fully charge a charged ability (none since v12).
 pub const FULL_CHARGE: f32 = 1.0;
 
-pub fn leap_length(tier: f32) -> f32 {
-    22.0 * (0.3 + 0.03 * tier)
+/// How long a movement ability carries you at `DASH_SPEED`.
+pub fn move_time(ability: Ability, tier: f32) -> f32 {
+    let base = match ability {
+        Ability::ShieldCharge => 0.32,
+        Ability::WraithStep => 0.3,
+        Ability::BlastJump => 0.36,
+        _ => 0.2,
+    };
+    base + 0.03 * tier
 }
 
 pub struct AbilityPlugin;
@@ -100,29 +103,6 @@ const SLOTS: [(u8, Action); 3] = [
     (2, Action::Ultimate),
 ];
 
-pub(crate) fn dash_direction(keys: &ButtonInput<KeyCode>, settings: &Settings, yaw: f32) -> Vec3 {
-    let fwd = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
-    let right = Vec3::new(-fwd.z, 0.0, fwd.x);
-    let mut dir = Vec3::ZERO;
-    if keys.held(settings, Action::Forward) {
-        dir += fwd;
-    }
-    if keys.held(settings, Action::Back) {
-        dir -= fwd;
-    }
-    if keys.held(settings, Action::Right) {
-        dir += right;
-    }
-    if keys.held(settings, Action::Left) {
-        dir -= right;
-    }
-    if dir == Vec3::ZERO {
-        fwd
-    } else {
-        dir.normalize()
-    }
-}
-
 /// Keys 3 and 4 (by default): the class's two weapon abilities. The host
 /// checks the cooldown.
 #[allow(clippy::too_many_arguments)]
@@ -169,6 +149,7 @@ fn use_abilities(
     mut cast: ResMut<CastState>,
     mut fx: ResMut<crate::fx::FxQueue>,
     player: Single<(&Transform, &mut LocalPlayer)>,
+    colliders: Query<(&Transform, &crate::Collider), Without<LocalPlayer>>,
     mut local_cd: Local<[f32; 3]>,
     time: Res<Time>,
 ) {
@@ -275,33 +256,31 @@ fn use_abilities(
         .as_vec3()
         .with_y(0.0)
         .normalize_or(Vec3::NEG_Z);
-    if ability == Ability::RisingDragon {
-        // Up with the uppercut, a little forward.
-        p.vel.y = 9.0;
-        p.on_ground = false;
-        p.dash_dir = ahead;
-        p.dash_time = 0.08;
-    }
     if ability.is_dash() {
-        let leap = ability == Ability::StormLeap;
-        p.dash_dir = if ability == Ability::Dash {
-            dash_direction(&keys, &settings, p.yaw)
-        } else {
-            ahead
-        };
-        p.dash_time = match ability {
-            Ability::ShadowStep => 0.2,
-            Ability::FlameDash => 0.22,
-            _ => 0.18,
-        } + 0.03 * tier;
-        if leap {
-            // Up into the air; the dash carries you forward, gravity brings
-            // you crashing down.
-            p.vel.y = 7.5;
-            p.on_ground = false;
-            p.dash_time += 0.12;
+        p.dash_dir = ahead;
+        p.dash_time = move_time(ability, tier);
+        match ability {
+            Ability::BlastJump => {
+                // Blown up into the air and forward.
+                p.vel.y = 11.0;
+                p.on_ground = false;
+            }
+            Ability::Grapple => {
+                // Zip toward the spot you aimed at, lifted if it's higher.
+                let look = cam.forward().as_vec3();
+                let boxes = crate::physics::collect_boxes(colliders.iter());
+                let dist = crate::physics::ray_world(cam.translation, look, GRAPPLE_RANGE, &boxes);
+                let target = cam.translation + look * (dist - 0.6).max(1.0);
+                let flat = (target - p.feet).with_y(0.0);
+                p.dash_dir = flat.normalize_or(ahead);
+                p.dash_time = (flat.length() / DASH_SPEED).clamp(0.12, 1.2);
+                let rise = (target.y - p.feet.y).max(0.0);
+                p.vel.y = 5.0 + rise * 2.2;
+                p.on_ground = false;
+            }
+            _ => {}
         }
-        let to = p.feet + p.dash_dir * 22.0 * p.dash_time;
+        let to = p.feet + p.dash_dir * DASH_SPEED * p.dash_time;
         fx.0.push(crate::fx::Fx::Dash {
             player: session.my_id,
             a: p.feet.to_array(),

@@ -1271,49 +1271,56 @@ pub fn spins_for_round(round: u32) -> u32 {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Character {
     #[default]
-    Striker,
-    Warden,
-    Ronin,
-    Tinker,
-    Blaze,
-    Valkyrie,
+    #[serde(alias = "Striker")]
+    Bulwark,
+    #[serde(alias = "Warden")]
+    Medic,
+    #[serde(alias = "Ronin")]
+    Revenant,
+    #[serde(alias = "Tinker")]
+    Demolisher,
+    #[serde(alias = "Blaze")]
+    Chemist,
+    #[serde(alias = "Valkyrie")]
+    Ranger,
 }
 
 impl Character {
     pub const ALL: [Character; 6] = [
-        Character::Striker,
-        Character::Warden,
-        Character::Ronin,
-        Character::Tinker,
-        Character::Blaze,
-        Character::Valkyrie,
+        Character::Bulwark,
+        Character::Medic,
+        Character::Revenant,
+        Character::Demolisher,
+        Character::Chemist,
+        Character::Ranger,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            Character::Striker => "Striker",
-            Character::Warden => "Warden",
-            Character::Ronin => "Ronin",
-            Character::Tinker => "Tinker",
-            Character::Blaze => "Blaze",
-            Character::Valkyrie => "Valkyrie",
+            Character::Bulwark => "Bulwark",
+            Character::Medic => "Medic",
+            Character::Revenant => "Revenant",
+            Character::Demolisher => "Demolisher",
+            Character::Chemist => "Chemist",
+            Character::Ranger => "Ranger",
         }
     }
 
     pub fn tagline(self) -> &'static str {
         match self {
-            Character::Striker => "Aggressive assault specialist",
-            Character::Warden => "Support and crowd control",
-            Character::Ronin => "Blade master who strikes up close",
-            Character::Tinker => "Engineer with turrets and supplies",
-            Character::Blaze => "Pyro who sets the horde ablaze",
-            Character::Valkyrie => "Storm-caller with a lightning spear",
+            Character::Bulwark => "Riot-shield tank who holds the line",
+            Character::Medic => "Combat medic who keeps the team standing",
+            Character::Revenant => "Undead hunter who reaps souls with a scythe",
+            Character::Demolisher => "Explosives expert in a bomb suit",
+            Character::Chemist => "Hazmat alchemist with acid and poison",
+            Character::Ranger => "Hooded hunter who marks and snipes",
         }
     }
 
-    /// All seven abilities, in unlock order.
-    pub fn pool(self) -> [Ability; 7] {
-        let i = Character::ALL.iter().position(|c| *c == self).unwrap_or(0) * 7;
+    /// All five abilities, in unlock order: two abilities and an ultimate
+    /// from the start, a third ability, then a second ultimate.
+    pub fn pool(self) -> [Ability; 5] {
+        let i = Character::ALL.iter().position(|c| *c == self).unwrap_or(0) * 5;
         std::array::from_fn(|k| Ability::ALL[i + k])
     }
 
@@ -1325,23 +1332,23 @@ impl Character {
 
     pub fn suit_color(self) -> Color {
         match self {
-            Character::Striker => Color::srgb(0.15, 0.35, 0.85),
-            Character::Warden => Color::srgb(0.2, 0.65, 0.35),
-            Character::Ronin => Color::srgb(0.6, 0.08, 0.08),
-            Character::Tinker => Color::srgb(0.95, 0.75, 0.12),
-            Character::Blaze => Color::srgb(0.25, 0.22, 0.2),
-            Character::Valkyrie => Color::srgb(0.26, 0.2, 0.42),
+            Character::Bulwark => Color::srgb(0.32, 0.35, 0.4),
+            Character::Medic => Color::srgb(0.9, 0.9, 0.88),
+            Character::Revenant => Color::srgb(0.12, 0.12, 0.16),
+            Character::Demolisher => Color::srgb(0.3, 0.36, 0.22),
+            Character::Chemist => Color::srgb(0.85, 0.7, 0.15),
+            Character::Ranger => Color::srgb(0.25, 0.3, 0.2),
         }
     }
 
     pub fn trim_color(self) -> Color {
         match self {
-            Character::Striker => Color::srgb(0.95, 0.55, 0.1),
-            Character::Warden => Color::srgb(0.92, 0.92, 0.95),
-            Character::Ronin => Color::srgb(0.9, 0.7, 0.25),
-            Character::Tinker => Color::srgb(0.3, 0.9, 1.0),
-            Character::Blaze => Color::srgb(1.0, 0.45, 0.08),
-            Character::Valkyrie => Color::srgb(0.45, 0.9, 1.0),
+            Character::Bulwark => Color::srgb(1.0, 0.75, 0.25),
+            Character::Medic => Color::srgb(0.2, 0.85, 0.5),
+            Character::Revenant => Color::srgb(0.4, 1.0, 0.8),
+            Character::Demolisher => Color::srgb(1.0, 0.45, 0.1),
+            Character::Chemist => Color::srgb(0.5, 1.0, 0.15),
+            Character::Ranger => Color::srgb(0.8, 0.55, 0.3),
         }
     }
 }
@@ -1355,18 +1362,18 @@ pub struct ClassGuns {
 impl Character {
     pub fn guns(self) -> ClassGuns {
         let (primaries, secondaries) = match self {
-            // Falcon AR, Tempest Burst / M9 Sidearm, Mamba Machine Pistol
-            Character::Striker => ([6, 8], [0, 5]),
-            // Bulldog Carbine, Breacher 12 / Viper .45, Hornet MP
-            Character::Warden => ([9, 10], [1, 2]),
-            // Kestrel SMG, Twin Fangs / Hammer .50, Viper .45
-            Character::Ronin => ([3, 20], [19, 1]),
-            // Goliath LMG, Ripsaw LMG / Wasp PDW, M9 Sidearm
-            Character::Tinker => ([13, 14], [4, 0]),
-            // Stormfront Auto, Double Barrel / Judge Revolver, Mamba
-            Character::Blaze => ([11, 12], [18, 5]),
-            // Arbiter DMR, Longbow Sniper / Hornet MP, Hammer .50
-            Character::Valkyrie => ([16, 15], [2, 19]),
+            // Breacher 12, Stormfront Auto / Viper .45, Judge Revolver
+            Character::Bulwark => ([10, 11], [1, 18]),
+            // Kestrel SMG, Tempest Burst / M9 Sidearm, Hornet MP
+            Character::Medic => ([3, 8], [0, 2]),
+            // Twin Fangs, Ranger Rifle / Hammer .50, M9 Sidearm
+            Character::Revenant => ([20, 7], [19, 0]),
+            // Goliath LMG, Ripsaw LMG / Wasp PDW, Viper .45
+            Character::Demolisher => ([13, 14], [4, 1]),
+            // Falcon AR, Double Barrel / Hornet MP, Judge Revolver
+            Character::Chemist => ([6, 12], [2, 18]),
+            // Arbiter DMR, Longbow Sniper / Hammer .50, Mamba
+            Character::Ranger => ([16, 15], [19, 5]),
         };
         ClassGuns {
             primaries,
@@ -1393,12 +1400,12 @@ impl Character {
     pub fn weapon_abilities(self) -> [WeaponAbility; 2] {
         use WeaponAbility as W;
         match self {
-            Character::Striker => [W::IncendiaryMag, W::LockAndLoad],
-            Character::Warden => [W::CryoRounds, W::SuppressingFire],
-            Character::Ronin => [W::Quickdraw, W::Executioner],
-            Character::Tinker => [W::AutoLoader, W::ShockRounds],
-            Character::Blaze => [W::DragonsBreath, W::Overheat],
-            Character::Valkyrie => [W::StormRounds, W::Overcharge],
+            Character::Bulwark => [W::SuppressingFire, W::LockAndLoad],
+            Character::Medic => [W::CryoRounds, W::AutoLoader],
+            Character::Revenant => [W::SoulSiphon, W::Overcharge],
+            Character::Demolisher => [W::DragonsBreath, W::Overheat],
+            Character::Chemist => [W::ToxicRounds, W::ShockRounds],
+            Character::Ranger => [W::Executioner, W::Quickdraw],
         }
     }
 }
@@ -1411,7 +1418,7 @@ impl Character {
 /// for a few seconds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum WeaponAbility {
-    IncendiaryMag,
+    ToxicRounds,
     LockAndLoad,
     CryoRounds,
     SuppressingFire,
@@ -1421,7 +1428,7 @@ pub enum WeaponAbility {
     ShockRounds,
     DragonsBreath,
     Overheat,
-    StormRounds,
+    SoulSiphon,
     Overcharge,
 }
 
@@ -1442,6 +1449,8 @@ pub struct GunBuff {
     pub blast: f32,
     /// Each hit arcs to this many more enemies.
     pub chain: u8,
+    /// Share of the damage healed back.
+    pub lifesteal: f32,
 }
 
 pub struct WeaponAbilityDef {
@@ -1465,7 +1474,7 @@ const fn wa(name: &'static str, desc: &'static str, cooldown: f32, duration: f32
 /// In the same order as `WeaponAbility`.
 #[rustfmt::skip]
 const WEAPON_ABILITY_DEFS: [WeaponAbilityDef; 12] = [
-    wa("Incendiary Mag", "Your bullets set zombies on fire.", 20.0, 10.0, [1.0, 0.45, 0.1]),
+    wa("Toxic Rounds", "Your bullets poison and slow zombies.", 20.0, 10.0, [0.55, 1.0, 0.15]),
     wa("Lock and Load", "Refill your magazine and hit 40% harder.", 18.0, 8.0, [1.0, 0.8, 0.3]),
     wa("Cryo Rounds", "Your bullets slow zombies down.", 20.0, 10.0, [0.55, 0.85, 1.0]),
     wa("Suppressing Fire", "Every hit stuns for a moment.", 22.0, 8.0, [0.85, 0.9, 1.0]),
@@ -1475,7 +1484,7 @@ const WEAPON_ABILITY_DEFS: [WeaponAbilityDef; 12] = [
     wa("Shock Rounds", "Your bullets arc to nearby zombies.", 20.0, 10.0, [0.5, 0.8, 1.0]),
     wa("Dragon's Breath", "Burning rounds that burst on impact.", 24.0, 8.0, [1.0, 0.35, 0.05]),
     wa("Overheat", "Shoot 60% faster and hit 20% harder.", 20.0, 6.0, [1.0, 0.55, 0.1]),
-    wa("Storm Rounds", "Your bullets arc to nearby zombies.", 20.0, 10.0, [0.6, 0.85, 1.0]),
+    wa("Soul Siphon", "Every hit heals you for 8% of its damage.", 20.0, 10.0, [0.4, 1.0, 0.8]),
     wa("Overcharge", "Every shot chains lightning through three more zombies.", 24.0, 8.0, [0.75, 0.75, 1.0]),
 ];
 
@@ -1505,8 +1514,8 @@ impl WeaponAbility {
         };
         use WeaponAbility as W;
         match self {
-            W::IncendiaryMag => GunBuff {
-                elements: Element::Fire.bit(),
+            W::ToxicRounds => GunBuff {
+                elements: crate::sim::powers::effect::POISON,
                 ..none
             },
             W::LockAndLoad => GunBuff {
@@ -1532,7 +1541,11 @@ impl WeaponAbility {
                 rate: 1.3,
                 ..none
             },
-            W::ShockRounds | W::StormRounds => GunBuff {
+            W::SoulSiphon => GunBuff {
+                lifesteal: 0.08,
+                ..none
+            },
+            W::ShockRounds => GunBuff {
                 elements: Element::Shock.bit(),
                 ..none
             },
@@ -1567,59 +1580,48 @@ pub fn active_buff(ability: Option<WeaponAbility>, time: f32) -> GunBuff {
 // Abilities
 // ---------------------------------------------------------------------------
 
-/// Every ability in the game. Each character has seven: three from the
-/// start and four unlocked by levelling that character. A kit is two
-/// regular abilities (Q and E) and one ultimate.
+/// Every ability in the game. Each class has five: two abilities and an
+/// ultimate from the start, a third ability at character level 3 and a
+/// second ultimate at level 6. A kit is two abilities (Q and E) and one
+/// ultimate.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum Ability {
-    // Striker
-    Dash,
-    FragGrenade,
-    Overdrive,
-    ClusterGrenade,
-    RocketBarrage,
-    Airstrike,
-    CombatStim,
-    // Warden
-    HealPulse,
-    FrostNova,
-    OrbitalStrike,
-    GlacierSpike,
-    BarrierDome,
-    Blizzard,
-    CryoOrb,
-    // Ronin
-    Iaido,
-    ShadowStep,
-    BladeStorm,
-    KunaiFan,
-    SmokeBomb,
-    ThousandCuts,
-    RisingDragon,
-    // Tinker
-    Sentry,
-    SupplyDrop,
-    TeslaCoil,
-    ProximityMines,
-    CombatDrone,
-    MortarBattery,
-    GravGrenade,
-    // Blaze
-    Firebomb,
-    FlameWave,
-    Inferno,
-    Fireball,
-    FlameDash,
-    MeteorShower,
-    MagmaGeyser,
-    // Valkyrie
-    ArcSpear,
-    StormLeap,
-    Ragnarok,
-    ThunderClap,
-    ChainLightning,
-    Bifrost,
-    SpearRain,
+    // Bulwark
+    ShieldCharge,
+    GroundPound,
+    Fortress,
+    RallyCry,
+    Earthshaker,
+    // Medic
+    HealingGrenade,
+    NeurotoxinDart,
+    Resurrection,
+    MedDrone,
+    Sterilize,
+    // Revenant
+    ScytheSweep,
+    SoulChains,
+    Reaper,
+    WraithStep,
+    ArmyOfTheDead,
+    // Demolisher
+    StickyBomb,
+    BlastJump,
+    Payload,
+    Claymore,
+    ChainReaction,
+    // Chemist
+    AcidFlask,
+    ToxicCloud,
+    PlagueBloom,
+    Catalyst,
+    Petrify,
+    // Ranger
+    Grapple,
+    HuntersMark,
+    Deadeye,
+    BearTrap,
+    ArrowStorm,
 }
 
 /// All ability cooldowns are stretched by this (v8.1: they came round too fast).
@@ -1661,101 +1663,77 @@ use CastStyle as S;
 
 /// In the same order as `Ability`.
 #[rustfmt::skip]
-const ABILITY_DEFS: [AbilityDef; 42] = [
-    // Striker
-    ab("Dash", "Burst forward at high speed.", 1, false, (6.0, 1.0), S::Move, [0.4, 0.75, 1.0]),
-    ab("Frag Grenade", "Throw a grenade that explodes in an area.", 1, false, (12.0, 2.0), S::Throw, [1.0, 0.7, 0.3]),
-    ab("Overdrive", "ULT: bigger damage, faster fire, no ammo use.", 1, true, (0.0, 0.0), S::Push, [1.0, 0.5, 0.1]),
-    ab("Cluster Grenade", "A grenade that bursts and scatters six bomblets.", 2, false, (14.0, 2.0), S::Throw, [1.0, 0.6, 0.2]),
-    ab("Rocket Barrage", "Fire a fan of six mini rockets from your wrist launcher.", 4, false, (12.0, 2.0), S::Push, [1.0, 0.45, 0.15]),
-    ab("Airstrike", "ULT: jets carpet-bomb a long line where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.1]),
-    ab("Combat Stim", "Heal up and move and shoot faster for a while.", 8, false, (20.0, 3.0), S::Push, [0.3, 1.0, 0.6]),
-    // Warden
-    ab("Heal Pulse", "Heal yourself and nearby teammates.", 1, false, (14.0, 2.0), S::Push, [0.35, 1.0, 0.5]),
-    ab("Frost Nova", "Damage and slow every enemy around you.", 1, false, (12.0, 2.0), S::Push, [0.55, 0.85, 1.0]),
-    ab("Orbital Strike", "ULT: call a huge blast where you aim.", 1, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.15]),
-    ab("Glacier Spike", "A wall of ice spikes tears along the ground, freezing what it hits.", 2, false, (10.0, 1.5), S::Ground, [0.5, 0.85, 1.0]),
-    ab("Barrier Dome", "A dome zombies can't get into. Heals everyone inside.", 4, false, (24.0, 3.0), S::Sky, [0.4, 0.95, 1.0]),
-    ab("Blizzard", "ULT: a freezing storm where you aim, slowing and shredding the horde.", 6, true, (0.0, 0.0), S::Sky, [0.7, 0.9, 1.0]),
-    ab("Cryo Orb", "Launch a slow orb that freezes everything it passes, then shatters.", 8, false, (14.0, 2.0), S::Push, [0.45, 0.8, 1.0]),
-    // Ronin
-    ab("Iaido Slash", "Hold to draw and focus, release to send a flying crescent cut.", 1, false, (6.0, 1.0), S::Sword, [1.0, 0.8, 0.3]),
-    ab("Shadow Step", "Blink forward, slicing enemies you pass through.", 1, false, (9.0, 1.5), S::Move, [0.6, 0.5, 1.0]),
-    ab("Blade Storm", "ULT: whirling blades shred enemies around you.", 1, true, (0.0, 0.0), S::Sword, [1.0, 0.2, 0.25]),
-    ab("Kunai Fan", "Throw a fan of seven piercing kunai.", 2, false, (7.0, 1.0), S::Throw, [1.0, 0.3, 0.3]),
-    ab("Smoke Bomb", "A cloud of smoke that leaves zombies inside choking and stunned.", 4, false, (16.0, 2.0), S::Throw, [0.6, 0.55, 0.75]),
-    ab("Thousand Cuts", "ULT: vanish and cut down every enemy around you in a storm of slashes.", 6, true, (0.0, 0.0), S::Sword, [1.0, 0.15, 0.2]),
-    ab("Rising Dragon", "Leap up in a flaming uppercut, launching enemies in front.", 8, false, (9.0, 1.5), S::Sword, [1.0, 0.5, 0.15]),
-    // Tinker
-    ab("Sentry Turret", "Deploy a turret that shoots nearby enemies.", 1, false, (20.0, 3.0), S::Deploy, [0.3, 0.9, 1.0]),
-    ab("Supply Drop", "Refill ammo and patch up teammates nearby.", 1, false, (16.0, 2.0), S::Deploy, [1.0, 0.8, 0.2]),
-    ab("Tesla Coil", "ULT: plant a coil that shocks everything near it.", 1, true, (0.0, 0.0), S::Deploy, [0.5, 0.8, 1.0]),
-    ab("Proximity Mines", "Toss three mines that blow when zombies get close.", 2, false, (14.0, 2.0), S::Throw, [1.0, 0.3, 0.2]),
-    ab("Combat Drone", "A drone that follows you and shoots what you're fighting.", 4, false, (24.0, 3.0), S::Deploy, [0.3, 1.0, 0.8]),
-    ab("Mortar Battery", "ULT: shells rain down on the area where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.75, 0.3]),
-    ab("Grav Grenade", "A grenade that opens a singularity, pulls zombies in, then implodes.", 8, false, (16.0, 2.0), S::Throw, [0.75, 0.4, 1.0]),
-    // Blaze
-    ab("Firebomb", "Throw a bomb that leaves a pool of fire.", 1, false, (10.0, 2.0), S::Throw, [1.0, 0.45, 0.1]),
-    ab("Flame Wave", "Blast a cone of fire that sets enemies alight.", 1, false, (7.0, 1.0), S::Push, [1.0, 0.5, 0.1]),
-    ab("Inferno", "ULT: wreathe yourself in a ring of fire.", 1, true, (0.0, 0.0), S::Push, [1.0, 0.4, 0.05]),
-    ab("Fireball", "Hurl a roaring fireball that explodes and leaves flames.", 2, false, (8.0, 1.0), S::Push, [1.0, 0.55, 0.15]),
-    ab("Flame Dash", "Rocket forward, leaving a trail of fire behind you.", 4, false, (9.0, 1.5), S::Move, [1.0, 0.4, 0.1]),
-    ab("Meteor Shower", "ULT: meteors crash down around where you aim.", 6, true, (0.0, 0.0), S::Sky, [1.0, 0.35, 0.05]),
-    ab("Magma Geyser", "The ground cracks where you aim and erupts in a pillar of magma.", 8, false, (12.0, 2.0), S::Ground, [1.0, 0.3, 0.05]),
-    // Valkyrie
-    ab("Arc Spear", "Hurl a lightning spear that shocks everything in a line.", 1, false, (8.0, 1.5), S::Spear, [0.5, 0.8, 1.0]),
-    ab("Storm Leap", "Leap forward and crash down in a burst of lightning.", 1, false, (11.0, 2.0), S::Move, [0.5, 0.8, 1.0]),
-    ab("Ragnarok", "ULT: a storm follows you, striking nearby enemies with lightning.", 1, true, (0.0, 0.0), S::Sky, [0.6, 0.7, 1.0]),
-    ab("Thunder Clap", "Clap a shockwave that stuns and shocks everything around you.", 2, false, (9.0, 1.5), S::Push, [0.6, 0.85, 1.0]),
-    ab("Chain Lightning", "A bolt that leaps from zombie to zombie.", 4, false, (8.0, 1.2), S::Push, [0.55, 0.75, 1.0]),
-    ab("Bifrost", "ULT: a rainbow beam from the sky sweeps along where you aim.", 6, true, (0.0, 0.0), S::Sky, [0.9, 0.7, 1.0]),
-    ab("Spear Rain", "Lightning spears rain down where you aim.", 8, false, (14.0, 2.0), S::Sky, [0.5, 0.85, 1.0]),
+const ABILITY_DEFS: [AbilityDef; 30] = [
+    // Bulwark
+    ab("Shield Charge", "Charge behind your riot shield, bowling zombies aside and stunning them.", 1, false, (8.0, 1.0), S::Move, [1.0, 0.8, 0.3]),
+    ab("Ground Pound", "Slam your shield into the ground: zombies around you are thrown into the air and stunned.", 1, false, (11.0, 1.5), S::Ground, [0.95, 0.65, 0.35]),
+    ab("Fortress", "ULT: take 80% less damage and burn everything near you with a golden aura.", 1, true, (0.0, 0.0), S::Sky, [1.0, 0.85, 0.4]),
+    ab("Rally Cry", "You and nearby teammates heal and take 40% less damage for a while.", 3, false, (20.0, 3.0), S::Sky, [1.0, 0.55, 0.2]),
+    ab("Earthshaker", "ULT: three shockwaves ripple out from you, each bigger than the last.", 6, true, (0.0, 0.0), S::Ground, [0.85, 0.55, 0.3]),
+    // Medic
+    ab("Healing Grenade", "Throw a canister that bursts into a cloud healing teammates inside.", 1, false, (14.0, 2.0), S::Throw, [0.4, 1.0, 0.6]),
+    ab("Neurotoxin Dart", "Fire a dart that poisons and paralyses a zombie, then spreads to others nearby.", 1, false, (8.0, 1.0), S::Push, [0.7, 1.0, 0.2]),
+    ab("Resurrection", "ULT: revive every downed teammate and heal the whole team to full.", 1, true, (0.0, 0.0), S::Sky, [1.0, 1.0, 0.75]),
+    ab("Med Drone", "A drone that follows you, healing you and teammates and zapping zombies.", 3, false, (24.0, 3.0), S::Deploy, [0.4, 1.0, 0.8]),
+    ab("Sterilize", "ULT: a huge wave of ultraviolet light scorches every zombie around you.", 6, true, (0.0, 0.0), S::Push, [0.65, 0.5, 1.0]),
+    // Revenant
+    ab("Scythe Sweep", "A wide scythe sweep around you; every zombie it cuts heals you.", 1, false, (7.0, 1.0), S::Sword, [0.5, 1.0, 0.8]),
+    ab("Soul Chains", "Hurl spectral chains that drag the zombies they catch to you and bind them.", 1, false, (10.0, 1.5), S::Push, [0.4, 0.9, 0.75]),
+    ab("Reaper", "ULT: spectral scythes whirl around you, shredding zombies and healing you.", 1, true, (0.0, 0.0), S::Sword, [0.3, 1.0, 0.7]),
+    ab("Wraith Step", "Turn to mist and drift forward; you can't be hurt for a moment.", 3, false, (8.0, 1.0), S::Move, [0.55, 0.65, 0.85]),
+    ab("Army of the Dead", "ULT: raise four spectral warriors that fight beside you.", 6, true, (0.0, 0.0), S::Sky, [0.45, 1.0, 0.75]),
+    // Demolisher
+    ab("Sticky Bomb", "Throw a bomb that sticks to whatever it hits and blows a moment later.", 1, false, (10.0, 1.5), S::Throw, [1.0, 0.35, 0.2]),
+    ab("Blast Jump", "Blow yourself up and forward with a charge, blasting where you were.", 1, false, (9.0, 1.5), S::Move, [1.0, 0.6, 0.2]),
+    ab("Payload", "ULT: a huge bomb drops where you aim and levels the area.", 1, true, (0.0, 0.0), S::Sky, [1.0, 0.4, 0.1]),
+    ab("Claymore", "Plant a claymore that blasts a cone of shrapnel at the first zombie to come close.", 3, false, (14.0, 2.0), S::Deploy, [1.0, 0.25, 0.15]),
+    ab("Chain Reaction", "ULT: for a while every zombie you kill explodes.", 6, true, (0.0, 0.0), S::Push, [1.0, 0.75, 0.2]),
+    // Chemist
+    ab("Acid Flask", "Throw a flask that shatters into a pool of acid.", 1, false, (10.0, 1.5), S::Throw, [0.55, 1.0, 0.15]),
+    ab("Toxic Cloud", "Spray a choking cloud in front of you that poisons and slows.", 1, false, (12.0, 2.0), S::Push, [0.65, 0.85, 0.2]),
+    ab("Plague Bloom", "ULT: a toxic bloom where you aim that keeps spreading.", 1, true, (0.0, 0.0), S::Sky, [0.5, 0.9, 0.1]),
+    ab("Catalyst", "Detonate every acid pool and toxic cloud you've made.", 3, false, (14.0, 2.0), S::Push, [0.85, 1.0, 0.3]),
+    ab("Petrify", "ULT: zombies in front of you turn to stone, then shatter.", 6, true, (0.0, 0.0), S::Push, [0.75, 0.7, 0.62]),
+    // Ranger
+    ab("Grapple", "Fire a grappling hook and zip to where you aim.", 1, false, (8.0, 1.0), S::Move, [0.8, 0.7, 0.5]),
+    ab("Hunter's Mark", "Mark the zombies in front of you: they take 50% more damage.", 1, false, (12.0, 2.0), S::Push, [1.0, 0.2, 0.2]),
+    ab("Deadeye", "ULT: lock on to up to 10 zombies you can see and snipe every one.", 1, true, (0.0, 0.0), S::Push, [1.0, 0.3, 0.15]),
+    ab("Bear Trap", "Throw a trap that snaps shut on the first zombie, holding it fast.", 3, false, (12.0, 2.0), S::Throw, [0.8, 0.75, 0.65]),
+    ab("Arrow Storm", "ULT: a storm of arrows rains down where you aim.", 6, true, (0.0, 0.0), S::Sky, [0.95, 0.85, 0.6]),
 ];
 
 impl Ability {
-    pub const ALL: [Ability; 42] = [
-        Ability::Dash,
-        Ability::FragGrenade,
-        Ability::Overdrive,
-        Ability::ClusterGrenade,
-        Ability::RocketBarrage,
-        Ability::Airstrike,
-        Ability::CombatStim,
-        Ability::HealPulse,
-        Ability::FrostNova,
-        Ability::OrbitalStrike,
-        Ability::GlacierSpike,
-        Ability::BarrierDome,
-        Ability::Blizzard,
-        Ability::CryoOrb,
-        Ability::Iaido,
-        Ability::ShadowStep,
-        Ability::BladeStorm,
-        Ability::KunaiFan,
-        Ability::SmokeBomb,
-        Ability::ThousandCuts,
-        Ability::RisingDragon,
-        Ability::Sentry,
-        Ability::SupplyDrop,
-        Ability::TeslaCoil,
-        Ability::ProximityMines,
-        Ability::CombatDrone,
-        Ability::MortarBattery,
-        Ability::GravGrenade,
-        Ability::Firebomb,
-        Ability::FlameWave,
-        Ability::Inferno,
-        Ability::Fireball,
-        Ability::FlameDash,
-        Ability::MeteorShower,
-        Ability::MagmaGeyser,
-        Ability::ArcSpear,
-        Ability::StormLeap,
-        Ability::Ragnarok,
-        Ability::ThunderClap,
-        Ability::ChainLightning,
-        Ability::Bifrost,
-        Ability::SpearRain,
+    pub const ALL: [Ability; 30] = [
+        Ability::ShieldCharge,
+        Ability::GroundPound,
+        Ability::Fortress,
+        Ability::RallyCry,
+        Ability::Earthshaker,
+        Ability::HealingGrenade,
+        Ability::NeurotoxinDart,
+        Ability::Resurrection,
+        Ability::MedDrone,
+        Ability::Sterilize,
+        Ability::ScytheSweep,
+        Ability::SoulChains,
+        Ability::Reaper,
+        Ability::WraithStep,
+        Ability::ArmyOfTheDead,
+        Ability::StickyBomb,
+        Ability::BlastJump,
+        Ability::Payload,
+        Ability::Claymore,
+        Ability::ChainReaction,
+        Ability::AcidFlask,
+        Ability::ToxicCloud,
+        Ability::PlagueBloom,
+        Ability::Catalyst,
+        Ability::Petrify,
+        Ability::Grapple,
+        Ability::HuntersMark,
+        Ability::Deadeye,
+        Ability::BearTrap,
+        Ability::ArrowStorm,
     ];
 
     pub fn def(self) -> &'static AbilityDef {
@@ -1767,7 +1745,7 @@ impl Ability {
     }
 
     pub fn owner(self) -> Character {
-        Character::ALL[self as usize / 7]
+        Character::ALL[self as usize / 5]
     }
 
     pub fn is_ult(self) -> bool {
@@ -1794,14 +1772,15 @@ impl Ability {
     pub fn augment(self) -> Augment {
         use Ability as A;
         match self {
-            A::Dash
-            | A::ShadowStep
-            | A::FlameDash
-            | A::StormLeap
-            | A::RisingDragon
-            | A::CombatStim
-            | A::BarrierDome
-            | A::SupplyDrop => Augment::Charges,
+            A::ShieldCharge
+            | A::GroundPound
+            | A::RallyCry
+            | A::MedDrone
+            | A::ScytheSweep
+            | A::WraithStep
+            | A::BlastJump
+            | A::Catalyst
+            | A::Grapple => Augment::Charges,
             _ => Augment::Copies,
         }
     }
@@ -1810,12 +1789,7 @@ impl Ability {
     pub fn is_thrown(self) -> bool {
         matches!(
             self,
-            Ability::FragGrenade
-                | Ability::ClusterGrenade
-                | Ability::Firebomb
-                | Ability::SmokeBomb
-                | Ability::GravGrenade
-                | Ability::ProximityMines
+            Ability::HealingGrenade | Ability::StickyBomb | Ability::AcidFlask | Ability::BearTrap
         )
     }
 
@@ -1824,11 +1798,10 @@ impl Ability {
         self.style() == CastStyle::Move
     }
 
-    /// Hold the key to charge it up, let go to cast (Iaido).
+    /// Hold the key to charge it up, let go to cast. (None at the moment.)
     pub fn charges(self) -> bool {
-        self == Ability::Iaido
+        false
     }
-
 }
 
 /// Ability upgrade tiers bought with level-ups in a match.
@@ -1886,11 +1859,11 @@ pub enum CastStyle {
     Push,
     /// Hand raised to the sky.
     Sky,
-    /// A sword drawn and swung (Ronin).
+    /// The Revenant's scythe drawn and swung.
     Sword,
-    /// Valkyrie's spear hurled overhand.
+    /// Something hurled overhand (unused since v12).
     Spear,
-    /// Something set down on the ground in front (Tinker).
+    /// Something set down on the ground in front.
     Deploy,
     /// Palm slammed down at the ground.
     Ground,

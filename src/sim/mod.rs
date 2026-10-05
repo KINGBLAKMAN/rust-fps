@@ -125,6 +125,12 @@ pub struct EnemyBrain {
     /// two-thirds and one-third health).
     volley: f32,
     summons: u8,
+    /// Poisoned (Chemist and Medic): damage over time while above zero.
+    poison: f32,
+    poison_dps: f32,
+    poison_by: Option<u8>,
+    /// Hunter's Mark: takes extra damage while above zero.
+    marked: f32,
 }
 
 /// How a Brute or boss slam lands: windup seconds, radius, how far ahead
@@ -173,8 +179,13 @@ struct Zone {
     life: f32,
     elements: u8,
     kind: u8,
-    /// A model that goes away with the zone (the tesla coil).
+    /// A model that goes away with the zone.
     model: Option<Entity>,
+    /// Heals players inside by this much each tick.
+    heal: f32,
+    /// Spreads this many metres a second (Plague Bloom), up to `max_radius`.
+    grow: f32,
+    max_radius: f32,
 }
 
 #[derive(Resource, Default)]
@@ -274,11 +285,7 @@ fn explode(
 }
 
 fn level_multiplier(p: &PlayerInfo) -> f32 {
-    let mut m = 1.0 + 0.03 * (p.level.saturating_sub(1)) as f32;
-    if p.overdrive > 0.0 {
-        m *= 1.5;
-    }
-    m
+    1.0 + 0.03 * (p.level.saturating_sub(1)) as f32
 }
 
 /// Three random level-up rewards. Every tenth level always includes an
@@ -871,6 +878,12 @@ fn resolve_shots(
                 Color::srgb(1.0, 0.5, 0.1),
             );
         }
+        // Soul Siphon: hits heal the shooter.
+        if buff.lifesteal > 0.0 {
+            if let Some(p) = roster.0.get_mut(&shooter) {
+                p.health = (p.health + amount * buff.lifesteal).min(p.max_health());
+            }
+        }
     }
 }
 
@@ -897,7 +910,23 @@ fn status_effects(
                 stun: 0.0,
             });
         }
+        if b.poison > 0.0 {
+            b.poison -= dt;
+            damage.0.push(DamageEvent {
+                target: e,
+                amount: b.poison_dps * dt,
+                from: b.poison_by,
+                headshot: false,
+                legs: false,
+                elements: 0,
+                chained: true,
+                stun: 0.0,
+            });
+        }
+        b.marked -= dt;
         status.burning = b.burn > 0.0;
+        status.poisoned = b.poison > 0.0;
+        status.marked = b.marked > 0.0;
         status.slowed = b.slow > 0.0;
         status.stunned = b.stun > 0.0;
         status.crawler = b.crawler;
@@ -948,6 +977,18 @@ fn apply_damage(
         }
         if state.insta_kill > 0.0 && from.is_some() && !chained && !brain.kind.is_boss() {
             amount = amount.max(brain.health);
+        }
+        if brain.marked > 0.0 {
+            amount *= powers::MARK_BONUS;
+        }
+        if elements & powers::effect::MARK != 0 {
+            brain.marked = powers::MARK_TIME;
+        }
+        if elements & powers::effect::POISON != 0 {
+            brain.poison = 5.0;
+            brain.poison_dps = 18.0 + 4.0 * round as f32;
+            brain.poison_by = from;
+            brain.slow = brain.slow.max(1.0);
         }
         brain.health -= amount;
         // Brutes shrug off half of it, bosses nearly all.
@@ -1015,6 +1056,38 @@ fn apply_damage(
         }
         if let Some(pid) = from {
             if let Some(p) = roster.0.get_mut(&pid) {
+                // Scythe cuts heal the Revenant.
+                if elements & powers::effect::DRAIN != 0 && p.alive {
+                    p.health = (p.health + amount.min(brain.max_health) * powers::DRAIN_FRACTION).min(p.max_health());
+                }
+                // Chain Reaction: the kill goes off like a bomb.
+                if killed && p.chain > 0.0 {
+                    let radius = 4.0;
+                    let blast = 160.0 + 40.0 * round as f32;
+                    for (e, q) in &positions {
+                        if *e != target && q.distance(pos) < radius {
+                            queue.0.push(DamageEvent {
+                                target: *e,
+                                amount: blast,
+                                from,
+                                headshot: false,
+                                legs: false,
+                                elements: 0,
+                                chained: true,
+                                stun: 0.3,
+                            });
+                        }
+                    }
+                    emit(
+                        &mut fx,
+                        &mut out,
+                        Fx::Explosion {
+                            pos: (pos + Vec3::Y * 0.8).to_array(),
+                            radius,
+                            color: [1.0, 0.7, 0.2],
+                        },
+                    );
+                }
                 if killed {
                     let bonus = if headshot { 40 } else { 0 };
                     let (base, xp) = match brain.kind {
@@ -1125,7 +1198,7 @@ fn player_timers(
                 };
             }
         }
-        p.overdrive = (p.overdrive - dt).max(0.0);
+        p.chain = (p.chain - dt).max(0.0);
         for cd in p.weapon_cd.iter_mut() {
             *cd = (*cd - dt).max(0.0);
         }
@@ -1376,6 +1449,10 @@ fn spawn_zombie(
         slam: false,
         volley: 3.0,
         summons: 0,
+        poison: 0.0,
+        poison_dps: 0.0,
+        poison_by: None,
+        marked: 0.0,
     });
 }
 
@@ -1524,8 +1601,11 @@ fn enemy_ai(
         if enemy.stun > 0.0 || enemy.slam {
             velocity = Vec3::ZERO;
         }
-        // Singularities pull, barrier domes push out.
+        // Soul Chains pull, Shield Charge shoves aside.
         for f in &forces.0 {
+            if f.only.is_some_and(|only| only != entity) {
+                continue;
+            }
             let to = (f.pos - pos).with_y(0.0);
             let d = to.length();
             if d < f.radius && d > 1e-3 {
@@ -1735,13 +1815,14 @@ fn zones(
     mut roster: ResMut<Roster>,
     mut zones: ResMut<Zones>,
     mut damage: ResMut<DamageQueue>,
-    mut fx: ResMut<FxQueue>,
-    mut out: ResMut<FxOutbox>,
     enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
 ) {
     let dt = time.delta_secs();
     for z in zones.0.iter_mut() {
         z.life -= dt;
+        if z.grow > 0.0 {
+            z.radius = (z.radius + z.grow * dt).min(z.max_radius);
+        }
         if let Some(p) = z.follow.and_then(|id| roster.0.get(&id)) {
             if p.alive {
                 z.pos = p.feet();
@@ -1754,59 +1835,16 @@ fn zones(
             continue;
         }
         z.timer += z.interval;
-        if z.kind == powers::zone::DOME {
-            // Barrier Dome heals instead of hurting.
+        if z.heal > 0.0 {
             for p in roster.0.values_mut() {
                 if p.alive && p.feet().distance(z.pos) < z.radius {
-                    p.health = (p.health + z.damage).min(p.max_health());
+                    p.health = (p.health + z.heal).min(p.max_health());
                 }
             }
+        }
+        if z.damage <= 0.0 {
             continue;
         }
-        let stun = if z.kind == powers::zone::SMOKE { 0.8 } else { 0.0 };
-        if z.kind == 4 {
-            // Ragnarok: lightning from the sky on a couple of enemies in reach.
-            let mut near: Vec<(Entity, Vec3)> = enemies
-                .iter()
-                .filter(|(_, t)| t.translation.with_y(0.0).distance(z.pos.with_y(0.0)) < z.radius)
-                .map(|(e, t)| (e, t.translation))
-                .collect();
-            let mut rng = rand::thread_rng();
-            for _ in 0..2.min(near.len()) {
-                let (e, at) = near.swap_remove(rng.gen_range(0..near.len()));
-                damage.0.push(DamageEvent {
-                    target: e,
-                    amount: z.damage,
-                    from: Some(z.owner),
-                    headshot: false,
-                    legs: false,
-                    elements: z.elements,
-                    chained: true,
-                    stun: 0.0,
-                });
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Lightning {
-                        a: (at
-                            + Vec3::new(rng.gen_range(-2.0..2.0), 16.0, rng.gen_range(-2.0..2.0)))
-                        .to_array(),
-                        b: (at + Vec3::Y * 0.9).to_array(),
-                    },
-                );
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Ring {
-                        pos: at.to_array(),
-                        radius: 1.6,
-                        color: [0.6, 0.85, 1.0],
-                    },
-                );
-            }
-            continue;
-        }
-        let mut arcs = 0;
         for (e, t) in &enemies {
             let d = t.translation.with_y(0.0).distance(z.pos.with_y(0.0));
             if d < z.radius && (t.translation.y - z.pos.y).abs() < 3.0 {
@@ -1818,19 +1856,8 @@ fn zones(
                     legs: false,
                     elements: z.elements,
                     chained: true,
-                    stun,
+                    stun: 0.0,
                 });
-                if z.kind == 1 && arcs < 4 {
-                    arcs += 1;
-                    emit(
-                        &mut fx,
-                        &mut out,
-                        Fx::Lightning {
-                            a: (z.pos + Vec3::Y * 2.5).to_array(),
-                            b: (t.translation + Vec3::Y * 1.2).to_array(),
-                        },
-                    );
-                }
             }
         }
     }

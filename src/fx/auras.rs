@@ -1,6 +1,6 @@
 //! The glow around a character while an ability is working: a shimmering
 //! shell and rising sparks in the ability's colour, lasting as long as the
-//! ability does (Overdrive, Blade Storm, Inferno, Ragnarok) or a moment for
+//! ability does (Fortress, Reaper, Rally Cry, Chain Reaction) or a moment for
 //! a quick cast. In first person it shows as a tint at the screen edges and
 //! glowing hands (see viewmodel.rs).
 
@@ -179,7 +179,7 @@ fn additive(materials: &mut Assets<StandardMaterial>) -> Handle<StandardMaterial
     })
 }
 
-/// Counts auras down, keeps Overdrive lit, and plays cast poses on models.
+/// Counts auras down, keeps buffs lit, and plays cast poses on models.
 fn tick(
     time: Res<Time>,
     roster: Res<Roster>,
@@ -188,11 +188,14 @@ fn tick(
 ) {
     let dt = time.delta_secs();
     for p in roster.0.values() {
-        // Overdrive and Combat Stim keep the aura lit while they last.
-        let buff = if p.overdrive > 0.0 {
-            Some((Ability::Overdrive, p.overdrive))
+        // Chain Reaction, Rally Cry and Fortress keep the aura lit while
+        // they last.
+        let buff = if p.chain > 0.0 {
+            Some((Ability::ChainReaction, p.chain))
         } else if p.stim > 0.0 {
-            Some((Ability::CombatStim, p.stim))
+            Some((Ability::RallyCry, p.stim))
+        } else if p.guard > 0.0 {
+            Some((Ability::Fortress, p.guard))
         } else {
             None
         };

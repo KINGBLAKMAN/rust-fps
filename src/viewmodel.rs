@@ -2,7 +2,8 @@
 //! hands and sleeved forearms, all animated: idle breathing, sway when you
 //! look around, walk bob, sprint pose, recoil, muzzle flash, raising a new
 //! gun, magazine reloads (or loading shells one at a time), shotgun pumps,
-//! and the left hand holding and throwing grenades or casting abilities.
+//! the left hand holding and throwing gadgets or casting abilities, and the
+//! Revenant's scythe swings.
 //!
 //! The whole rig is drawn at 40% size, closer to the camera. It looks exactly
 //! the same on screen but no longer pokes through walls you stand next to.
@@ -15,10 +16,12 @@ use std::f32::consts::PI;
 
 use crate::abilities::CastState;
 use crate::data::{gun_def, Ability, CastStyle, Character, GunClass};
-use crate::gunmodels::{grenade_kit, spawn_gun, GunAssets, GunMag, GunPump, Support};
+use crate::gunmodels::{spawn_gun, GunAssets, GunMag, GunPump, Support};
 use crate::hands::{forearm_kit, hand_kit, HandPose};
 use crate::kit::{c, glow_material, vertex_material, Kit};
+use crate::models::projectiles::{drone_kit, missile_kit};
 use crate::player::LocalPlayer;
+use crate::sim::powers::look;
 use crate::weapons::Loadout;
 use crate::{AppState, Phase, Roster, Session};
 
@@ -90,19 +93,14 @@ struct Forearm(f32);
 /// Something held in a hand that only shows at certain times.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum Prop {
-    Grenade,
     Orb,
     Knife,
-    Firebomb,
-    /// Tinker's gadgets: 0 turret, 1 supply crate, 2 tesla coil.
-    Gadget(u8),
-    /// Ronin's katana (right hand) and its scabbard (left hand).
-    Katana,
-    Saya,
-    /// Valkyrie's spear (right hand).
-    Spear,
-    /// A glowing edge along the katana while Iaido charges.
-    Edge,
+    /// A thrown or placed gadget (`powers::look`), in the left hand.
+    Missile(u8),
+    /// The Medic's drone, held up before it flies off.
+    Drone,
+    /// The Revenant's scythe (right hand).
+    Scythe,
 }
 
 #[derive(Component)]
@@ -116,135 +114,47 @@ struct RigAssets {
     skin_mat: Handle<StandardMaterial>,
     glow_mat: Handle<StandardMaterial>,
     orb_mat: Handle<StandardMaterial>,
-    edge: Handle<Mesh>,
-    edge_mat: Handle<StandardMaterial>,
     flash: Handle<Mesh>,
-    grenade: Handle<Mesh>,
     orb: Handle<Mesh>,
     knife: Handle<Mesh>,
-    firebomb: (Handle<Mesh>, Handle<Mesh>),
-    gadgets: [Handle<Mesh>; 3],
-    katana: Handle<Mesh>,
-    saya: Handle<Mesh>,
-    spear: Handle<Mesh>,
-    spear_mat: Handle<StandardMaterial>,
+    /// (solid, glowing) meshes for each gadget look, the drone and the
+    /// scythe.
+    missiles: Vec<(Handle<Mesh>, Handle<Mesh>)>,
+    drone: (Handle<Mesh>, Handle<Mesh>),
+    scythe: (Handle<Mesh>, Handle<Mesh>),
 }
 
-/// Ronin's katana: wrapped hilt, round guard and a long, slightly curved
-/// blade with a pale edge, pointing forward (-Z) from the fist.
-fn katana_kit() -> Kit {
-    let mut k = Kit::fine();
-    let wrap = c(0.12, 0.05, 0.05);
-    let ray = c(0.85, 0.82, 0.75);
-    let steel = c(0.78, 0.8, 0.84);
-    let edge = c(0.95, 0.96, 1.0);
-    let gold = c(0.75, 0.6, 0.25);
-    // Hilt: ray skin under a diamond wrap, gold collar and cap.
-    k.cyl_z(Vec3::new(0.0, 0.0, 0.07), 0.016, 0.24, ray);
-    for i in 0..7 {
-        let z = -0.03 + i as f32 * 0.03;
-        k.cuboid_rot(
-            Vec3::new(0.0, 0.0, z),
-            Vec3::new(0.036, 0.008, 0.012),
-            Quat::from_rotation_z(0.6),
-            wrap,
-        );
-        k.cuboid_rot(
-            Vec3::new(0.0, 0.0, z),
-            Vec3::new(0.036, 0.008, 0.012),
-            Quat::from_rotation_z(-0.6),
-            wrap,
-        );
+/// The Revenant's scythe: a long dark shaft up through the fist (-Z) and a
+/// glowing spectral blade off the top, curving forward (-Y) and back down.
+fn scythe_kit() -> (Kit, Kit) {
+    let (mut k, mut g) = (Kit::fine(), Kit::new());
+    let wood = c(0.1, 0.09, 0.1);
+    let iron = c(0.3, 0.32, 0.34);
+    let blade = c(0.5, 1.0, 0.85);
+    let edge = c(0.9, 1.0, 0.97);
+    k.cyl_z(Vec3::new(0.0, 0.0, -0.45), 0.016, 1.25, wood);
+    for z in [0.12, -0.3, -1.0] {
+        k.cyl_z(Vec3::new(0.0, 0.0, z), 0.02, 0.03, iron);
     }
-    k.cyl_z(Vec3::new(0.0, 0.0, 0.195), 0.019, 0.02, gold);
-    k.cyl_z(Vec3::new(0.0, 0.0, -0.055), 0.018, 0.02, gold);
-    // Guard.
-    k.cyl_z(Vec3::new(0.0, 0.0, -0.07), 0.045, 0.01, c(0.15, 0.13, 0.12));
-    k.cyl_z(Vec3::new(0.0, 0.0, -0.082), 0.016, 0.015, gold);
-    // Blade in four segments, each tilted a little more for the curve.
-    let mut at = Vec3::new(0.0, 0.0, -0.09);
-    for i in 0..4 {
-        let tilt = 0.035 * (i as f32 + 0.5);
-        let dir = Quat::from_rotation_x(tilt) * Vec3::NEG_Z;
-        let len = 0.17;
-        let mid = at + dir * len / 2.0;
-        let rot = Quat::from_rotation_x(tilt);
-        let w = 0.03 - i as f32 * 0.002;
-        k.cuboid_rot(mid, Vec3::new(0.006, w, len + 0.004), rot, steel);
-        k.cuboid_rot(
-            mid + rot * Vec3::new(0.0, -w / 2.0, 0.0),
-            Vec3::new(0.003, 0.008, len + 0.004),
-            rot,
-            edge,
-        );
-        at += dir * len;
+    // A side grip for the other hand.
+    k.cyl_between(Vec3::new(0.0, 0.0, -0.42), Vec3::new(0.0, 0.1, -0.44), 0.012, wood);
+    // The blade, from the top of the shaft out and curving back.
+    let top = Vec3::new(0.0, 0.0, -1.04);
+    k.cuboid(top, Vec3::new(0.04, 0.06, 0.06), iron);
+    let n = 12;
+    let p = |t: f32| top + Vec3::new(0.0, -(t * 1.3).sin() * 0.55, (1.0 - (t * 1.3).cos()) * 0.35);
+    for i in 0..n {
+        let (t0, t1) = (i as f32 / n as f32, (i + 1) as f32 / n as f32);
+        let (a, b) = (p(t0), p(t1));
+        let d = b - a;
+        let w = 0.09 * (1.0 - t0) + 0.012;
+        let rot = Quat::from_rotation_arc(Vec3::NEG_Y, d.normalize());
+        // The sharp inner edge faces down the shaft.
+        let inner = rot * Vec3::Z;
+        g.cuboid_rot((a + b) / 2.0 + inner * w * 0.3, Vec3::new(0.006, d.length() + 0.008, w), rot, blade);
+        g.cuboid_rot((a + b) / 2.0 + inner * w * 0.8, Vec3::new(0.004, d.length() + 0.008, 0.01), rot, edge);
     }
-    let tip = Quat::from_rotation_x(0.16);
-    k.wedge(
-        at + tip * Vec3::new(0.0, -0.004, -0.025),
-        Vec3::new(0.006, 0.026, 0.05),
-        tip * Quat::from_rotation_y(PI / 2.0),
-        edge,
-    );
-    k
-}
-
-/// Tinker's supply drop: a small green crate with yellow bands and a
-/// beacon light.
-fn supply_kit() -> (Kit, Kit) {
-    let (mut k, mut g) = (Kit::new(), Kit::new());
-    k.cuboid(
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(0.3, 0.18, 0.22),
-        c(0.25, 0.35, 0.2),
-    );
-    for x in [-0.1, 0.1] {
-        k.cuboid(
-            Vec3::new(x, 0.0, 0.0),
-            Vec3::new(0.03, 0.185, 0.225),
-            c(0.95, 0.75, 0.12),
-        );
-    }
-    k.cuboid(
-        Vec3::new(0.0, 0.1, 0.0),
-        Vec3::new(0.08, 0.02, 0.04),
-        c(0.15, 0.15, 0.17),
-    );
-    g.cuboid(
-        Vec3::new(0.0, 0.0, 0.112),
-        Vec3::new(0.06, 0.06, 0.005),
-        c(1.0, 1.0, 1.0),
-    );
-    g.cuboid(
-        Vec3::new(0.0, 0.0, 0.113),
-        Vec3::new(0.05, 0.015, 0.005),
-        c(0.9, 0.15, 0.1),
-    );
-    g.cuboid(
-        Vec3::new(0.0, 0.0, 0.113),
-        Vec3::new(0.015, 0.05, 0.005),
-        c(0.9, 0.15, 0.1),
-    );
     (k, g)
-}
-
-/// Black lacquered scabbard with a gold mouth and cord.
-fn saya_kit() -> Kit {
-    let mut k = Kit::fine();
-    k.blob(
-        Vec3::new(0.0, 0.0, -0.35),
-        Vec3::new(0.016, 0.026, 0.36),
-        c(0.06, 0.05, 0.06),
-    );
-    k.cyl_z(Vec3::new(0.0, 0.0, 0.0), 0.024, 0.02, c(0.75, 0.6, 0.25));
-    k.torus(
-        Vec3::new(0.0, 0.0, -0.1),
-        0.004,
-        0.024,
-        Quat::from_rotation_x(PI / 2.0),
-        c(0.5, 0.1, 0.1),
-    );
-    k
 }
 
 /// Combat knife held in the fist, blade forward.
@@ -324,8 +234,6 @@ fn spawn_rig(
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera: Single<Entity, With<LocalPlayer>>,
 ) {
-    let mut grenade = Kit::new();
-    grenade_kit(&mut grenade, Vec3::ZERO);
     let assets = RigAssets {
         skin_mat: materials.add(vertex_material(0.75, 0.0)),
         glow_mat: materials.add(glow_material(1.0)),
@@ -335,40 +243,23 @@ fn spawn_rig(
             alpha_mode: AlphaMode::Blend,
             ..default()
         }),
-        edge: meshes.add(Cuboid::new(0.014, 0.04, 0.7)),
-        edge_mat: materials.add(StandardMaterial {
-            base_color: Color::srgba(1.0, 0.85, 0.4, 0.8),
-            unlit: true,
-            alpha_mode: AlphaMode::Add,
-            ..default()
-        }),
         flash: meshes.add(flash_kit().build_or_empty()),
-        grenade: meshes.add(grenade.build_or_empty()),
         orb: meshes.add(Sphere::new(0.03).mesh().ico(2).unwrap()),
         knife: meshes.add(knife_kit().build_or_empty()),
-        firebomb: {
-            let (k, g) = crate::avatars::firebomb_kit();
-            (
-                meshes.add(k.build_or_empty()),
-                meshes.add(g.build_or_empty()),
-            )
+        missiles: (0..=look::LAST)
+            .map(|l| {
+                let (k, g, _) = missile_kit(l);
+                (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+            })
+            .collect(),
+        drone: {
+            let (k, g) = drone_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
         },
-        gadgets: [
-            crate::avatars::turret_kit(),
-            supply_kit(),
-            crate::avatars::coil_kit(),
-        ]
-        .map(|(mut k, g)| {
-            k.append(g, Transform::IDENTITY);
-            meshes.add(k.build_or_empty())
-        }),
-        katana: meshes.add(katana_kit().build_or_empty()),
-        saya: meshes.add(saya_kit().build_or_empty()),
-        spear: meshes.add(crate::fx::spear_kit().build_or_empty()),
-        spear_mat: materials.add(StandardMaterial {
-            emissive: LinearRgba::rgb(0.25, 0.5, 1.0),
-            ..vertex_material(0.3, 0.4)
-        }),
+        scythe: {
+            let (k, g) = scythe_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+        },
     };
     commands.entity(*camera).with_children(|cam| {
         cam.spawn((
@@ -398,14 +289,20 @@ fn spawn_rig(
                             .id()
                         };
                         let skin = &assets.skin_mat;
+                        let glow = &assets.glow_mat;
+                        // A solid mesh with its glowing parts as a child.
+                        let glowing = |h: &mut ChildSpawnerCommands,
+                                           p: Prop,
+                                           (solid, lit): &(Handle<Mesh>, Handle<Mesh>),
+                                           tf: Transform| {
+                            let e = prop(h, p, solid, skin, tf);
+                            h.commands().entity(e).with_child((
+                                Mesh3d(lit.clone()),
+                                MeshMaterial3d(glow.clone()),
+                                NotShadowCaster,
+                            ));
+                        };
                         if side < 0.0 {
-                            prop(
-                                h,
-                                Prop::Grenade,
-                                &assets.grenade,
-                                skin,
-                                Transform::from_xyz(0.0, -0.005, -0.012),
-                            );
                             prop(
                                 h,
                                 Prop::Knife,
@@ -420,59 +317,34 @@ fn spawn_rig(
                                 &assets.orb_mat,
                                 Transform::from_xyz(0.0, 0.0, -0.01),
                             );
-                            let bomb = prop(
-                                h,
-                                Prop::Firebomb,
-                                &assets.firebomb.0,
-                                skin,
-                                Transform::from_xyz(0.0, -0.06, -0.012),
-                            );
-                            h.commands().entity(bomb).with_child((
-                                Mesh3d(assets.firebomb.1.clone()),
-                                MeshMaterial3d(assets.glow_mat.clone()),
-                                NotShadowCaster,
-                            ));
-                            for (i, scale) in [0.13, 0.22, 0.09].into_iter().enumerate() {
-                                prop(
-                                    h,
-                                    Prop::Gadget(i as u8),
-                                    &assets.gadgets[i],
-                                    skin,
-                                    Transform::from_xyz(0.0, 0.02, -0.03)
-                                        .with_scale(Vec3::splat(scale)),
-                                );
+                            for (l, meshes) in assets.missiles.iter().enumerate() {
+                                let l = l as u8;
+                                // Flat things are held up on their edge, the
+                                // rest pointing forward from the fingers.
+                                let tf = match l {
+                                    look::TRAP => Transform::from_xyz(0.0, 0.03, -0.06)
+                                        .with_rotation(Quat::from_rotation_x(1.2))
+                                        .with_scale(Vec3::splat(0.6)),
+                                    look::CLAYMORE => Transform::from_xyz(0.0, -0.02, -0.05)
+                                        .with_rotation(Quat::from_rotation_x(0.3)),
+                                    _ => Transform::from_xyz(0.0, -0.005, -0.03),
+                                };
+                                glowing(h, Prop::Missile(l), meshes, tf);
                             }
-                            prop(
+                            glowing(
                                 h,
-                                Prop::Saya,
-                                &assets.saya,
-                                skin,
-                                Transform::from_xyz(0.0, 0.0, -0.01),
+                                Prop::Drone,
+                                &assets.drone,
+                                Transform::from_xyz(0.0, 0.05, -0.08).with_scale(Vec3::splat(0.35)),
                             );
                         } else {
-                            // The hilt runs up through the fist like a pistol grip.
-                            prop(
+                            // The shaft runs up through the fist.
+                            glowing(
                                 h,
-                                Prop::Katana,
-                                &assets.katana,
-                                skin,
-                                Transform::from_xyz(0.0, 0.06, 0.0)
+                                Prop::Scythe,
+                                &assets.scythe,
+                                Transform::from_xyz(0.0, 0.0, 0.0)
                                     .with_rotation(Quat::from_rotation_x(PI / 2.0)),
-                            );
-                            prop(
-                                h,
-                                Prop::Edge,
-                                &assets.edge,
-                                &assets.edge_mat,
-                                Transform::from_xyz(0.0, 0.06 + 0.43, 0.012)
-                                    .with_rotation(Quat::from_rotation_x(PI / 2.0 + 0.07)),
-                            );
-                            prop(
-                                h,
-                                Prop::Spear,
-                                &assets.spear,
-                                &assets.spear_mat,
-                                Transform::from_xyz(0.0, 0.1, 0.0).with_scale(Vec3::splat(0.7)),
                             );
                         }
                     });
@@ -700,24 +572,16 @@ fn animate(
     // Is the left hand busy with an ability?
     let ab = |slot: u8| me.kit[slot as usize];
     let style_of = |slot: u8| ab(slot).style();
-    let blade = |slot: u8| matches!(style_of(slot), CastStyle::Sword | CastStyle::Spear);
+    let blade = |slot: u8| style_of(slot) == CastStyle::Sword;
     let anim_len = |slot: u8| if blade(slot) { 0.7 } else { 0.55 };
     let cast_anim = cast.cast.filter(|(slot, s)| *s < anim_len(*slot));
-    // Sword and spear casts use the right hand, so the gun goes down.
+    // Scythe swings use both hands, so the gun goes down.
     let two_hand = cast_anim.filter(|(slot, _)| cast.aiming.is_none() && blade(*slot));
-    // Holding Iaido: the sword comes out and waits, ready to cut.
-    let charging = cast.aiming.filter(|s| ab(*s).charges());
-    let stow = if charging.is_some() {
-        ramp(cast.held, 0.0, 0.1)
-    } else {
-        two_hand.map_or(0.0, |(_, s)| {
-            ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68))
-        })
-    };
+    let stow = two_hand.map_or(0.0, |(_, s)| {
+        ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68))
+    });
     let cast_slot = cast.aiming.or(cast_anim.map(|(s, _)| s));
-    let busy = two_hand.is_none()
-        && charging.is_none()
-        && cast_slot.is_some_and(|s| style_of(s) != CastStyle::Move);
+    let busy = two_hand.is_none() && cast_slot.is_some_and(|s| style_of(s) != CastStyle::Move);
     anim.busy = approach(anim.busy, if busy { 1.0 } else { 0.0 }, dt * 12.0);
 
     // --- Gun pose ----------------------------------------------------------
@@ -963,12 +827,13 @@ fn animate(
         let color = ability.color();
         // What the hand holds for this ability, if anything.
         let thing = match ability {
-            Ability::Firebomb => Some(Prop::Firebomb),
-            Ability::KunaiFan => Some(Prop::Knife),
-            Ability::Sentry | Ability::CombatDrone => Some(Prop::Gadget(0)),
-            Ability::SupplyDrop => Some(Prop::Gadget(1)),
-            Ability::TeslaCoil => Some(Prop::Gadget(2)),
-            _ if style == CastStyle::Throw => Some(Prop::Grenade),
+            Ability::HealingGrenade => Some(Prop::Missile(look::MEDKIT)),
+            Ability::StickyBomb => Some(Prop::Missile(look::STICKY)),
+            Ability::AcidFlask => Some(Prop::Missile(look::FLASK)),
+            Ability::BearTrap => Some(Prop::Missile(look::TRAP)),
+            Ability::Claymore => Some(Prop::Missile(look::CLAYMORE)),
+            Ability::NeurotoxinDart => Some(Prop::Missile(look::DART)),
+            Ability::MedDrone => Some(Prop::Drone),
             _ => None,
         };
         let mut hand = ready;
@@ -1016,8 +881,8 @@ fn animate(
                     }
                 }
                 _ => {
-                    // Push the palm out (heal, nova, overdrive, flames) or
-                    // raise it to the sky (orbital strike, Ragnarok).
+                    // Push the palm out (darts, chains, sprays) or raise it
+                    // to the sky (ultimates).
                     let push = match style {
                         CastStyle::Sky => {
                             at(Vec3::new(-0.09, 0.08, -0.4), Quat::from_rotation_x(0.5))
@@ -1038,7 +903,10 @@ fn animate(
                     } else {
                         support_pose
                     };
-                    if s < 0.25 {
+                    // A dart is flicked out of the fingers; everything else
+                    // flares in the palm.
+                    held = thing.filter(|_| s < 0.1);
+                    if s < 0.25 && thing.is_none() {
                         orb = Some((color, 1.0 + s * 10.0));
                     }
                 }
@@ -1061,128 +929,38 @@ fn animate(
         }
     }
 
-    // Iaido / Blade Storm: draw the katana from the left hip and cut across.
-    // Arc Spear: raise the spear over the shoulder and hurl it.
-    let mut saya = false;
-    let mut edge: Option<(Color, f32)> = None;
-    // The fist turned so the blade (up through the grip) points along `dir`.
-    let sword = |pos: Vec3, dir: Vec3| at(pos, Quat::from_rotation_arc(Vec3::Y, dir.normalize()));
-    let sheath = sword(Vec3::new(-0.18, -0.3, -0.22), Vec3::new(-0.5, -0.3, 0.8));
-    // Iaido held ready: blade out to the left, level, edge forward.
-    let ready_cut = sword(Vec3::new(0.02, -0.15, -0.42), Vec3::new(-0.75, 0.15, -0.65));
-    // The left hand holds the scabbard at the hip.
-    let hip = at(
-        Vec3::new(-0.2, -0.34, -0.22),
-        Quat::from_euler(EulerRot::YXZ, 1.75, 0.12, 0.0),
-    );
-    if let Some(slot) = charging {
-        let k = (cast.held / crate::abilities::FULL_CHARGE).min(1.0);
-        let draw = ramp(cast.held, 0.0, 0.07);
-        let mut ready = ready_cut;
-        // Fully charged: the blade trembles with held power.
-        if k >= 1.0 {
-            ready.translation +=
-                Vec3::new((t * 70.0).sin(), (t * 53.0).cos(), (t * 61.0).sin()) * 0.0025;
-        }
-        right_tf = if cast.held < 0.07 {
-            blend(right_tf, sheath, draw)
-        } else {
-            blend(sheath, ready, ease(ramp(cast.held, 0.07, 0.22)))
-        };
-        right_held = Some(Prop::Katana);
-        right_pose = HandPose::Grip { trigger: false };
-        left_tf = blend(left_tf, hip, ease(draw));
-        left_pose = HandPose::Hold;
-        saya = true;
-        edge = Some((ab(slot).color(), 0.25 + 0.75 * k));
-    }
-    if let Some((slot, s)) = two_hand {
+    // Scythe Sweep / Reaper: the scythe comes up on the right and reaps
+    // across the view, the left hand on the side grip.
+    // The fist turned so the shaft (up through the grip) points along `dir`,
+    // rolled so the blade faces the way it is cutting.
+    let shaft = |pos: Vec3, dir: Vec3, roll: f32| {
+        at(pos, Quat::from_rotation_arc(Vec3::Y, dir.normalize()) * Quat::from_rotation_y(roll))
+    };
+    if let Some((_, s)) = two_hand {
         let back = right_tf;
-        let ease_back = |pose: Transform| blend(pose, back, ramp(s, 0.48, 0.68));
-        if style_of(slot) == CastStyle::Sword {
-            // The cut sweeps the blade across the screen: drawn from the
-            // hip, up on the left, over and down to the right.
-            let mut start = sword(Vec3::new(-0.3, -0.06, -0.36), Vec3::new(-0.8, 0.5, -0.3));
-            let mut mid = sword(Vec3::new(0.0, -0.06, -0.46), Vec3::new(0.05, 0.85, -0.5));
-            let mut finish = sword(Vec3::new(0.3, -0.2, -0.32), Vec3::new(0.9, -0.15, -0.4));
-            let ability = ab(slot);
-            if ability == Ability::RisingDragon {
-                // Low on the right, up through the middle, high overhead.
-                start = sword(Vec3::new(0.2, -0.4, -0.3), Vec3::new(0.3, -0.3, -0.9));
-                mid = sword(Vec3::new(0.05, -0.05, -0.5), Vec3::new(0.0, 0.6, -0.8));
-                finish = sword(Vec3::new(-0.05, 0.25, -0.35), Vec3::new(-0.1, 1.0, 0.3));
-            }
-            // A charged Iaido cuts straight from where it was held, flat
-            // and fast across the whole view.
-            let from_ready = ability.charges() && cast.held > 0.1;
-            if from_ready {
-                start = ready_cut;
-                mid = sword(Vec3::new(0.05, -0.12, -0.5), Vec3::new(0.0, 0.2, -1.0));
-                finish = sword(Vec3::new(0.38, -0.16, -0.3), Vec3::new(0.95, 0.05, -0.2));
-                if s < 0.3 {
-                    edge = Some((ability.color(), 1.0 - ramp(s, 0.1, 0.3)));
-                }
-            }
-            let (t0, t1, t2) = if from_ready {
-                (0.0, 0.035, 0.08)
-            } else {
-                (0.08, 0.13, 0.17)
-            };
-            right_tf = if s < t0 {
-                blend(back, sheath, ramp(s, 0.0, t0))
-            } else if s < t1 {
-                blend(if from_ready { start } else { sheath }, if from_ready { mid } else { start }, ramp(s, t0, t1))
-            } else if s < t2 {
-                blend(if from_ready { mid } else { start }, if from_ready { finish } else { mid }, ramp(s, t1, t2))
-            } else if !from_ready && s < 0.22 {
-                blend(mid, finish, ramp(s, 0.17, 0.22))
-            } else {
-                ease_back(finish)
-            };
-            right_held = (if from_ready { 0.0 } else { 0.06 }..0.6)
-                .contains(&s)
-                .then_some(Prop::Katana);
-            left_tf = blend(
-                left_tf,
-                hip,
-                ramp(s, 0.0, 0.07) * (1.0 - ramp(s, 0.5, 0.68)),
-            );
-            if s < 0.6 {
-                left_pose = HandPose::Hold;
-                saya = true;
-            }
+        let raised = shaft(Vec3::new(0.32, -0.12, -0.2), Vec3::new(0.6, 0.75, 0.3), -1.2);
+        let wind = shaft(Vec3::new(0.38, -0.1, -0.28), Vec3::new(0.9, 0.35, -0.1), -1.6);
+        let mid = shaft(Vec3::new(0.05, -0.18, -0.42), Vec3::new(0.1, 0.3, -1.0), -1.57);
+        let finish = shaft(Vec3::new(-0.3, -0.22, -0.3), Vec3::new(-0.95, 0.2, -0.2), -1.5);
+        right_tf = if s < 0.08 {
+            blend(back, raised, ease(ramp(s, 0.0, 0.08)))
+        } else if s < 0.14 {
+            blend(raised, wind, ramp(s, 0.08, 0.14))
+        } else if s < 0.2 {
+            blend(wind, mid, ramp(s, 0.14, 0.2))
+        } else if s < 0.26 {
+            blend(mid, finish, ramp(s, 0.2, 0.26))
         } else {
-            // The fist turned so the spear points forward (and a little up).
-            let spear = |pitch: f32| Quat::from_rotation_x(pitch - PI / 2.0);
-            let raise = at(Vec3::new(0.17, -0.02, -0.08), spear(0.12));
-            let release = at(Vec3::new(0.06, -0.08, -0.55), spear(-0.05));
-            let after = at(Vec3::new(0.1, -0.3, -0.4), spear(-0.5));
-            right_tf = if s < 0.1 {
-                blend(back, raise, ramp(s, 0.0, 0.1))
-            } else if s < 0.18 {
-                blend(raise, release, ramp(s, 0.1, 0.18))
-            } else if s < 0.35 {
-                blend(release, after, ramp(s, 0.18, 0.35))
-            } else {
-                ease_back(after)
-            };
-            right_held = (0.03..0.18).contains(&s).then_some(Prop::Spear);
-            // The other hand points the way.
-            let point = at(Vec3::new(-0.16, -0.06, -0.5), Quat::from_rotation_x(0.1));
-            left_tf = blend(
-                left_tf,
-                point,
-                ramp(s, 0.0, 0.1) * (1.0 - ramp(s, 0.4, 0.6)),
-            );
-            if s < 0.45 {
-                left_pose = HandPose::Open;
-            }
-            if s < 0.2 {
-                orb = Some((ab(slot).color(), 1.0 + s * 6.0));
-            }
-        }
-        if s < 0.6 {
+            blend(finish, back, ramp(s, 0.45, 0.68))
+        };
+        let shown = s < 0.6;
+        if shown {
+            right_held = Some(Prop::Scythe);
             right_pose = HandPose::Grip { trigger: false };
+            // The left hand follows on the side grip, a little lower.
+            let grip = right_tf.transform_point(Vec3::new(0.0, 0.42, 0.0)) - Vec3::Y * 0.04;
+            left_tf = blend(left_tf, at(grip, right_tf.rotation), ramp(s, 0.0, 0.08) * (1.0 - ramp(s, 0.4, 0.55)));
+            left_pose = HandPose::Hold;
         }
     }
 
@@ -1324,16 +1102,6 @@ fn animate(
                     }
                 }
                 orb.is_some()
-            }
-            Prop::Saya => saya,
-            Prop::Edge => {
-                if let Some((color, k)) = edge {
-                    tf.scale = Vec3::new(1.0 + k, 1.0, 0.4 + 0.6 * k);
-                    if let Some(m) = materials.get_mut(&rig_assets.edge_mat) {
-                        m.base_color = color.with_alpha(0.9 * k);
-                    }
-                }
-                edge.is_some() && right_held == Some(Prop::Katana)
             }
             p => held == Some(p) || right_held == Some(p),
         };

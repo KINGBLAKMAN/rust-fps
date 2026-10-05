@@ -492,8 +492,7 @@ pub fn fire(
     };
     let def = gun_def(gun.id);
     let buff = me.gun_buff();
-    let overdrive = me.overdrive > 0.0;
-    let free = overdrive || buff.free_ammo;
+    let free = buff.free_ammo;
 
     // Right mouse fires the alternate fire, if the gun has one.
     let alt = match alt_fire(gun.id) {
@@ -531,9 +530,6 @@ pub fn fire(
     let mut interval = 60.0 / def.rpm;
     if has_perk(me.perks, Perk::RapidFire) {
         interval /= 1.33;
-    }
-    if overdrive {
-        interval /= 1.5;
     }
     if me.stim > 0.0 {
         interval /= 1.25;

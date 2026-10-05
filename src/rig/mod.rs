@@ -293,24 +293,24 @@ fn finger_color(model: Model) -> Color {
         };
     };
     match ch {
-        Character::Striker => c(0.09, 0.09, 0.1),
-        Character::Warden => c(0.85, 0.86, 0.88),
-        Character::Ronin => c(0.07, 0.06, 0.07),
-        Character::Tinker => c(0.55, 0.42, 0.25),
-        Character::Blaze => c(0.62, 0.42, 0.2),
-        Character::Valkyrie => c(0.75, 0.78, 0.85),
+        Character::Bulwark => c(0.09, 0.09, 0.1),
+        Character::Medic => c(0.85, 0.86, 0.88),
+        Character::Revenant => c(0.07, 0.06, 0.07),
+        Character::Demolisher => c(0.55, 0.42, 0.25),
+        Character::Chemist => c(0.62, 0.42, 0.2),
+        Character::Ranger => c(0.75, 0.78, 0.85),
     }
 }
 
 pub fn model_parts(model: Model) -> Vec<(Bone, Kit, bool)> {
     let mut p = Parts::default();
     match model {
-        Model::Hero(Character::Striker) => heroes::striker(&mut p),
-        Model::Hero(Character::Warden) => heroes::warden(&mut p),
-        Model::Hero(Character::Ronin) => heroes::ronin(&mut p),
-        Model::Hero(Character::Tinker) => heroes::tinker(&mut p),
-        Model::Hero(Character::Blaze) => heroes::blaze(&mut p),
-        Model::Hero(Character::Valkyrie) => heroes::valkyrie(&mut p),
+        Model::Hero(Character::Bulwark) => heroes::bulwark(&mut p),
+        Model::Hero(Character::Medic) => heroes::medic(&mut p),
+        Model::Hero(Character::Revenant) => heroes::revenant(&mut p),
+        Model::Hero(Character::Demolisher) => heroes::demolisher(&mut p),
+        Model::Hero(Character::Chemist) => heroes::chemist(&mut p),
+        Model::Hero(Character::Ranger) => heroes::ranger(&mut p),
         Model::Walker(v) => zombie_models::walker(&mut p, v),
         Model::Spitter => zombie_models::spitter(&mut p),
         Model::Brute => zombie_models::brute(&mut p),
