@@ -26,7 +26,9 @@ use crate::{
 
 const REVIVE_HEALTH_FRACTION: f32 = 0.5;
 const INTERACT_RANGE: f32 = 2.6;
-const POWERUP_CHANCE: f64 = 0.06;
+const POWERUP_CHANCE: f64 = 0.03;
+/// Seconds after a drop before another can drop.
+const POWERUP_GAP: f32 = 25.0;
 const REGEN_DELAY: f32 = 4.0;
 const REGEN_RATE: f32 = 20.0;
 
@@ -780,6 +782,8 @@ fn apply_damage(
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
     mut enemies: Query<(Entity, &Transform, &mut EnemyBrain, &mut EnemyStatus)>,
+    time: Res<Time>,
+    mut last_drop: Local<Option<f32>>,
 ) {
     if queue.0.is_empty() {
         return;
@@ -895,7 +899,10 @@ fn apply_damage(
         }
         if killed {
             crate::zombies::kill(&mut commands, target);
-            if rng.gen_bool(POWERUP_CHANCE) {
+            let now = time.elapsed_secs();
+            let ready = last_drop.map_or(true, |t| now - t >= POWERUP_GAP || now < t);
+            if ready && rng.gen_bool(POWERUP_CHANCE) {
+                *last_drop = Some(now);
                 let kind = PowerUp::ALL[rng.gen_range(0..PowerUp::ALL.len())];
                 let id = state.next_net_id;
                 state.next_net_id += 1;

@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v8.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v8); small updates bump the minor number (v8.1, v8.2...).
+Current version: **v8.1** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v8); small updates bump the minor number (v8.1, v8.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -84,7 +84,7 @@ Every gun is modelled (23 in all) and held in gloved first-person hands, with an
 - **Two guns:** you start with the M9 Sidearm and can carry two guns. Spare ammo is topped up at the start of each round.
 - **Mystery box:** 750 points per spin, always. Its beam goes up into the sky so you can find it from anywhere. It gives one of 20 guns, or rarely one of 2 wonder weapons (Ray Blaster: explosive shots; Thunder Cannon: lightning that chains between enemies). Box guns come with random attachments: all, some or none of an optic (Red Dot, Holo Sight, 3x Scope), a muzzle, an underbarrel grip or laser and an extended mag. The box sits at one of 5 spots and every few spins it may fly away to another (you get your points back).
 - **Perk machines:** Quick Hands (3000, reload twice as fast), Stamina Rush (2000, faster sprint and slides), Boom Shot (3500, headshots can explode), Juggernaut (2500, 200 max health), Rapid Fire (2000, shoot 33% faster). You lose your perks when you go down.
-- **Power-ups** drop from zombies: Nuke (kills everything, +400 points each), Insta-Kill, Double Points (30 seconds each) and Max Ammo.
+- **Power-ups** sometimes drop from zombies (rarely, and never two within 25 seconds of each other): Nuke (kills everything, +400 points each), Insta-Kill, Double Points (30 seconds each) and Max Ammo.
 - **Maps and doors:** every map is a set of rooms, corridors, yards and buildings to explore, split into a starting area and 7 more areas behind doors you buy open (750-1250 points). Areas loop into each other, so there's usually more than one way round. Zombies only come from areas that are open, and the perk machines are spread through the areas.
   - **Shipping Yard:** start in the Customs Hall and Gate Yard; open up the Container Stacks, the Warehouse (with a cold store), the Dockside, the Port Office, the Rail Yard, the Machine Shop and the Truck Depot.
   - **Central Park:** start in the Visitor Centre and Fountain Court; open up the Hedge Maze, Lakeside (boat shed and café), the Museum, the Old Zoo, the Conservatory, the Chapel and Bandstand Green.

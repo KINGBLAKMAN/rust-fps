@@ -2,9 +2,9 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v8.0 (2026-10-05)
+## Current version: v8.1 (2026-10-05)
 
-Released: the Windows zip, the all-versions zip (v1 to v8), and the code pushed to GitHub (branch `claude/v8-art-pass-ymt4mt`).
+Released: the Windows zip, the all-versions zip (v1 to v8.1), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
 
 ## Version history
 
@@ -47,6 +47,7 @@ Released: the Windows zip, the all-versions zip (v1 to v8), and the code pushed 
   - New Graphics settings for outlines, camera shake and air particles.
   - `rust-fps lookdev` views for checking the art (`lookdev.rs`).
 - v6.1: Ctrl+V pastes into the join address box (it used to type a "v", which made Windows report os error 11001), typed addresses are tidied (spaces, http://, commas), and clearer join errors.
+- v8.1 (first step of the Game Overhaul list): power-ups drop half as often (3% a kill) and never within 25 s of the last drop; every ability cooldown is 30% longer (`COOLDOWN_SCALE` in `data.rs`).
 
 ## Known issues and loose ends
 
@@ -70,4 +71,14 @@ Released: the Windows zip, the all-versions zip (v1 to v8), and the code pushed 
 
 ## Next session
 
-Nothing is in progress. Start new work from Jonah's next request.
+Jonah's "Game Overhaul" list is split into versions (agreed plan, 2026-10-05):
+
+- v8.1: fewer power-ups, slower cooldowns (done).
+- v9.0: the run: no COD doors, survive rounds, level up and pick upgrades, map boss, teleporter to the next map, 5 maps then a final boss, harder each map.
+- v10.0: classes (the 6 characters): 2 primaries and 2 secondaries each, 2 weapon abilities, 2 class abilities, weapon upgrades; alt fire on some guns instead of ADS.
+- v11.0: ability upgrades that scale (more daggers in a fan, two fireballs, extra dashes, more grenades), tuned over a 5-map run.
+- v12.0: character rework: detailed models, new ability visuals and animations.
+- v13.0: procedural maps per run, plus 10 new map themes.
+- v14.0: sound design pass and a menu rework (bigger text, decorative but simple).
+
+Start v9.0 next.

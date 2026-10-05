@@ -1349,6 +1349,9 @@ pub enum Ability {
     SpearRain,
 }
 
+/// All ability cooldowns are stretched by this (v8.1: they came round too fast).
+pub const COOLDOWN_SCALE: f32 = 1.3;
+
 pub struct AbilityDef {
     pub name: &'static str,
     pub desc: &'static str,
@@ -1507,10 +1510,10 @@ impl Ability {
         Color::srgb(r, g, b)
     }
 
-    /// Cooldown in seconds at an upgrade tier (0-3).
+    /// Cooldown in seconds at an upgrade tier (0-3), after COOLDOWN_SCALE.
     pub fn cooldown(self, tier: u8) -> f32 {
         let (base, per) = self.def().cooldown;
-        base - per * tier as f32
+        (base - per * tier as f32) * COOLDOWN_SCALE
     }
 
     /// Held in the hand and thrown (with an arc preview).
