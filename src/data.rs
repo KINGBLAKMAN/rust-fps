@@ -113,7 +113,7 @@ const fn shotgun(
 use FireMode::*;
 use GunClass::*;
 
-/// Gun 0 is the starting pistol. Guns 1-20 come from the mystery box, and
+/// Guns 0-20 are class guns (see `Character::guns`), and
 /// 21-22 are the rare wonder weapons.
 pub const GUNS: [GunDef; 23] = [
     gun("M9 Sidearm", Pistol, Semi, 34.0, 420.0, 12, 72, 1.3),
@@ -167,45 +167,96 @@ pub const GUNS: [GunDef; 23] = [
     },
 ];
 
-pub const STARTER_GUN: u8 = 0;
+/// The Armory (the old mystery box): new attachments for the gun in your
+/// hands, or rarely a wonder weapon.
 pub const BOX_COST: u32 = 750;
+/// Chance the Armory offers a wonder weapon instead.
+pub const WONDER_CHANCE: f64 = 0.05;
+/// Wall boards are ammo caches since v10: refill both guns.
+pub const AMMO_COST: u32 = 300;
+
+/// What right mouse does with a gun. Guns without an alternate fire aim
+/// down sights.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AltFire {
+    Sights,
+    /// Shotguns: one solid slug that hits as hard as the whole spread.
+    Slug,
+    /// Rifles: an underbarrel grenade, recharging every `GRENADE_RECHARGE`.
+    Grenade,
+    /// SMGs and pistols: dump this many rounds at once.
+    Burst(u32),
+}
+
+/// Seconds for the underbarrel grenade to come back.
+pub const GRENADE_RECHARGE: f32 = 8.0;
+
+pub fn alt_fire(gun: u8) -> AltFire {
+    let d = gun_def(gun);
+    match (d.class, d.mode) {
+        (GunClass::Shotgun, _) => AltFire::Slug,
+        (GunClass::Rifle, FireMode::Auto | FireMode::Burst) => AltFire::Grenade,
+        (GunClass::Smg, _) => AltFire::Burst(5),
+        (GunClass::Pistol, FireMode::Auto) => AltFire::Burst(5),
+        (GunClass::Pistol, _) => AltFire::Burst(3),
+        _ => AltFire::Sights,
+    }
+}
+
+impl AltFire {
+    /// A line for the HUD and the loadout screen.
+    pub fn describe(self) -> &'static str {
+        match self {
+            AltFire::Sights => "Aim down sights",
+            AltFire::Slug => "Slug shot",
+            AltFire::Grenade => "Underbarrel grenade",
+            AltFire::Burst(3) => "Fan the hammer (3 shots)",
+            AltFire::Burst(_) => "Mag dump burst (5 shots)",
+        }
+    }
+}
+
+/// Weapon upgrades from level-ups: Mk II to Mk IV.
+pub const MAX_GUN_TIER: u8 = 3;
+
+/// Damage and magazine size at a weapon upgrade tier.
+pub fn tier_mult(tier: u8) -> f32 {
+    1.0 + 0.25 * tier as f32
+}
+
+pub fn tier_name(tier: u8) -> &'static str {
+    ["", " Mk II", " Mk III", " Mk IV"][tier.min(3) as usize]
+}
 
 pub fn gun_def(id: u8) -> &'static GunDef {
     &GUNS[(id as usize).min(GUNS.len() - 1)]
 }
 
-/// Price of a gun bought off the wall (ammo for it costs half).
 /// Guns carried in pairs that fire both at once (Twin Fangs).
 pub fn is_dual(gun: u8) -> bool {
     gun == 20
 }
 
-pub fn wall_cost(gun: u8) -> u32 {
-    match gun_def(gun).class {
-        GunClass::Pistol => 500,
-        GunClass::Smg | GunClass::Shotgun => 1000,
-        GunClass::Rifle => 1250,
-        _ => 1500,
-    }
-}
 
-/// Rolls a mystery box gun, never one the player already holds or one on
-/// this map's walls.
-pub fn roll_box_gun(rng: &mut impl rand::Rng, exclude: &[Option<u8>; 2], wall: &[u8]) -> u8 {
-    loop {
-        let id = if rng.gen_bool(0.06) {
-            rng.gen_range(21..=22)
-        } else {
-            rng.gen_range(1..=20)
-        };
-        if !exclude.contains(&Some(id)) && !wall.contains(&id) {
-            return id;
+/// Rolls what the Armory offers for the gun in your hands: rarely a wonder
+/// weapon to swap it for, otherwise a new set of attachments for it.
+pub fn roll_armory(rng: &mut impl rand::Rng, held: u8, fitted: Attach) -> (u8, Attach) {
+    if !gun_def(held).rare && rng.gen_bool(WONDER_CHANCE) {
+        let id = rng.gen_range(21..=22);
+        return (id, roll_attachments(id, rng));
+    }
+    // Something other than what's fitted, if the gun takes anything.
+    for _ in 0..12 {
+        let a = roll_attachments(held, rng);
+        if a != fitted && a != Attach::NONE {
+            return (held, a);
         }
     }
+    (held, roll_attachments(held, rng))
 }
 
 // ---------------------------------------------------------------------------
-// Attachments (mystery box guns only)
+// Attachments
 // ---------------------------------------------------------------------------
 
 /// A gun's attachments, packed in one byte: optic (bits 0-1), muzzle (2-3),
@@ -584,6 +635,11 @@ pub fn recoil(gun: u8) -> Recoil {
 }
 
 /// Magazine size with attachments.
+/// Magazine size at a weapon upgrade tier.
+pub fn tiered_mag(gun: u8, attach: Attach, tier: u8) -> u32 {
+    (mag_size(gun, attach) as f32 * tier_mult(tier)).round() as u32
+}
+
 pub fn mag_size(gun: u8, attach: Attach) -> u32 {
     let m = gun_def(gun).mag;
     if attach.ext_mag() {
@@ -664,7 +720,7 @@ fn attach_slots(gun: u8, class: GunClass) -> (&'static [u8], &'static [u8], &'st
     }
 }
 
-/// Random attachments for a mystery box gun: about a quarter come bare,
+/// Random attachments from the Armory: about a quarter come bare,
 /// half with some attachments and a quarter fully kitted out.
 pub fn roll_attachments(gun: u8, rng: &mut impl rand::Rng) -> Attach {
     let (optics, muzzles, unders, mag) = attach_options(gun);
@@ -1290,6 +1346,223 @@ impl Character {
     }
 }
 
+/// A class's guns: pick one primary and one secondary.
+pub struct ClassGuns {
+    pub primaries: [u8; 2],
+    pub secondaries: [u8; 2],
+}
+
+impl Character {
+    pub fn guns(self) -> ClassGuns {
+        let (primaries, secondaries) = match self {
+            // Falcon AR, Tempest Burst / M9 Sidearm, Mamba Machine Pistol
+            Character::Striker => ([6, 8], [0, 5]),
+            // Bulldog Carbine, Breacher 12 / Viper .45, Hornet MP
+            Character::Warden => ([9, 10], [1, 2]),
+            // Kestrel SMG, Twin Fangs / Hammer .50, Viper .45
+            Character::Ronin => ([3, 20], [19, 1]),
+            // Goliath LMG, Ripsaw LMG / Wasp PDW, M9 Sidearm
+            Character::Tinker => ([13, 14], [4, 0]),
+            // Stormfront Auto, Double Barrel / Judge Revolver, Mamba
+            Character::Blaze => ([11, 12], [18, 5]),
+            // Arbiter DMR, Longbow Sniper / Hornet MP, Hammer .50
+            Character::Valkyrie => ([16, 15], [2, 19]),
+        };
+        ClassGuns {
+            primaries,
+            secondaries,
+        }
+    }
+
+    /// The class's first primary and first secondary.
+    pub fn default_guns(self) -> [u8; 2] {
+        let g = self.guns();
+        [g.primaries[0], g.secondaries[0]]
+    }
+
+    /// Is `gun` one this class can bring in `slot` (0 primary, 1 secondary)?
+    pub fn has_gun(self, slot: usize, gun: u8) -> bool {
+        let g = self.guns();
+        if slot == 0 {
+            g.primaries.contains(&gun)
+        } else {
+            g.secondaries.contains(&gun)
+        }
+    }
+
+    pub fn weapon_abilities(self) -> [WeaponAbility; 2] {
+        use WeaponAbility as W;
+        match self {
+            Character::Striker => [W::IncendiaryMag, W::LockAndLoad],
+            Character::Warden => [W::CryoRounds, W::SuppressingFire],
+            Character::Ronin => [W::Quickdraw, W::Executioner],
+            Character::Tinker => [W::AutoLoader, W::ShockRounds],
+            Character::Blaze => [W::DragonsBreath, W::Overheat],
+            Character::Valkyrie => [W::StormRounds, W::Overcharge],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Weapon abilities
+// ---------------------------------------------------------------------------
+
+/// Two per class (keys 3 and 4): each powers up whatever gun you're holding
+/// for a few seconds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum WeaponAbility {
+    IncendiaryMag,
+    LockAndLoad,
+    CryoRounds,
+    SuppressingFire,
+    Quickdraw,
+    Executioner,
+    AutoLoader,
+    ShockRounds,
+    DragonsBreath,
+    Overheat,
+    StormRounds,
+    Overcharge,
+}
+
+/// What a weapon ability does to your shots while it lasts.
+#[derive(Clone, Copy, Default)]
+pub struct GunBuff {
+    /// Element bits added to your gun.
+    pub elements: u8,
+    pub damage: f32,
+    /// Fire rate multiplier.
+    pub rate: f32,
+    pub free_ammo: bool,
+    /// Seconds each hit stuns for.
+    pub stun: f32,
+    /// Hits kill anything below this share of its health.
+    pub execute: f32,
+    /// Each hit explodes in this radius.
+    pub blast: f32,
+    /// Each hit arcs to this many more enemies.
+    pub chain: u8,
+}
+
+pub struct WeaponAbilityDef {
+    pub name: &'static str,
+    pub desc: &'static str,
+    pub cooldown: f32,
+    pub duration: f32,
+    pub color: [f32; 3],
+}
+
+const fn wa(name: &'static str, desc: &'static str, cooldown: f32, duration: f32, color: [f32; 3]) -> WeaponAbilityDef {
+    WeaponAbilityDef {
+        name,
+        desc,
+        cooldown,
+        duration,
+        color,
+    }
+}
+
+/// In the same order as `WeaponAbility`.
+#[rustfmt::skip]
+const WEAPON_ABILITY_DEFS: [WeaponAbilityDef; 12] = [
+    wa("Incendiary Mag", "Your bullets set zombies on fire.", 20.0, 10.0, [1.0, 0.45, 0.1]),
+    wa("Lock and Load", "Refill your magazine and hit 40% harder.", 18.0, 8.0, [1.0, 0.8, 0.3]),
+    wa("Cryo Rounds", "Your bullets slow zombies down.", 20.0, 10.0, [0.55, 0.85, 1.0]),
+    wa("Suppressing Fire", "Every hit stuns for a moment.", 22.0, 8.0, [0.85, 0.9, 1.0]),
+    wa("Quickdraw", "Shoot 40% faster and hit 80% harder.", 22.0, 6.0, [1.0, 0.25, 0.25]),
+    wa("Executioner", "Hits finish off anything under a quarter health.", 24.0, 8.0, [0.7, 0.1, 0.15]),
+    wa("Auto-Loader", "No ammo used and 30% faster fire.", 22.0, 8.0, [0.3, 0.9, 1.0]),
+    wa("Shock Rounds", "Your bullets arc to nearby zombies.", 20.0, 10.0, [0.5, 0.8, 1.0]),
+    wa("Dragon's Breath", "Burning rounds that burst on impact.", 24.0, 8.0, [1.0, 0.35, 0.05]),
+    wa("Overheat", "Shoot 60% faster and hit 20% harder.", 20.0, 6.0, [1.0, 0.55, 0.1]),
+    wa("Storm Rounds", "Your bullets arc to nearby zombies.", 20.0, 10.0, [0.6, 0.85, 1.0]),
+    wa("Overcharge", "Every shot chains lightning through three more zombies.", 24.0, 8.0, [0.75, 0.75, 1.0]),
+];
+
+impl WeaponAbility {
+    pub fn def(self) -> &'static WeaponAbilityDef {
+        &WEAPON_ABILITY_DEFS[self as usize]
+    }
+
+    pub fn name(self) -> &'static str {
+        self.def().name
+    }
+
+    pub fn color(self) -> Color {
+        let [r, g, b] = self.def().color;
+        Color::srgb(r, g, b)
+    }
+
+    pub fn cooldown(self) -> f32 {
+        self.def().cooldown * COOLDOWN_SCALE
+    }
+
+    pub fn buff(self) -> GunBuff {
+        let none = GunBuff {
+            damage: 1.0,
+            rate: 1.0,
+            ..default()
+        };
+        use WeaponAbility as W;
+        match self {
+            W::IncendiaryMag => GunBuff {
+                elements: Element::Fire.bit(),
+                ..none
+            },
+            W::LockAndLoad => GunBuff {
+                damage: 1.4,
+                ..none
+            },
+            W::CryoRounds => GunBuff {
+                elements: Element::Ice.bit(),
+                ..none
+            },
+            W::SuppressingFire => GunBuff { stun: 0.6, ..none },
+            W::Quickdraw => GunBuff {
+                damage: 1.8,
+                rate: 1.4,
+                ..none
+            },
+            W::Executioner => GunBuff {
+                execute: 0.25,
+                ..none
+            },
+            W::AutoLoader => GunBuff {
+                free_ammo: true,
+                rate: 1.3,
+                ..none
+            },
+            W::ShockRounds | W::StormRounds => GunBuff {
+                elements: Element::Shock.bit(),
+                ..none
+            },
+            W::DragonsBreath => GunBuff {
+                elements: Element::Fire.bit(),
+                blast: 2.2,
+                ..none
+            },
+            W::Overheat => GunBuff {
+                damage: 1.2,
+                rate: 1.6,
+                ..none
+            },
+            W::Overcharge => GunBuff { chain: 3, ..none },
+        }
+    }
+}
+
+/// The buff a player's active weapon ability gives (none when it's run out).
+pub fn active_buff(ability: Option<WeaponAbility>, time: f32) -> GunBuff {
+    match ability {
+        Some(a) if time > 0.0 => a.buff(),
+        _ => GunBuff {
+            damage: 1.0,
+            rate: 1.0,
+            ..default()
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Abilities
 // ---------------------------------------------------------------------------
@@ -1825,10 +2098,13 @@ pub enum Upgrade {
     GunElement(u8),
     AbilityElement(u8),
     Stat(Stat),
+    /// Upgrade the gun in slot 0 (primary) or 1 (secondary).
+    Weapon(u8),
 }
 
 impl Upgrade {
-    pub fn label(self, kit: [Ability; 3], tiers: [u8; 3]) -> String {
+    pub fn label(self, p: &crate::PlayerInfo) -> String {
+        let (kit, tiers) = (p.kit, p.tiers);
         match self {
             Upgrade::Ability(slot) => {
                 let name = kit[slot as usize].name();
@@ -1843,6 +2119,12 @@ impl Upgrade {
                 format!("{} abilities: {}", e.name(), e.effect())
             }
             Upgrade::Stat(s) => format!("{}: {}", s.name(), s.effect()),
+            Upgrade::Weapon(slot) => {
+                let s = slot as usize;
+                let gun = p.guns[s].map_or("Gun", |g| gun_def(g).name);
+                let tier = (p.gun_tiers[s] + 1).min(MAX_GUN_TIER);
+                format!("{gun}{}: +25% damage and magazine", tier_name(tier))
+            }
         }
     }
 }

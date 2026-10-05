@@ -25,7 +25,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 9;
+const PROTOCOL_VERSION: u32 = 10;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -150,7 +150,7 @@ struct ClientUpdate {
     character: Character,
     skin: u8,
     gun_skins: Vec<u8>,
-    loadout: Option<(u8, crate::data::Attach)>,
+    class_guns: [(u8, crate::data::Attach); 2],
     kit: [crate::data::Ability; 3],
     char_level: u8,
     ready: bool,
@@ -542,7 +542,7 @@ fn handle_requests(
         let map = state.map;
         let me = || PlayerInfo {
             gun_skins: profile.gun_skins.clone(),
-            loadout: profile.loadout(),
+            class_guns: profile.class_loadout(profile.character),
             kit: profile.kit(profile.character),
             char_level: profile.char_level(profile.character).0 as u8,
             ..PlayerInfo::new(0, profile.name.clone(), profile.character, profile.skin)
@@ -669,8 +669,9 @@ fn sync_own_choices(
         if me.skin != profile.skin {
             me.skin = profile.skin;
         }
-        if me.loadout != profile.loadout() {
-            me.loadout = profile.loadout();
+        let guns = profile.class_loadout(profile.character);
+        if me.class_guns != guns {
+            me.class_guns = guns;
         }
         let kit = profile.kit(profile.character);
         if me.kit != kit {
@@ -775,9 +776,12 @@ fn host_receive(
                         .into_iter()
                         .take(crate::data::GUNS.len())
                         .collect();
-                    p.loadout = u
-                        .loadout
-                        .filter(|(g, a)| crate::progression::valid_loadout(*g, *a));
+                    p.class_guns = if crate::progression::valid_class_guns(u.character, u.class_guns) {
+                        u.class_guns
+                    } else {
+                        let g = u.character.default_guns();
+                        [(g[0], crate::data::Attach::NONE), (g[1], crate::data::Attach::NONE)]
+                    };
                     let level = u.char_level.clamp(1, crate::data::MAX_CHAR_LEVEL as u8);
                     p.char_level = level;
                     p.kit = if crate::data::valid_kit(u.character, level as u32, u.kit) {
@@ -949,7 +953,7 @@ fn client_send(
         character: profile.character,
         skin: profile.skin,
         gun_skins: profile.gun_skins.clone(),
-        loadout: profile.loadout(),
+        class_guns: profile.class_loadout(profile.character),
         kit: profile.kit(profile.character),
         char_level: profile.char_level(profile.character).0 as u8,
         ready: ready.0,

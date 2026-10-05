@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use crate::config::{key_name, Action, Settings};
 use crate::data::{
-    boss_name, elements_in, gun_def, has_perk, skin_def, wall_cost, xp_to_next, Perk, BOX_COST,
+    boss_name, elements_in, gun_def, has_perk, skin_def, xp_to_next, Perk, AMMO_COST, BOX_COST, alt_fire, tier_name, AltFire,
     FINAL_BOSS_NAME, MAX_LEVEL, ROUNDS_PER_STAGE, STAGES,
 };
 use crate::sim::TELEPORT_HOLD;
@@ -442,11 +442,12 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             Pickable::IGNORE,
         ))
         .with_children(|c| {
-            for i in 0..3 {
+            // Weapon abilities first, then the class abilities.
+            for i in [3, 4, 0, 1, 2] {
                 c.spawn((
                     AbilityBox(i),
                     Node {
-                        width: Val::Px(165.0),
+                        width: Val::Px(134.0),
                         height: Val::Px(46.0),
                         border: UiRect::all(Val::Px(2.0)),
                         justify_content: JustifyContent::Center,
@@ -593,14 +594,21 @@ fn update_hud(
     let enemy_count = enemies.iter().count() as u32;
     let max = me.max_health();
     let abilities = me.kit;
-    let keys = [Action::Ability1, Action::Ability2, Action::Ultimate];
-    let ready = |i: usize| {
-        if i == 2 {
-            me.ult_charge >= 100.0
-        } else {
-            me.cooldowns[i] <= 0.0
-        }
+    let keys = [
+        Action::Ability1,
+        Action::Ability2,
+        Action::Ultimate,
+        Action::WeaponAbility1,
+        Action::WeaponAbility2,
+    ];
+    let weapon = me.character.weapon_abilities();
+    let ready = |i: usize| match i {
+        2 => me.ult_charge >= 100.0,
+        3 | 4 => me.weapon_cd[i - 3] <= 0.0,
+        _ => me.cooldowns[i] <= 0.0,
     };
+    // The weapon ability running right now (box index).
+    let running = |i: usize| i >= 3 && me.buff_time > 0.0 && me.buff == Some(weapon[i - 3]);
 
     for (kind, mut t) in &mut texts {
         let value = match *kind {
@@ -686,15 +694,28 @@ fn update_hud(
                     } else {
                         format!("\n{}", parts.join(" + "))
                     };
+                    let alt = alt_fire(g.id);
+                    let alt_line = match alt {
+                        AltFire::Grenade => {
+                            let cd = loadout.grenade_cd.max(me.grenade_cd);
+                            if cd > 0.0 {
+                                format!("\n[RMB] {} ({cd:.1}s)", alt.describe())
+                            } else {
+                                format!("\n[RMB] {} (ready)", alt.describe())
+                            }
+                        }
+                        a => format!("\n[RMB] {}", a.describe()),
+                    };
                     format!(
-                        "{}  ({}){extra}",
+                        "{}{}  ({}){extra}{alt_line}",
                         gun_def(g.id).name,
+                        tier_name(g.tier),
                         skin_def(me.skin_for(g.id)).name
                     )
                 })
                 .unwrap_or_default(),
             HudText::Ammo => match loadout.current() {
-                Some(_) if me.overdrive > 0.0 => "INFINITE".to_string(),
+                Some(_) if me.overdrive > 0.0 || me.gun_buff().free_ammo => "INFINITE".to_string(),
                 Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
                 Some(g) => format!("{} / {}", g.mag, g.reserve),
                 None => String::new(),
@@ -707,7 +728,18 @@ fn update_hud(
                         gun_def(g.id).name
                     )
                 })
-                .unwrap_or_else(|| "Second slot empty - get a gun from the mystery box".into()),
+                .unwrap_or_default(),
+            HudText::Ability(i) if i >= 3 => {
+                let w = weapon[i - 3];
+                let status = if running(i) {
+                    format!("ACTIVE {:.1}s", me.buff_time)
+                } else if ready(i) {
+                    "READY".to_string()
+                } else {
+                    format!("{:.1}s", me.weapon_cd[i - 3])
+                };
+                format!("{}\n[{}] {}", w.name(), key_name(settings.key(keys[i])), status)
+            }
             HudText::Ability(i) => {
                 let status = if i == 2 {
                     if ready(2) {
@@ -744,6 +776,22 @@ fn update_hud(
                     (me.xp as f32 / xp_to_next(me.level) as f32 * 100.0).clamp(0.0, 100.0)
                 });
             }
+            HudFill::Ability(i) if i >= 3 => {
+                let w = weapon[i - 3];
+                let frac = if running(i) {
+                    me.buff_time / w.def().duration
+                } else {
+                    1.0 - me.weapon_cd[i - 3] / w.cooldown()
+                };
+                node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
+                bg.0 = if running(i) {
+                    w.color().with_alpha(0.45)
+                } else if ready(i) {
+                    Color::srgba(0.3, 0.9, 0.5, 0.35)
+                } else {
+                    Color::srgba(1.0, 0.6, 0.25, 0.3)
+                };
+            }
             HudFill::Ability(i) => {
                 let frac = if i == 2 {
                     me.ult_charge / 100.0
@@ -761,7 +809,9 @@ fn update_hud(
         }
     }
     for (AbilityBox(i), mut border) in &mut ability_box {
-        border.0 = if ready(*i) {
+        border.0 = if running(*i) {
+            weapon[*i - 3].color()
+        } else if ready(*i) {
             Color::srgba(0.4, 1.0, 0.6, 0.8)
         } else {
             Color::srgba(1.0, 1.0, 1.0, 0.25)
@@ -836,16 +886,16 @@ fn update_prompt(
             msg = match state.box_state {
                 BoxState::Idle => {
                     if me.points >= BOX_COST {
-                        format!("[{key}] Mystery Box - random gun ({BOX_COST} pts)")
+                        format!("[{key}] Armory - new attachments for the gun in your hands ({BOX_COST} pts)")
                     } else {
-                        format!("Mystery Box - need {BOX_COST} pts")
+                        format!("Armory - need {BOX_COST} pts")
                     }
                 }
                 BoxState::Rolling { player, .. } => {
                     if player == me.id {
                         "Rolling...".into()
                     } else {
-                        "Someone is using the box".into()
+                        "Someone is using the Armory".into()
                     }
                 }
                 BoxState::Offer {
@@ -862,21 +912,22 @@ fn update_prompt(
                     } else {
                         format!("\nwith {}", parts.join(", "))
                     };
-                    if player == me.id {
-                        let slot = if me.guns[1].is_none() {
-                            "into your empty slot".to_string()
-                        } else {
+                    let held = me.guns.contains(&Some(gun));
+                    match (player == me.id, held) {
+                        (true, true) => format!(
+                            "[{key}] Fit to your {}{kit}",
+                            def.name
+                        ),
+                        (true, false) => {
                             let cur = me.guns[me.active_slot as usize]
                                 .map(|g| gun_def(g).name)
                                 .unwrap_or("");
-                            format!("replacing your {cur}")
-                        };
-                        format!("[{key}] Take {rare}{} ({slot}){kit}", def.name)
-                    } else {
-                        format!("{rare}{} - not yours{kit}", def.name)
+                            format!("[{key}] Take {rare}{} (replacing your {cur}){kit}", def.name)
+                        }
+                        _ => format!("{rare}{} - not yours{kit}", def.name),
                     }
                 }
-                BoxState::Moving { .. } => "The box flew away! Find where it landed.".into(),
+                BoxState::Moving { .. } => "The Armory moved! Find where it went.".into(),
             };
         }
         for (spot, perk) in map.0.perk_spots.iter().zip(Perk::ALL) {
@@ -901,27 +952,11 @@ fn update_prompt(
             }
         }
         let feet3 = me.feet();
-        if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet3)) {
-            // A gun someone brought shows whose it is and what's fitted.
-            let fitted = wall.attach.names();
-            let name = match (&wall.owner, fitted.is_empty()) {
-                (Some(o), true) => format!("{o}'s {}", gun_def(wall.gun).name),
-                (Some(o), false) => {
-                    format!("{o}'s {} ({})", gun_def(wall.gun).name, fitted.join(", "))
-                }
-                _ => gun_def(wall.gun).name.to_string(),
-            };
-            let cost = wall_cost(wall.gun);
-            msg = if me.guns.contains(&Some(wall.gun)) {
-                if me.points >= cost / 2 {
-                    format!("[{key}] Buy {name} ammo ({} pts)", cost / 2)
-                } else {
-                    format!("{name} ammo - need {} pts", cost / 2)
-                }
-            } else if me.points >= cost {
-                format!("[{key}] Buy {name} ({cost} pts)")
+        if map.0.wall_buys.iter().any(|w| w.near(feet3)) {
+            msg = if me.points >= AMMO_COST {
+                format!("[{key}] Ammo cache - refill both guns ({AMMO_COST} pts)")
             } else {
-                format!("{name} - need {cost} pts")
+                format!("Ammo cache - need {AMMO_COST} pts")
             };
         }
         if msg.is_empty() && !me.choices.is_empty() {
@@ -1131,7 +1166,7 @@ fn upgrade_panel(
                 for (i, c) in choices.iter().enumerate() {
                     button(
                         p,
-                        c.label(me.kit, me.tiers),
+                        c.label(me),
                         UiAction::ChooseUpgrade(i as u8),
                     );
                 }

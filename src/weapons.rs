@@ -7,7 +7,10 @@ use bevy::window::PrimaryWindow;
 use rand::Rng;
 
 use crate::config::{Action, InputExt, Settings};
-use crate::data::{gun_def, has_perk, mag_size, Attach, FireMode, GunClass, Perk, Stat};
+use crate::data::{
+    alt_fire, gun_def, has_perk, tiered_mag, AltFire, Attach, FireMode, GunClass, Perk, Stat,
+    GRENADE_RECHARGE,
+};
 use crate::fx::{Fx, FxQueue};
 use crate::game::Paused;
 use crate::physics::{collect_boxes, trace_shot};
@@ -42,20 +45,23 @@ pub struct GunState {
     pub attach: Attach,
     pub mag: u32,
     pub reserve: u32,
+    /// Weapon upgrade tier (Mk II and up).
+    pub tier: u8,
 }
 
 impl GunState {
-    fn fresh(id: u8, attach: Attach) -> Self {
+    fn fresh(id: u8, attach: Attach, tier: u8) -> Self {
         Self {
             id,
             attach,
-            mag: mag_size(id, attach),
+            mag: tiered_mag(id, attach, tier),
             reserve: gun_def(id).reserve,
+            tier,
         }
     }
 
     pub fn mag_size(&self) -> u32 {
-        mag_size(self.id, self.attach)
+        tiered_mag(self.id, self.attach, self.tier)
     }
 }
 
@@ -119,6 +125,9 @@ pub struct Loadout {
     /// Seconds left to show the kill marker.
     pub kill_marker: f32,
     last_kills: u32,
+    /// Underbarrel grenade recharge as we see it (the host checks too).
+    pub grenade_cd: f32,
+    last_buff_time: f32,
 }
 
 /// How long a melee swing takes, and when in it the blade connects.
@@ -157,7 +166,9 @@ fn aim(
         return;
     };
     let def = gun_def(gun.id);
+    // Guns with an alternate fire use right mouse for that instead.
     let want = can_act(&session, &roster, &state, &paused, &window)
+        && alt_fire(gun.id) == AltFire::Sights
         && mouse.pressed(MouseButton::Right)
         && cast.aiming.is_none()
         && !player.emoting()
@@ -181,7 +192,7 @@ fn aim(
     aim.scoped = handling.scoped && aim.amount > 0.9;
 }
 
-/// Keeps our guns in step with what the host says we hold (mystery box,
+/// Keeps our guns in step with what the host says we hold (the Armory,
 /// respawns) and refills ammo on Max Ammo.
 fn sync_loadout(
     session: Res<Session>,
@@ -195,18 +206,37 @@ fn sync_loadout(
     if me.spawn_seq != loadout.last_spawn_seq {
         loadout.last_spawn_seq = me.spawn_seq;
         loadout.slots = [None, None];
+        loadout.active = 0;
         loadout.reload = 0.0;
     }
     for i in 0..2 {
         let want = me.guns[i].map(|g| (g, me.attach[i]));
         let have = loadout.slots[i].map(|g| (g.id, g.attach));
         if want != have {
-            loadout.slots[i] = want.map(|(g, a)| GunState::fresh(g, a));
-            if want.is_some() {
+            loadout.slots[i] = want.map(|(g, a)| GunState::fresh(g, a, me.gun_tiers[i]));
+            if want.is_some() && have.is_some() {
                 // A new gun from the box goes straight into your hands.
                 loadout.active = i;
                 loadout.reload = 0.0;
             }
+        }
+    }
+    // Lock and Load fills the magazine as it starts.
+    if me.buff == Some(crate::data::WeaponAbility::LockAndLoad)
+        && me.buff_time > loadout.last_buff_time + 0.5
+    {
+        let active = loadout.active;
+        if let Some(g) = loadout.slots[active].as_mut() {
+            g.mag = g.mag_size();
+        }
+        loadout.reload = 0.0;
+    }
+    loadout.last_buff_time = me.buff_time;
+    // A weapon upgrade: a bigger magazine, topped up.
+    for (i, g) in loadout.slots.iter_mut().enumerate() {
+        if let Some(g) = g.as_mut().filter(|g| g.tier != me.gun_tiers[i]) {
+            g.tier = me.gun_tiers[i];
+            g.mag = g.mag_size();
         }
     }
     if loadout.slots[loadout.active].is_none() {
@@ -432,6 +462,7 @@ pub fn fire(
 ) {
     let dt = time.delta_secs();
     loadout.fire_cd -= dt;
+    loadout.grenade_cd = (loadout.grenade_cd - dt).max(0.0);
     loadout.hitmarker -= dt;
     loadout.recoil = (loadout.recoil - dt * 8.0).max(0.0);
     loadout.flash -= dt;
@@ -460,13 +491,25 @@ pub fn fire(
         return;
     };
     let def = gun_def(gun.id);
+    let buff = me.gun_buff();
     let overdrive = me.overdrive > 0.0;
+    let free = overdrive || buff.free_ammo;
 
-    let wants = match def.mode {
-        FireMode::Auto => mouse.pressed(MouseButton::Left),
-        FireMode::Semi => mouse.just_pressed(MouseButton::Left),
-        FireMode::Burst => mouse.just_pressed(MouseButton::Left) || loadout.burst_left > 0,
+    // Right mouse fires the alternate fire, if the gun has one.
+    let alt = match alt_fire(gun.id) {
+        AltFire::Sights => None,
+        a if mouse.just_pressed(MouseButton::Right) && loadout.burst_left == 0 => Some(a),
+        _ => None,
     };
+    if alt == Some(AltFire::Grenade) && (loadout.grenade_cd > 0.0 || me.grenade_cd > 0.0) {
+        return;
+    }
+    let wants = alt.is_some()
+        || match def.mode {
+            FireMode::Auto => mouse.pressed(MouseButton::Left),
+            FireMode::Semi => mouse.just_pressed(MouseButton::Left),
+            FireMode::Burst => mouse.just_pressed(MouseButton::Left) || loadout.burst_left > 0,
+        };
     if !wants
         || loadout.fire_cd > 0.0
         || loadout.reload > 0.0
@@ -475,7 +518,7 @@ pub fn fire(
     {
         return;
     }
-    if gun.mag == 0 && !overdrive {
+    if gun.mag == 0 && !free && alt != Some(AltFire::Grenade) {
         loadout.burst_left = 0;
         if gun.reserve > 0 {
             let speed = reload_speed(me);
@@ -495,7 +538,17 @@ pub fn fire(
     if me.stim > 0.0 {
         interval /= 1.25;
     }
-    if def.mode == FireMode::Burst {
+    interval /= buff.rate;
+    if let Some(a) = alt {
+        loadout.fire_cd = match a {
+            AltFire::Grenade => {
+                loadout.grenade_cd = GRENADE_RECHARGE;
+                0.5
+            }
+            AltFire::Slug => interval * 1.5,
+            _ => (interval * 4.0).max(0.45),
+        };
+    } else if def.mode == FireMode::Burst {
         if loadout.burst_left == 0 {
             loadout.burst_left = 3;
         }
@@ -508,9 +561,19 @@ pub fn fire(
     } else {
         loadout.fire_cd = interval;
     }
-    if !overdrive && !state.sandbox.god {
+    // How many rays go out, and the rounds they cost.
+    let (rays, rounds) = match alt {
+        Some(AltFire::Burst(n)) => {
+            let n = if free { n } else { n.min(gun.mag) };
+            (n, n)
+        }
+        Some(AltFire::Grenade) => (1, 0),
+        Some(_) => (1, 1),
+        None if crate::data::is_dual(gun.id) => (def.pellets, 2),
+        None => (def.pellets, 1),
+    };
+    if !free && !state.sandbox.god {
         if let Some(g) = loadout.slots[active].as_mut() {
-            let rounds = if crate::data::is_dual(g.id) { 2 } else { 1 };
             g.mag = g.mag.saturating_sub(rounds);
         }
     }
@@ -547,6 +610,11 @@ pub fn fire(
         // Snipers are wild from the hip.
         spread += 0.05 * (1.0 - aim.amount);
     }
+    match alt {
+        Some(AltFire::Slug | AltFire::Grenade) => spread = spread.min(0.01),
+        Some(AltFire::Burst(_)) => spread = spread * 1.6 + 0.02,
+        _ => {}
+    }
     // Recoil: the muzzle climbs (and auto guns walk sideways the longer you
     // hold), plus a jolt that snaps straight back. Aiming and crouching
     // steady it; attachments change it.
@@ -554,7 +622,8 @@ pub fn fire(
     let steady = (1.0 - 0.3 * aim.amount) * if p.crouching { 0.8 } else { 1.0 };
     let mut rng = rand::thread_rng();
     let first = if loadout.spray == 0 { 1.25 } else { 1.0 };
-    let climb = rc.up * handling.recoil_up * steady * first;
+    let heavy = if alt.is_some() { 2.0 } else { 1.0 };
+    let climb = rc.up * handling.recoil_up * steady * first * heavy;
     let side = (rng.gen_range(-1.0..1.0) * rc.side
         + rc.drift * (loadout.spray.min(12) as f32 / 4.0))
         * handling.recoil_side
@@ -568,12 +637,12 @@ pub fn fire(
     let boxes = collect_boxes(colliders.iter());
     // Twin Fangs: both guns fire on every pull.
     let mut muzzles = vec![origin + cam.rotation * view_muzzle.0];
-    if let (true, Some(left)) = (crate::data::is_dual(gun.id), view_muzzle.1) {
+    if let (true, None, Some(left)) = (crate::data::is_dual(gun.id), alt, view_muzzle.1) {
         muzzles.push(origin + cam.rotation * left);
     }
     let mut any_hit = false;
     let mut head = false;
-    for muzzle in muzzles.iter().flat_map(|m| std::iter::repeat_n(*m, def.pellets as usize)) {
+    for muzzle in muzzles.iter().flat_map(|m| std::iter::repeat_n(*m, rays as usize)) {
         let a = rng.gen_range(0.0..std::f32::consts::TAU);
         let r = spread * rng.gen_range(0.0f32..1.0).sqrt();
         let dir = (forward + right * a.cos() * r + up * a.sin() * r).normalize();
@@ -606,6 +675,7 @@ pub fn fire(
                 origin: origin.to_array(),
                 dir: dir.to_array(),
                 gun: gun.id,
+                alt: matches!(alt, Some(AltFire::Slug | AltFire::Grenade)),
             },
         ));
     }

@@ -9,10 +9,11 @@ use std::collections::HashMap;
 
 use crate::avatars::spawn_replicated;
 use crate::data::{
-    elements_in, gun_def, has_perk, roll_attachments, roll_box_gun, wall_cost,
-    xp_to_next, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, BOX_COST, MAX_LEVEL,
+    alt_fire, elements_in, gun_def, has_perk, roll_armory, tier_mult, AltFire, Attach,
+    GRENADE_RECHARGE,
+    xp_to_next, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
     ROUNDS_PER_STAGE, STAGES,
-    MAX_TIER,
+    MAX_GUN_TIER, MAX_TIER,
 };
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
 use crate::maps::{CurrentMap, EXTRACT_RADIUS};
@@ -301,11 +302,14 @@ fn roll_choices(p: &PlayerInfo) -> Vec<Upgrade> {
         .into_iter()
         .filter(|s| p.stats[*s as usize] < Stat::MAX_STACKS)
         .map(Upgrade::Stat);
+    let weapons = (0..2u8)
+        .filter(|s| p.guns[*s as usize].is_some() && p.gun_tiers[*s as usize] < MAX_GUN_TIER)
+        .map(Upgrade::Weapon);
     let mut picks = Vec::new();
     if p.level % 10 == 0 && !elements.is_empty() {
         picks.push(elements.swap_remove(rng.gen_range(0..elements.len())));
     }
-    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).chain(stats).collect();
+    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).chain(stats).chain(weapons).collect();
     while picks.len() < 3 && !pool.is_empty() {
         picks.push(pool.swap_remove(rng.gen_range(0..pool.len())));
     }
@@ -442,6 +446,10 @@ fn process_actions(
                         let n = &mut p.stats[st as usize];
                         *n = (*n + 1).min(Stat::MAX_STACKS);
                     }
+                    Upgrade::Weapon(s) => {
+                        let t = &mut p.gun_tiers[s as usize & 1];
+                        *t = (*t + 1).min(MAX_GUN_TIER);
+                    }
                 }
                 p.pending_picks = p.pending_picks.saturating_sub(1);
                 p.choices = if p.pending_picks > 0 {
@@ -449,6 +457,26 @@ fn process_actions(
                 } else {
                     Vec::new()
                 };
+            }
+            PlayerAction::WeaponAbility(i) => {
+                let i = i as usize;
+                if !p.alive || i > 1 || p.weapon_cd[i] > 0.0 {
+                    continue;
+                }
+                let ability = p.character.weapon_abilities()[i];
+                let focus = 1.0 - p.stat(Stat::Focus) * Stat::Focus.per_stack();
+                p.weapon_cd[i] = ability.cooldown() * focus;
+                p.buff = Some(ability);
+                p.buff_time = ability.def().duration;
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Ring {
+                        pos: p.pos,
+                        radius: 2.5,
+                        color: ability.def().color,
+                    },
+                );
             }
             PlayerAction::Ping { pos, target } => {
                 if pos.iter().all(|v| v.is_finite()) {
@@ -518,14 +546,20 @@ fn process_actions(
                         attach,
                         ..
                     } if near_box && player == id => {
-                        let slot = if p.guns[1].is_none() {
-                            1
-                        } else {
-                            p.active_slot as usize
+                        // New attachments go on that gun; a wonder weapon
+                        // replaces the gun in your hands.
+                        let slot = match p.guns.iter().position(|g| *g == Some(gun)) {
+                            Some(i) => i,
+                            None => {
+                                let i = p.active_slot as usize;
+                                p.gun_tiers[i] = 0;
+                                i
+                            }
                         };
                         p.guns[slot] = Some(gun);
                         p.attach[slot] = attach;
                         p.active_slot = slot as u8;
+                        p.supply_seq = p.supply_seq.wrapping_add(1);
                         state.box_state = BoxState::Idle;
                         continue;
                     }
@@ -542,24 +576,11 @@ fn process_actions(
                     }
                     _ => {}
                 }
-                // Guns on the wall: buy the gun, or ammo for it if you have it.
-                if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet)) {
-                    let cost = wall_cost(wall.gun);
-                    if p.guns.contains(&Some(wall.gun)) {
-                        if p.points >= cost / 2 {
-                            p.points -= cost / 2;
-                            p.supply_seq = p.supply_seq.wrapping_add(1);
-                        }
-                    } else if p.points >= cost {
-                        p.points -= cost;
-                        let slot = if p.guns[1].is_none() {
-                            1
-                        } else {
-                            p.active_slot as usize
-                        };
-                        p.guns[slot] = Some(wall.gun);
-                        p.attach[slot] = wall.attach;
-                        p.active_slot = slot as u8;
+                // Ammo caches on the walls refill both guns.
+                if map.0.wall_buys.iter().any(|w| w.near(feet)) {
+                    if p.points >= AMMO_COST {
+                        p.points -= AMMO_COST;
+                        p.supply_seq = p.supply_seq.wrapping_add(1);
                     }
                     continue;
                 }
@@ -636,7 +657,7 @@ fn process_actions(
 fn resolve_shots(
     session: Res<Session>,
     state: Res<MatchState>,
-    roster: Res<Roster>,
+    mut roster: ResMut<Roster>,
     mut shots: ResMut<ShotQueue>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
@@ -652,13 +673,21 @@ fn resolve_shots(
         enemies.iter().map(|(e, t, _)| (e, t.translation)).collect();
     let mut rng = rand::thread_rng();
     for (shooter, shot) in shots.0.drain(..) {
-        let Some(p) = roster.0.get(&shooter) else {
+        let Some(p) = roster.0.get_mut(&shooter) else {
             continue;
         };
         // Only guns you actually hold.
         if !p.alive || !p.guns.contains(&Some(shot.gun)) {
             continue;
         }
+        let alt = if shot.alt { alt_fire(shot.gun) } else { AltFire::Sights };
+        if alt == AltFire::Grenade {
+            if p.grenade_cd > 0.0 {
+                continue;
+            }
+            p.grenade_cd = GRENADE_RECHARGE;
+        }
+        let p = &*p;
         let origin = Vec3::from_array(shot.origin);
         let dir = Vec3::from_array(shot.dir).normalize_or_zero();
         if !origin.is_finite() || dir == Vec3::ZERO {
@@ -692,10 +721,42 @@ fn resolve_shots(
             .iter()
             .position(|g| *g == Some(shot.gun))
             .unwrap_or(0);
+        let buff = p.gun_buff();
         let mult = level_multiplier(p)
             * p.attach[slot].handling(shot.gun).damage
-            * (1.0 + p.stat(Stat::Firepower) * Stat::Firepower.per_stack());
-        let elements = p.gun_elements;
+            * (1.0 + p.stat(Stat::Firepower) * Stat::Firepower.per_stack())
+            * tier_mult(p.gun_tiers[slot])
+            * buff.damage;
+        let elements = p.gun_elements | buff.elements;
+        if alt == AltFire::Grenade {
+            explode(
+                end - dir * 0.3,
+                4.5,
+                (250.0 + 30.0 * state.round as f32) * mult,
+                Some(shooter),
+                elements,
+                &enemy_list,
+                &mut damage,
+                &mut fx,
+                &mut out,
+                Color::srgb(1.0, 0.55, 0.2),
+            );
+            continue;
+        }
+        if buff.blast > 0.0 {
+            explode(
+                end - dir * 0.3,
+                buff.blast,
+                def.damage * mult * 0.5,
+                Some(shooter),
+                elements,
+                &enemy_list,
+                &mut damage,
+                &mut fx,
+                &mut out,
+                Color::srgb(1.0, 0.4, 0.1),
+            );
+        }
         if let GunSpecial::Explosive { radius } = def.special {
             explode(
                 end - dir * 0.3,
@@ -714,7 +775,20 @@ fn resolve_shots(
         let Some((entity, headshot)) = hit.enemy else {
             continue;
         };
-        let amount = def.damage * mult * if headshot { def.headshot } else { 1.0 };
+        // A slug hits as hard as the whole spread, a little less.
+        let pellets = if alt == AltFire::Slug {
+            def.pellets as f32 * 0.9
+        } else {
+            1.0
+        };
+        let mut amount = def.damage * mult * pellets * if headshot { def.headshot } else { 1.0 };
+        if buff.execute > 0.0 {
+            if let Ok((_, _, b)) = enemies.get(entity) {
+                if !b.kind.is_boss() && b.health - amount < buff.execute * b.max_health {
+                    amount = amount.max(b.health);
+                }
+            }
+        }
         damage.0.push(DamageEvent {
             target: entity,
             amount,
@@ -723,9 +797,13 @@ fn resolve_shots(
             legs: hit.legs,
             elements,
             chained: false,
-            stun: 0.0,
+            stun: buff.stun,
         });
-        if let GunSpecial::Chain { jumps } = def.special {
+        let jumps = match def.special {
+            GunSpecial::Chain { jumps } => jumps as u8 + buff.chain,
+            _ => buff.chain,
+        };
+        if jumps > 0 {
             let mut from = end;
             let mut others: Vec<(Entity, Vec3)> = enemy_list
                 .iter()
@@ -749,7 +827,7 @@ fn resolve_shots(
                 from = to;
                 damage.0.push(DamageEvent {
                     target: e,
-                    amount: def.damage * mult * 0.8,
+                    amount: def.damage * mult * pellets * 0.8,
                     from: Some(shooter),
                     headshot: false,
                     legs: false,
@@ -1010,6 +1088,11 @@ fn player_timers(
             *cd = (*cd - dt).max(0.0);
         }
         p.overdrive = (p.overdrive - dt).max(0.0);
+        for cd in p.weapon_cd.iter_mut() {
+            *cd = (*cd - dt).max(0.0);
+        }
+        p.grenade_cd = (p.grenade_cd - dt).max(0.0);
+        p.buff_time = (p.buff_time - dt).max(0.0);
         if p.alive && state.started && !state.game_over {
             p.ult_charge = (p.ult_charge + dt * 0.8).min(100.0);
             let since = hurt.0.entry(p.id).or_insert(99.0);
@@ -1325,6 +1408,7 @@ fn sandbox(
         }
         if sb.free_abilities {
             p.cooldowns = [0.0; 2];
+            p.weapon_cd = [0.0; 2];
             p.ult_charge = 100.0;
         }
     }
@@ -1817,17 +1901,19 @@ fn mystery_box(
                 state.box_move_after = rng.gen_range(4..9);
                 BoxState::Moving { time: 4.0 }
             } else {
-                let exclude = roster
+                let (held, fitted) = roster
                     .0
                     .get(&player)
-                    .map(|p| p.guns)
-                    .unwrap_or([None, None]);
-                let wall: Vec<u8> = map.0.wall_buys.iter().map(|w| w.gun).collect();
-                let gun = roll_box_gun(&mut rng, &exclude, &wall);
+                    .and_then(|p| {
+                        let s = p.active_slot as usize;
+                        p.guns[s].map(|g| (g, p.attach[s]))
+                    })
+                    .unwrap_or((0, Attach::NONE));
+                let (gun, attach) = roll_armory(&mut rng, held, fitted);
                 BoxState::Offer {
                     player,
                     gun,
-                    attach: roll_attachments(gun, &mut rng),
+                    attach,
                     time: 9.0,
                 }
             }

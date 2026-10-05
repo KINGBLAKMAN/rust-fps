@@ -2,9 +2,9 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v9.0 (2026-10-05)
+## Current version: v10.0 (2026-10-05)
 
-Released: the Windows zip, the all-versions zip (v1 to v9), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
+Released: the Windows zip, the all-versions zip (v1 to v10), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
 
 ## Version history
 
@@ -57,6 +57,14 @@ Released: the Windows zip, the all-versions zip (v1 to v9), and the code pushed 
   - Level-up picks every 2 levels and after each boss; new stat upgrades (`data::Stat`: Vitality, Firepower, Focus, Swift, Sleight of Hand, 5 stacks each).
   - Career XP: 150/round, 3/kill, 400/map cleared, 1500 for a win. "Extractions" on the menu became "Runs won" (same save field).
   - Sandbox F1 panel can spawn a map boss or the final boss.
+- v10 (Game Overhaul part 3, classes):
+  - Each character is a class with 2 primaries and 2 secondaries (`Character::guns` in `data.rs`). You bring one of each (`PlayerInfo::class_guns`, saved per class in `Profile::class_guns`, attachments per gun in `Profile::gun_attach`) and start with both. The old single loadout gun, its wall board and `apply_loadouts` are gone.
+  - Two weapon abilities per class on keys 3 and 4 (`WeaponAbility`, `GunBuff`, `PlayerAction::WeaponAbility`): a timed buff on your guns (elements, damage, fire rate, free ammo, stun, execute, blast, chain). Host checks `weapon_cd`; `resolve_shots` applies the buff.
+  - Alternate fire on right mouse (`AltFire`, `alt_fire(gun)`): rifles fire an underbarrel grenade (8 s recharge, `grenade_cd`), shotguns a slug (one pellet worth the whole spread x0.9), SMGs and pistols a 5 or 3 shot burst. Snipers, DMRs, semi rifles and LMGs keep aim down sights. `Shot::alt` marks slug and grenade shots.
+  - Weapon upgrades in level-up picks (`Upgrade::Weapon`, `gun_tiers`, up to Mk IV: +25% damage and magazine each).
+  - The mystery box is the Armory: 750 for new random attachments on the gun in your hands, or a 5% wonder weapon (`roll_armory`). Wall boards are ammo caches (300, refill both guns).
+  - Career unlocks cut to 16 levels: attachments and each class's second gun (`progression.rs`). Old career levels just mean more is unlocked.
+  - Loadout screen rewritten: class guns in two columns with attachment pickers.
 
 ## Known issues and loose ends
 
@@ -72,8 +80,12 @@ Released: the Windows zip, the all-versions zip (v1 to v9), and the code pushed 
 - v9 bosses were tested under lavapipe with test hooks (tiny boss health); their real health, damage and the summon counts are a first pass and need playing on a real PC, solo and in co-op.
 - A full 5-map run hasn't been played start to finish; the stages were tested by jumping straight to boss rounds.
 - Old "Extractions" from earlier versions count as "Runs won" on the main menu.
+- v10 weapon abilities, alt fire and the Armory were checked solo under lavapipe (buff timer, grenade and its recharge, loadout screen). Balance (buff numbers, grenade damage, slug damage, Armory price) is a first pass. Not yet tested in co-op.
+- Assault rifles lost aim down sights to the grenade; the Falcon AR still shows its built-in scope.
 
 ## Ideas not done yet
+
+- Game Overhaul plan still to do: v11 scaling ability upgrades (spread shots, multiple grenades, more dashes), v12 character kit and model rework, v13 procedural maps plus 10 more map themes, v14 sound design and a menu rework (bigger text).
 
 - Part 7 of the art brief: skin rarity looks (a different finish per rarity).
 - Jonah likes big maps with many rooms to traverse and explore; keep new maps that way.

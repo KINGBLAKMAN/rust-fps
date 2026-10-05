@@ -54,17 +54,14 @@ pub struct DoorDef {
 
 pub const DOOR_WIDTH: f32 = 4.0;
 
-/// A gun hanging on a wall that you can buy (and buy ammo for).
+/// An ammo cache: a chalk board on a wall with a gun drawn on it.
 #[derive(Clone)]
 pub struct WallBuy {
     pub pos: Vec3,
     /// Which way the board faces (players stand on that side).
     pub yaw: f32,
     pub gun: u8,
-    /// Attachments on it (a gun someone brought in has theirs).
     pub attach: crate::data::Attach,
-    /// Who brought it, if anyone.
-    pub owner: Option<String>,
 }
 
 impl WallBuy {
@@ -340,7 +337,7 @@ fn shipping_yard() -> MapLayout {
     m.lamp(47.0, -37.0, 4.5, warm, 40_000.0);
     m.lamp(-52.0, 54.0, 4.0, warm, 30_000.0);
 
-    // Wall guns: the first two take loadout guns.
+    // Ammo caches.
     m.wall_gun(0.0, 8.0, PI, 3);
     m.wall_gun(-10.0, -1.8, -FRAC_PI_2, 10);
     m.wall_gun(23.0, 2.0, -FRAC_PI_2, 6);

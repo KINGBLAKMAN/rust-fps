@@ -48,7 +48,7 @@ use bevy::window::CursorGrabMode;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use data::{Character, Upgrade, STARTER_GUN};
+use data::{Character, Upgrade};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -138,8 +138,9 @@ pub struct PlayerInfo {
     pub skin: u8,
     /// Gun-specific skins per gun id (255 for none).
     pub gun_skins: Vec<u8>,
-    /// The gun (and attachments) this player brought for a wall board.
-    pub loadout: Option<(u8, data::Attach)>,
+    /// The class guns this player brings (primary, secondary) with their
+    /// attachments.
+    pub class_guns: [(u8, data::Attach); 2],
     pub ready: bool,
 
     /// Feet position.
@@ -179,6 +180,14 @@ pub struct PlayerInfo {
     pub ability_elements: u8,
     /// Stacks of each stat upgrade (see `data::Stat`).
     pub stats: [u8; data::Stat::COUNT],
+    /// Weapon upgrade tier of each gun slot (Mk II to IV).
+    pub gun_tiers: [u8; 2],
+    /// The weapon ability running and for how long, and both cooldowns.
+    pub buff: Option<data::WeaponAbility>,
+    pub buff_time: f32,
+    pub weapon_cd: [f32; 2],
+    /// Underbarrel grenade recharge.
+    pub grenade_cd: f32,
 
     pub cooldowns: [f32; 2],
     pub ult_charge: f32,
@@ -198,6 +207,7 @@ impl PlayerInfo {
     }
 
     pub fn new(id: u8, name: String, character: Character, skin: u8) -> Self {
+        let dg = character.default_guns();
         Self {
             id,
             name,
@@ -206,7 +216,7 @@ impl PlayerInfo {
             char_level: 1,
             skin,
             gun_skins: Vec::new(),
-            loadout: None,
+            class_guns: [(dg[0], data::Attach::NONE), (dg[1], data::Attach::NONE)],
             ready: false,
             pos: [0.0; 3],
             yaw: 0.0,
@@ -221,7 +231,8 @@ impl PlayerInfo {
             points: START_POINTS,
             score: 0,
             kills: 0,
-            guns: [Some(STARTER_GUN), None],
+            guns: [Some(dg[0]), Some(dg[1])],
+            gun_tiers: [0; 2],
             attach: [data::Attach::NONE; 2],
             active_slot: 0,
             perks: 0,
@@ -233,6 +244,10 @@ impl PlayerInfo {
             gun_elements: 0,
             ability_elements: 0,
             stats: [0; data::Stat::COUNT],
+            buff: None,
+            buff_time: 0.0,
+            weapon_cd: [0.0; 2],
+            grenade_cd: 0.0,
             cooldowns: [0.0; 2],
             ult_charge: 0.0,
             overdrive: 0.0,
@@ -248,12 +263,20 @@ impl PlayerInfo {
         keep.gun_skins = std::mem::take(&mut self.gun_skins);
         keep.kit = self.kit;
         keep.char_level = self.char_level;
+        keep.class_guns = self.class_guns;
+        keep.guns = [Some(self.class_guns[0].0), Some(self.class_guns[1].0)];
+        keep.attach = [self.class_guns[0].1, self.class_guns[1].1];
         let seq = self.spawn_seq;
         let ack = self.action_ack;
         *self = keep;
         self.spawn_seq = seq + 1;
         self.action_ack = ack;
         self.ready = false;
+    }
+
+    /// What the running weapon ability does to shots right now.
+    pub fn gun_buff(&self) -> data::GunBuff {
+        data::active_buff(self.buff, self.buff_time)
     }
 
     pub fn feet(&self) -> Vec3 {
@@ -417,6 +440,9 @@ pub struct Shot {
     pub origin: [f32; 3],
     pub dir: [f32; 3],
     pub gun: u8,
+    /// Fired with the gun's alternate fire (a slug or a grenade; bursts are
+    /// sent as ordinary shots).
+    pub alt: bool,
 }
 
 #[derive(Resource, Default)]
@@ -439,6 +465,8 @@ pub enum PlayerAction {
         charge: f32,
     },
     Choose(u8),
+    /// Use weapon ability 0 or 1 (keys 3 and 4).
+    WeaponAbility(u8),
     /// Mark a spot (or an enemy by net id; u32::MAX for none).
     Ping {
         pos: [f32; 3],

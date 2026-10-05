@@ -122,11 +122,10 @@ pub fn start_match(
     guns: Res<crate::gunmodels::GunAssets>,
     mut ambient: ResMut<AmbientLight>,
     camera: Single<Entity, With<crate::player::LocalPlayer>>,
-    roster: Res<crate::Roster>,
     mut loaded: ResMut<LoadedStage>,
 ) {
     loaded.0 = state.stage;
-    let mut layout = spawn_map(
+    let layout = spawn_map(
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -134,7 +133,6 @@ pub fn start_match(
         state.map,
         state.night,
     );
-    crate::progression::apply_loadouts(&mut layout, &roster);
     clear.0 = crate::graphics::sky_colors(layout.sky, state.night).0;
     // Night: dim blue ambient and a flashlight on your head.
     *ambient = if state.night {

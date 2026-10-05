@@ -47,7 +47,7 @@ impl Plugin for AbilityPlugin {
             .init_resource::<CastState>()
             .add_systems(
                 Update,
-                use_abilities
+                (use_abilities, use_weapon_abilities)
                     .after(crate::player::movement)
                     .before(crate::weapons::fire)
                     .in_set(Phase::Local),
@@ -120,6 +120,37 @@ pub(crate) fn dash_direction(keys: &ButtonInput<KeyCode>, settings: &Settings, y
         fwd
     } else {
         dir.normalize()
+    }
+}
+
+/// Keys 3 and 4 (by default): the class's two weapon abilities. The host
+/// checks the cooldown.
+#[allow(clippy::too_many_arguments)]
+fn use_weapon_abilities(
+    keys: Res<ButtonInput<KeyCode>>,
+    settings: Res<Settings>,
+    window: Single<&Window, With<PrimaryWindow>>,
+    session: Res<Session>,
+    roster: Res<Roster>,
+    state: Res<MatchState>,
+    paused: Res<Paused>,
+    menu: Res<crate::emotes::EmoteMenu>,
+    mut counter: ResMut<ActionCounter>,
+    mut queue: ResMut<ActionQueue>,
+) {
+    if menu.open || !can_act(&session, &roster, &state, &paused, &window) {
+        return;
+    }
+    let Some(me) = roster.me(&session) else {
+        return;
+    };
+    for (i, action) in [Action::WeaponAbility1, Action::WeaponAbility2]
+        .into_iter()
+        .enumerate()
+    {
+        if keys.tapped(&settings, action) && me.weapon_cd[i] <= 0.0 {
+            queue_action(&session, &mut counter, &mut queue, PlayerAction::WeaponAbility(i as u8));
+        }
     }
 }
 

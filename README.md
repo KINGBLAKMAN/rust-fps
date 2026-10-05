@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v9.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v9); small updates bump the minor number (v9.1, v9.2...).
+Current version: **v10.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v10); small updates bump the minor number (v10.1, v10.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -24,7 +24,7 @@ sudo apt install g++ pkg-config libx11-dev libasound2-dev libudev-dev libxkbcomm
 Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the menus:
 
 - **Play Solo**, **Host a Party** or **Join a Party** (type or paste the host's address with Ctrl+V).
-- **Loadout**: pick the gun you bring into matches and its attachments (see Career below).
+- **Loadout**: pick which of your class's guns you bring (one primary, one secondary) and the attachments on each (see Classes below).
 - **Characters**: pick one of 6 characters (Striker, Warden, Ronin, Tinker, Blaze, Valkyrie), see their level and choose which abilities they take into a match.
 - **Gun Crates**: open crates with your spins to win skins.
 - **Gun Skins**: pick any gun and put one of your skins on it. It shows in game for you and your party.
@@ -49,10 +49,11 @@ Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rus
 | Space | Jump. Bunny hop by tapping it again just as you land: each well-timed tap adds speed (holding it does nothing) |
 | C | Crouch. Press while running to slide; hold it as you land from a jump to chain jump-slides |
 | R | Reload |
-| Right mouse | Aim down sights (zooms in, steadier shots) |
-| F | Buy / use (mystery box, perk machines, wall guns) |
+| Right mouse | Alternate fire: underbarrel grenade (assault rifles), slug (shotguns), burst (SMGs and pistols). Snipers, marksman rifles and LMGs aim down sights instead |
+| F | Buy / use (Armory, perk machines, ammo caches) |
 | Q / E | Abilities 1 and 2 (see casting below) |
 | X | Ultimate |
+| 3 / 4 | Weapon abilities (your class's two gun power-ups) |
 | T, 1 / 2, mouse wheel | Swap between your two guns |
 | B | Pick a level-up upgrade |
 | G, then 1-5 | Emotes: dance, wave, flip off, point, backflip |
@@ -75,16 +76,16 @@ The frag grenade is held in your hand while you aim, for as long as you like: it
 
 Since v8 the game aims to look like a painted illustration: soft warm sunlight with cool shadows, a faint brush grain on every surface, gently muted colour, a gradient sky that fades into the distance, and thin pencil lines round characters and nearby props. Heroes and zombies have realistic proportions. Ability previews and enemy attacks show as soft shapes painted on the ground: blue-grey for where your ability will land, ember red (filling up as it comes) for a Brute's slam or a Shooter's fireball. Hits flash zombies warm white, explosions shake the camera, and dust, pollen, fireflies or ash drift in the air depending on the map. The numbers behind the look are in `docs/art-direction.md`.
 
-Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. The Twin Fangs are a pair of full-auto SMGs, one in each hand, and both fire on every shot. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The mystery box opens its lid and spins through the guns, and flies away when it moves; perk machines are vending machines; power-ups are little models. Every gun has its own recoil pattern and visible attachments, sights line up when you aim, tracers streak and fade, and hits show a hit marker (orange for headshots, red for kills). Zombies fall over with a death animation, and shooting their legs out turns them into crawlers. Everything has sound. The three maps are built room by room, with furnished interiors (offices, kitchens, classrooms, labs, cells, a diner, a museum and more), windows, lamps and roofs.
+Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. The Twin Fangs are a pair of full-auto SMGs, one in each hand, and both fire on every shot. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The Armory chest opens its lid and spins before showing its offer, and flies away when it moves; perk machines are vending machines; power-ups are little models. Every gun has its own recoil pattern and visible attachments, sights line up when you aim, tracers streak and fade, and hits show a hit marker (orange for headshots, red for kills). Zombies fall over with a death animation, and shooting their legs out turns them into crawlers. Everything has sound. The three maps are built room by room, with furnished interiors (offices, kitchens, classrooms, labs, cells, a diner, a museum and more), windows, lamps and roofs.
 
 ## Gameplay
 
 - **The run:** a match is a run through 5 maps. On each map you survive 4 rounds, then its boss comes (7 seconds' warning). Kill the boss and its zombies fall with it, everyone gets 500 points, 300 XP and a free upgrade pick, and a purple teleporter opens. Get every living teammate into it for 3 seconds to go to the next map. You keep your guns, perks, levels and upgrades, and everyone comes back up at full health. The run goes through the three maps in order from the one the host picked, then the first two again at the other time of day. The fifth map ends with the final boss; beat it to win the run.
 - **Rounds:** zombies come in rounds that get bigger and tougher, and the round number keeps counting up over the whole run. Grunts rush you, Shooters throw fireballs from a distance (round 3+), Brutes are big and tanky (round 6+). Each map hits 15% harder than the last and sends more Brutes and Shooters. Downed players get back up at the start of the next round; if the whole team is down, it's game over.
 - **Bosses:** each map has one: The Foreman (Shipping Yard), The Groundskeeper (Central Park) and The Landlord (The Neighborhood), huge rust-red Brutes. The final boss, The Abomination, is bigger, purple and twice as tough. Bosses slam the ground (a big red circle fills up first, so step out), throw fans of fireballs, and call in a ring of zombies at two-thirds and one-third health. The final boss throws more, calls in Brutes too, and speeds up below 30% health. Bosses get tougher with more players, shrug off stuns, Insta-Kill and Nukes, and can't be turned into crawlers. A bar at the top of the screen shows the boss's health.
-- **Points:** 10 per hit, 60 per kill (Brutes 120), +40 for headshots. Spend them on the mystery box and perks.
-- **Two guns:** you start with the M9 Sidearm and can carry two guns. Spare ammo is topped up at the start of each round.
-- **Mystery box:** 750 points per spin, always. Its beam goes up into the sky so you can find it from anywhere. It gives one of 20 guns, or rarely one of 2 wonder weapons (Ray Blaster: explosive shots; Thunder Cannon: lightning that chains between enemies). Box guns come with random attachments: all, some or none of an optic (Red Dot, Holo Sight, 3x Scope), a muzzle, an underbarrel grip or laser and an extended mag. The box sits at one of 5 spots and every few spins it may fly away to another (you get your points back).
+- **Points:** 10 per hit, 60 per kill (Brutes 120), +40 for headshots. Spend them on the Armory, ammo and perks.
+- **Two guns:** you start with your class's primary and secondary (see Classes below). Spare ammo is topped up at the start of each round.
+- **Armory** (the old mystery box): 750 points a go. Its beam goes up into the sky so you can find it from anywhere. It offers a new random set of attachments for the gun in your hands (an optic, a muzzle, an underbarrel grip or laser and an extended mag, as the gun allows), or rarely (5%) a wonder weapon to swap it for (Ray Blaster: explosive shots; Thunder Cannon: lightning that chains between enemies). It sits at one of 5 spots and every few uses it may move to another (you get your points back).
 - **Perk machines:** Quick Hands (3000, reload twice as fast), Stamina Rush (2000, faster sprint and slides), Boom Shot (3500, headshots can explode), Juggernaut (2500, 200 max health), Rapid Fire (2000, shoot 33% faster). You lose your perks when you go down.
 - **Power-ups** sometimes drop from zombies (rarely, and never two within 25 seconds of each other): Nuke (kills everything, +400 points each), Insta-Kill, Double Points (30 seconds each) and Max Ammo.
 - **Maps:** every map is a set of rooms, corridors, yards and buildings to explore, all open from the start (there are no doors to buy since v9). Areas loop into each other, so there's usually more than one way round. Zombies come from all over the map, and the perk machines are spread through it.
@@ -92,11 +93,11 @@ Every gun is modelled (23 in all) and held in gloved first-person hands, with an
   - **Central Park:** the Visitor Centre and Fountain Court, the Hedge Maze, Lakeside (boat shed and café), the Museum, the Old Zoo, the Conservatory, the Chapel and Bandstand Green.
   - **The Neighborhood:** the Hendersons' house and back yard, Main Street, the Diner and Corner Store, the School, the Police Station, the Community Centre, Maple Court and the Back Alley.
 - **Melee:** press V for a quick knife slash at whatever is right in front of you, crawlers included.
-- **Wall guns:** each map has 8 guns hanging on walls (chalk outline). Guns players bring from their loadout take the first two boards (both near where you start). Buy the gun (pistol 500, SMG or shotgun 1000, rifle 1250), or ammo for half price if you already have it. Wall guns never come out of the mystery box on that map.
+- **Ammo caches:** the chalk boards on the walls (8 a map) refill the spare ammo of both your guns for 300 points.
 - **Day and night:** the host picks Day or Night on the party screen (maps 4 and 5 of a run are the other one). At night the sky is dark, the street lamps are brighter and everyone has a flashlight.
 - **Emotes and pings:** press G for the emote list; the camera pulls out so you can see your character (move or shoot to stop). Press Z to ping a spot (yellow beam) or an enemy (red marker that follows it), with your name and the distance.
 - **Characters:** every character has their own model, two abilities (Q and E) and an ultimate (X). Ultimates charge over time and with kills. See Character levels below for every ability.
-- **Levels:** kills give XP. Every level adds 3% damage, and every 2 levels (plus after each boss) you pick one of three upgrades (press B): a stronger ability tier, an element, or a stat. At every tenth level one of the choices is always an element. Elements: Fire (burns over time), Ice (slows) and Shock (arcs to nearby enemies), for your guns or your abilities. Stats stack up to 5 times each: Vitality (+20 max health), Firepower (+8% gun damage), Focus (6% shorter ability cooldowns), Swift (+5% move speed) and Sleight of Hand (10% faster reloads).
+- **Levels:** kills give XP. Every level adds 3% damage, and every 2 levels (plus after each boss) you pick one of three upgrades (press B): a stronger ability tier, an element, a stat, or a weapon upgrade (Mk II, III and IV: each adds 25% damage and magazine size to that gun). At every tenth level one of the choices is always an element. Elements: Fire (burns over time), Ice (slows) and Shock (arcs to nearby enemies), for your guns or your abilities. Stats stack up to 5 times each: Vitality (+20 max health), Firepower (+8% gun damage), Focus (6% shorter ability cooldowns), Swift (+5% move speed) and Sleight of Hand (10% faster reloads).
 - **Zombies:** walkers (in three outfits), spitters that spit fireballs from range and hulking brutes.
 
 ## Character levels and abilities
@@ -114,11 +115,24 @@ Each character levels up on their own from the XP you earn playing them (up to l
 
 Iaido Slash is charged: hold Q and Ronin draws the sword and focuses; let go and he cuts, sending a crescent of light flying forward. The longer you hold (up to a second), the bigger the crescent and the further it travels (12 to 40 m). It pierces through every zombie in its path.
 
-## Career and loadout
+## Classes and weapon abilities
 
-Every match earns career XP (150 per round survived, 3 per kill, 400 per map cleared and 1500 for winning the run). Each career level unlocks a gun or attachment for your loadout, 27 levels in all; the Viper .45, Hornet MP and Breacher 12 are unlocked from the start.
+Since v10 each character is a class: it decides your guns, your two weapon abilities and your two abilities and ultimate. You bring one primary and one secondary, picked from two of each on the Loadout screen, and start every match holding them.
 
-On the Loadout screen pick a gun to bring and its attachments. In every match it hangs on one of the map's wall boards with your attachments on it (with your name), and the mystery box leaves it out. With two or more players, the first two loadouts take the two boards.
+| Class | Primaries | Secondaries | Weapon abilities (3 / 4) |
+|---|---|---|---|
+| Striker | Falcon AR, Tempest Burst | M9 Sidearm, Mamba Machine Pistol | Incendiary Mag (bullets set zombies on fire), Lock and Load (refill the magazine, hit 40% harder) |
+| Warden | Bulldog Carbine, Breacher 12 | Viper .45, Hornet MP | Cryo Rounds (bullets slow), Suppressing Fire (every hit stuns briefly) |
+| Ronin | Kestrel SMG, Twin Fangs | Hammer .50, Viper .45 | Quickdraw (shoot 40% faster, hit 80% harder), Executioner (hits finish anything under a quarter health) |
+| Tinker | Goliath LMG, Ripsaw LMG | Wasp PDW, M9 Sidearm | Auto-Loader (no ammo used, 30% faster fire), Shock Rounds (bullets arc to nearby zombies) |
+| Blaze | Stormfront Auto, Double Barrel | Judge Revolver, Mamba Machine Pistol | Dragon's Breath (burning rounds that burst on impact), Overheat (shoot 60% faster, hit 20% harder) |
+| Valkyrie | Arbiter DMR, Longbow Sniper | Hornet MP, Hammer .50 | Storm Rounds (bullets arc to nearby zombies), Overcharge (every shot chains lightning through three more) |
+
+Weapon abilities power up whichever gun you're holding for 6 to 10 seconds, then go on cooldown. They're shown on the left of the ability bar, and glow in their colour while running.
+
+## Career
+
+Every match earns career XP (150 per round survived, 3 per kill, 400 per map cleared and 1500 for winning the run). Each career level unlocks an attachment or a class's second gun choice, 16 levels in all. Every class's first primary and secondary are unlocked from the start.
 
 ## Gun crates and skins
 
@@ -164,8 +178,8 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | `src/main.rs` | App setup, shared state (players, match state) and system ordering |
 | `src/data.rs` | Guns, attachments, skins, crates, characters, abilities, perks, power-ups, elements, XP |
 | `src/config.rs` | Settings, key bindings and the saved profile |
-| `src/progression.rs` | Career levels, unlocks and loadouts |
-| `src/game.rs` | Match start and end, in-game menus, cursor, box visuals, spin rewards |
+| `src/progression.rs` | Career levels and unlocks |
+| `src/game.rs` | Match start and end, in-game menus, cursor, Armory visuals, spin rewards |
 | `src/graphics.rs` | Applies the graphics settings, tone mapping, colour grading, the sky and distance haze |
 | `src/painted.rs` | The painted material (brush grain, cool shadows, rim light) swapped onto every lit surface |
 | `src/outline.rs` | Pencil outlines (inverted hulls) |
@@ -182,9 +196,9 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | `src/emotes.rs`, `src/pings.rs` | Emotes and the third-person emote camera; pings |
 | `src/hud.rs` | In-game HUD, hit markers, scoreboard, level-up picker, end screen |
 | `src/net.rs` | Command line, UDP messages, host and client networking, internet address lookup |
-| `src/maps/` | The three maps (`mod.rs`), the floor-plan kit for rooms, walls and furniture (`interiors.rs`), props and wall guns (`strips.rs`) and zombie pathfinding (`nav.rs`) |
+| `src/maps/` | The three maps (`mod.rs`), the floor-plan kit for rooms, walls and furniture (`interiors.rs`), props and ammo cache boards (`strips.rs`) and zombie pathfinding (`nav.rs`) |
 | `src/models/` | The modelling kit, the 23 gun models, gun skins, hands, gun mounts, other players' models and ability projectiles and gadgets (`projectiles.rs`) |
 | `src/rig/` | Skeleton and animation (`mod.rs`), the 6 hero models and the zombie models |
 | `src/fx/` | Tracers, explosions, ability effects (`spells.rs` for the newer ones), and the ability auras |
 | `src/audio/` | Sound effects, made by a small synthesizer at startup, and volume groups |
-| `src/ui/` | Menus (`mod.rs`), the crate carousel, loadout and attachment guide, sandbox tools |
+| `src/ui/` | Menus (`mod.rs`), the crate carousel, class loadout and attachment guide, sandbox tools |

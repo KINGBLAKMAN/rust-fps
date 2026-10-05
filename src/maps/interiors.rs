@@ -499,7 +499,6 @@ impl MapLayout {
             yaw,
             gun,
             attach: crate::data::Attach::NONE,
-            owner: None,
         });
     }
 

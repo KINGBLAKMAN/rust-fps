@@ -1,14 +1,11 @@
 //! Career progress kept between matches. Every match earns career XP; each
-//! career level unlocks a gun or an attachment for your loadout. The gun you
-//! bring into a match hangs on one of the map's two wall-buy boards (with
-//! your attachments on it), and the mystery box leaves it out.
+//! career level unlocks an attachment or a class's second gun choice for
+//! your loadout.
 
 use bevy::prelude::*;
 
 use crate::config::Profile;
-use crate::data::{gun_def, Attach, GunClass, ATTACHMENTS};
-use crate::maps::MapLayout;
-use crate::Roster;
+use crate::data::{Attach, Character, ATTACHMENTS};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unlock {
@@ -17,37 +14,27 @@ pub enum Unlock {
     Attachment(usize),
 }
 
-/// Guns you can bring from the start.
-pub const STARTING_GUNS: [u8; 3] = [1, 2, 10];
+/// Guns you can bring from the start: every class's first choices.
+pub const STARTING_GUNS: [u8; 12] = [6, 9, 3, 13, 11, 16, 0, 1, 19, 4, 18, 2];
 
-/// What each career level unlocks (level 2 onwards).
-pub const UNLOCKS: [Unlock; 26] = [
+/// What each career level unlocks (level 2 onwards): attachments, and the
+/// second gun choice of each class.
+pub const UNLOCKS: [Unlock; 15] = [
     Unlock::Attachment(0), // 2: Red Dot
-    Unlock::Gun(3),        // 3: Kestrel SMG
+    Unlock::Gun(8),        // 3: Tempest Burst (Striker)
     Unlock::Attachment(3), // 4: Suppressor
-    Unlock::Gun(6),        // 5: Falcon AR
+    Unlock::Gun(10),       // 5: Breacher 12 (Warden)
     Unlock::Attachment(5), // 6: Foregrip
-    Unlock::Gun(9),        // 7: Bulldog Carbine
+    Unlock::Gun(20),       // 7: Twin Fangs (Ronin)
     Unlock::Attachment(1), // 8: Holo Sight
-    Unlock::Gun(8),        // 9: Tempest Burst
+    Unlock::Gun(14),       // 9: Ripsaw LMG (Tinker)
     Unlock::Attachment(7), // 10: Extended Mag
-    Unlock::Gun(16),       // 11: Arbiter DMR
+    Unlock::Gun(12),       // 11: Double Barrel (Blaze)
     Unlock::Attachment(4), // 12: Compensator
-    Unlock::Gun(13),       // 13: Goliath LMG
+    Unlock::Gun(15),       // 13: Longbow Sniper (Valkyrie)
     Unlock::Attachment(6), // 14: Laser
-    Unlock::Gun(15),       // 15: Longbow Sniper
+    Unlock::Gun(5),        // 15: Mamba Machine Pistol (Striker, Blaze)
     Unlock::Attachment(2), // 16: 3x Scope
-    Unlock::Gun(18),       // 17: Judge Revolver
-    Unlock::Gun(11),       // 18: Stormfront Auto
-    Unlock::Gun(7),        // 19: Ranger Rifle
-    Unlock::Gun(14),       // 20: Ripsaw LMG
-    Unlock::Gun(17),       // 21: Sentinel Marksman
-    Unlock::Gun(19),       // 22: Hammer .50
-    Unlock::Gun(4),        // 23: Wasp PDW
-    Unlock::Gun(5),        // 24: Mamba Machine Pistol
-    Unlock::Gun(20),       // 25: Twin Fangs
-    Unlock::Gun(12),       // 26: Double Barrel
-    Unlock::Gun(0),        // 27: M9 Sidearm (for the collectors)
 ];
 
 pub const MAX_CAREER_LEVEL: u32 = UNLOCKS.len() as u32 + 1;
@@ -89,17 +76,6 @@ pub fn attachment_unlocked(level: u32, index: usize) -> bool {
     unlock_level(Unlock::Attachment(index)) <= level
 }
 
-/// Every gun that can be brought in, in unlock order.
-pub fn loadout_guns() -> Vec<u8> {
-    let mut v: Vec<u8> = STARTING_GUNS.to_vec();
-    for u in UNLOCKS {
-        if let Unlock::Gun(g) = u {
-            v.push(g);
-        }
-    }
-    v
-}
-
 /// What a finished match is worth.
 /// Career XP for a run: rounds survived, kills, maps cleared and a bonus
 /// for beating the final boss.
@@ -107,11 +83,12 @@ pub fn match_xp(rounds: u32, kills: u32, maps_cleared: u32, won: bool) -> u32 {
     rounds * 150 + kills * 3 + maps_cleared * 400 + if won { 1500 } else { 0 }
 }
 
-/// Is this a valid loadout (a gun that can be brought, attachments it takes)?
-pub fn valid_loadout(gun: u8, attach: Attach) -> bool {
-    (gun as usize) < crate::data::GUNS.len()
-        && gun_def(gun).class != GunClass::Wonder
-        && crate::data::attach_options_for(gun).fits(attach)
+/// Are these guns (primary, secondary) ones the class can bring, with
+/// attachments they take?
+pub fn valid_class_guns(c: Character, guns: [(u8, Attach); 2]) -> bool {
+    guns.iter().enumerate().all(|(slot, (g, a))| {
+        c.has_gun(slot, *g) && crate::data::attach_options_for(*g).fits(*a)
+    })
 }
 
 /// Turns attachments off that the player hasn't unlocked yet or that the
@@ -146,24 +123,6 @@ pub fn allowed_attach(level: u32, gun: u8, attach: Attach) -> Attach {
         };
     let mag = attach.ext_mag() && opts.mag && ok(crate::data::Slot::Mag, 1);
     Attach::new(optic, muzzle, under, mag)
-}
-
-/// Puts the guns players brought onto the wall boards: the first two
-/// players (by id) with a loadout take the two boards in order.
-pub fn apply_loadouts(layout: &mut MapLayout, roster: &Roster) {
-    let mut boards = layout.wall_buys.iter_mut();
-    for p in roster.0.values() {
-        let Some((gun, attach)) = p.loadout else {
-            continue;
-        };
-        if !valid_loadout(gun, attach) {
-            continue;
-        }
-        let Some(board) = boards.next() else { break };
-        board.gun = gun;
-        board.attach = attach;
-        board.owner = Some(p.name.clone());
-    }
 }
 
 pub struct ProgressionPlugin;

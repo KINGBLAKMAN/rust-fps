@@ -35,6 +35,8 @@ pub enum Action {
     Ability1,
     Ability2,
     Ultimate,
+    WeaponAbility1,
+    WeaponAbility2,
     SwapWeapon,
     Upgrades,
     Scoreboard,
@@ -44,7 +46,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 18] = [
+    pub const ALL: [Action; 20] = [
         Action::Forward,
         Action::Back,
         Action::Left,
@@ -57,6 +59,8 @@ impl Action {
         Action::Ability1,
         Action::Ability2,
         Action::Ultimate,
+        Action::WeaponAbility1,
+        Action::WeaponAbility2,
         Action::SwapWeapon,
         Action::Upgrades,
         Action::Scoreboard,
@@ -79,6 +83,8 @@ impl Action {
             Action::Ability1 => "Ability 1",
             Action::Ability2 => "Ability 2",
             Action::Ultimate => "Ultimate",
+            Action::WeaponAbility1 => "Weapon ability 1",
+            Action::WeaponAbility2 => "Weapon ability 2",
             Action::SwapWeapon => "Swap weapon",
             Action::Upgrades => "Pick level-up upgrade",
             Action::Scoreboard => "Scoreboard",
@@ -102,6 +108,8 @@ impl Action {
             Action::Ability1 => KeyCode::KeyQ,
             Action::Ability2 => KeyCode::KeyE,
             Action::Ultimate => KeyCode::KeyX,
+            Action::WeaponAbility1 => KeyCode::Digit3,
+            Action::WeaponAbility2 => KeyCode::Digit4,
             Action::SwapWeapon => KeyCode::KeyT,
             Action::Upgrades => KeyCode::KeyB,
             Action::Scoreboard => KeyCode::Tab,
@@ -340,9 +348,10 @@ pub struct Profile {
     pub last_address: String,
     /// Career experience from every match (see progression.rs).
     pub career_xp: u32,
-    /// The gun brought into matches, and its attachments.
-    pub loadout_gun: Option<u8>,
-    pub loadout_attach: u8,
+    /// Each class's chosen guns (primary, secondary).
+    pub class_guns: HashMap<Character, [u8; 2]>,
+    /// Attachments picked for each gun (by gun id).
+    pub gun_attach: HashMap<u8, u8>,
     /// XP earned with each character (their character level).
     pub char_xp: HashMap<Character, u32>,
     /// The abilities picked for each character.
@@ -365,8 +374,8 @@ impl Default for Profile {
             extractions: 0,
             last_address: String::new(),
             career_xp: 0,
-            loadout_gun: None,
-            loadout_attach: 0,
+            class_guns: HashMap::new(),
+            gun_attach: HashMap::new(),
             char_xp: HashMap::new(),
             kits: HashMap::new(),
         }
@@ -374,20 +383,23 @@ impl Default for Profile {
 }
 
 impl Profile {
-    /// The loadout to send to the host, if one is picked and allowed.
-    pub fn loadout(&self) -> Option<(u8, crate::data::Attach)> {
+    /// A class's guns (primary, secondary) and their attachments, falling
+    /// back to the first choices for anything not picked or not unlocked.
+    pub fn class_loadout(&self, c: Character) -> [(u8, crate::data::Attach); 2] {
         let level = crate::progression::career(self.career_xp).0;
-        let gun = self
-            .loadout_gun
-            .filter(|g| crate::progression::gun_unlocked(level, *g))?;
-        Some((
-            gun,
-            crate::progression::allowed_attach(
-                level,
-                gun,
-                crate::data::Attach(self.loadout_attach),
-            ),
-        ))
+        let defaults = c.default_guns();
+        let picked = self.class_guns.get(&c).copied().unwrap_or(defaults);
+        std::array::from_fn(|slot| {
+            let gun = if c.has_gun(slot, picked[slot])
+                && crate::progression::gun_unlocked(level, picked[slot])
+            {
+                picked[slot]
+            } else {
+                defaults[slot]
+            };
+            let attach = crate::data::Attach(self.gun_attach.get(&gun).copied().unwrap_or(0));
+            (gun, crate::progression::allowed_attach(level, gun, attach))
+        })
     }
 
     /// The skin this player shows on `gun`.

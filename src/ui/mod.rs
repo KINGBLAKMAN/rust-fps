@@ -154,9 +154,11 @@ pub enum UiAction {
     ChooseUpgrade(u8),
     BackToLobby,
     OpenLoadout,
-    LoadoutGun(Option<u8>),
-    /// Fit attachment `id` in a slot (0 takes it off).
-    LoadoutAttach(u8, u8),
+    /// Bring `gun` in slot 0 (primary) or 1 (secondary).
+    LoadoutGun(u8, u8),
+    /// On the gun in a slot, fit attachment `id` in an attachment slot (0
+    /// takes it off).
+    LoadoutAttach(u8, u8, u8),
     OpenGuide(u8),
     /// Show or hide the host's internet address.
     RevealIp,
@@ -480,8 +482,7 @@ fn rebuild_ui(
             (
                 profile.round_bank,
                 profile.career_xp,
-                profile.loadout_gun,
-                profile.loadout_attach
+                profile.class_loadout(profile.character),
             )
         ),
         AppState::Lobby => {
@@ -662,10 +663,16 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         button(p, "Play Solo", UiAction::PlaySolo);
         button(p, "Host a Party", UiAction::Host);
         button(p, "Join a Party", UiAction::OpenJoin);
-        let brought = profile
-            .loadout()
-            .map_or("nothing".to_string(), |(g, _)| gun_def(g).name.to_string());
-        button(p, format!("Loadout  ({brought})"), UiAction::OpenLoadout);
+        let brought = profile.class_loadout(profile.character);
+        button(
+            p,
+            format!(
+                "Loadout  ({} + {})",
+                gun_def(brought[0].0).name,
+                gun_def(brought[1].0).name
+            ),
+            UiAction::OpenLoadout,
+        );
         button(
             p,
             format!("Characters  ({})", profile.character.name()),
@@ -1748,20 +1755,14 @@ fn handle_buttons(
             UiAction::OpenGuide(tab) => *screen = Screen::Guide(tab),
             UiAction::RevealIp => public_ip.toggle(),
             UiAction::Locked => {}
-            UiAction::LoadoutGun(gun) => {
-                profile.loadout_gun = gun;
-                if let Some(g) = gun {
-                    let level = crate::progression::career(profile.career_xp).0;
-                    profile.loadout_attach = crate::progression::allowed_attach(
-                        level,
-                        g,
-                        Attach(profile.loadout_attach),
-                    )
-                    .0;
-                }
+            UiAction::LoadoutGun(slot, gun) => {
+                let c = profile.character;
+                let mut picked = profile.class_loadout(c).map(|(g, _)| g);
+                picked[slot as usize & 1] = gun;
+                profile.class_guns.insert(c, picked);
             }
-            UiAction::LoadoutAttach(slot, id) => {
-                let a = Attach(profile.loadout_attach);
+            UiAction::LoadoutAttach(gun_slot, slot, id) => {
+                let (gun, a) = profile.class_loadout(profile.character)[gun_slot as usize & 1];
                 let (o, m, u, x) = (a.optic(), a.muzzle(), a.under(), a.ext_mag());
                 let a = match slot {
                     0 => Attach::new(id, m, u, x),
@@ -1769,7 +1770,7 @@ fn handle_buttons(
                     2 => Attach::new(o, m, id, x),
                     _ => Attach::new(o, m, u, id > 0),
                 };
-                profile.loadout_attach = a.0;
+                profile.gun_attach.insert(gun, a.0);
             }
             UiAction::PlaySandbox => {
                 requests.write(PartyRequest::Sandbox);

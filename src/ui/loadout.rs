@@ -1,12 +1,12 @@
-//! The loadout screen (the gun you bring into matches and its attachments)
-//! and the attachment guide.
+//! The class loadout screen (which of the class's guns to bring and their
+//! attachments), and the attachment guide.
 
 use bevy::prelude::*;
 
 use crate::config::Profile;
-use crate::data::{attach_options_for, gun_def, Attach, Slot, ATTACHMENTS};
+use crate::data::{alt_fire, attach_options_for, gun_def, Attach, Slot, ATTACHMENTS};
 use crate::progression::{
-    attachment_unlocked, career, gun_unlocked, loadout_guns, unlock_level, Unlock,
+    attachment_unlocked, career, gun_unlocked, unlock_level, Unlock,
 };
 
 use super::{button_sized, label, panel, row, UiAction, ACCENT, DIM};
@@ -37,9 +37,11 @@ fn xp_bar(p: &mut ChildSpawnerCommands, into: u32, need: u32) {
 
 pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
     let (level, into, need) = career(profile.career_xp);
-    let chosen = profile.loadout();
+    let class = profile.character;
+    let chosen = profile.class_loadout(class);
+    let guns = class.guns();
     panel(commands, false, |p| {
-        label(p, "LOADOUT", 34.0, ACCENT);
+        label(p, format!("{} LOADOUT", class.name().to_uppercase()), 34.0, ACCENT);
         label(
             p,
             format!("Career level {level}   {into} / {need} XP to the next"),
@@ -47,143 +49,73 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
             Color::WHITE,
         );
         xp_bar(p, into, need);
-        label(
-            p,
-            "The gun you bring hangs on a wall board in every match, with\nyour attachments on it, and the mystery box leaves it out.\nPlay matches to earn XP: each level unlocks a gun or attachment.",
-            14.0,
-            DIM,
-        );
-        label(p, "Gun to bring:", 17.0, Color::WHITE);
-        row(p, |r| {
-            button_sized(
-                r,
-                "Nothing",
-                UiAction::LoadoutGun(None),
-                Some(150.0),
-                chosen.is_none(),
-            );
-            for g in loadout_guns()
-                .into_iter()
-                .filter(|&g| gun_unlocked(level, g))
-            {
-                let selected = chosen.is_some_and(|(c, _)| c == g);
-                button_sized(
-                    r,
-                    gun_def(g).name,
-                    UiAction::LoadoutGun(Some(g)),
-                    Some(150.0),
-                    selected,
-                );
-            }
-        });
-        // Only the next gun to unlock is shown, so the list stays short.
-        let locked: Vec<u8> = loadout_guns()
-            .into_iter()
-            .filter(|&g| !gun_unlocked(level, g))
-            .collect();
-        if let Some(&next) = locked.first() {
-            label(
-                p,
-                format!(
-                    "Next gun: {} at level {}  ({} more to unlock after that)",
-                    gun_def(next).name,
-                    unlock_level(Unlock::Gun(next)),
-                    locked.len() - 1
-                ),
-                14.0,
-                DIM,
-            );
-        }
-        let Some((gun, attach)) = chosen else {
-            button_sized(p, "Back", UiAction::BackToMain, Some(260.0), false);
-            return;
-        };
-        let opts = attach_options_for(gun);
-        label(
-            p,
-            format!("Attachments on the {}:", gun_def(gun).name),
-            17.0,
-            Color::WHITE,
-        );
-        for (i, slot) in Slot::ALL.into_iter().enumerate() {
-            let fitted = match slot {
-                Slot::Optic => attach.optic(),
-                Slot::Muzzle => attach.muzzle(),
-                Slot::Under => attach.under(),
-                Slot::Mag => attach.ext_mag() as u8,
-            };
-            let choices = opts.for_slot(slot);
-            row(p, |r| {
-                r.spawn((
-                    Text::new(slot.name()),
-                    TextFont {
-                        font_size: 15.0,
-                        ..default()
-                    },
-                    TextColor(DIM),
-                    Node {
-                        width: Val::Px(100.0),
-                        ..default()
-                    },
-                ));
-                if choices.is_empty() {
-                    label(r, "Not on this gun (built in or doesn't fit)", 14.0, DIM);
-                    return;
-                }
-                button_sized(
-                    r,
-                    "None",
-                    UiAction::LoadoutAttach(i as u8, 0),
-                    Some(110.0),
-                    fitted == 0,
-                );
-                for &id in choices {
-                    let Some(index) = ATTACHMENTS
-                        .iter()
-                        .position(|a| a.slot == slot && a.id == id)
-                    else {
-                        continue;
-                    };
-                    if attachment_unlocked(level, index) {
-                        button_sized(
-                            r,
-                            ATTACHMENTS[index].name,
-                            UiAction::LoadoutAttach(i as u8, id),
-                            Some(130.0),
-                            fitted == id,
-                        );
-                    } else {
-                        let lv = unlock_level(Unlock::Attachment(index));
-                        button_sized(
-                            r,
-                            format!("Level {lv}"),
-                            UiAction::Locked,
-                            Some(130.0),
-                            false,
-                        );
-                    }
-                }
-            });
-        }
-        // What it all adds up to.
-        let h = attach.handling(gun);
-        let pct = |k: f32| ((k - 1.0) * 100.0).round() as i32;
+        let abilities = class.weapon_abilities();
         label(
             p,
             format!(
-                "Aim time {:+}%   Aimed spread {:+}%   Hip spread {:+}%\nClimb {:+}%   Side recoil {:+}%   Reload {:+}%   Damage {:+}%",
-                pct(h.ads_time),
-                pct(h.ads_spread),
-                pct(h.hip_spread),
-                pct(h.recoil_up),
-                pct(h.recoil_side),
-                pct(h.reload),
-                pct(h.damage)
+                "Weapon abilities:  {} ({})  and  {} ({})",
+                abilities[0].name(),
+                abilities[0].def().desc,
+                abilities[1].name(),
+                abilities[1].def().desc
             ),
-            14.0,
+            15.0,
             ACCENT,
         );
-        let _ = Attach::NONE;
+        // Primary on the left, secondary on the right.
+        p.spawn(Node {
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(36.0),
+            ..default()
+        })
+        .with_children(|cols| {
+            for (slot, options) in [guns.primaries, guns.secondaries].into_iter().enumerate() {
+                cols.spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(7.0),
+                    width: Val::Px(540.0),
+                    ..default()
+                })
+                .with_children(|p| {
+                    label(
+                        p,
+                        if slot == 0 { "PRIMARY" } else { "SECONDARY" },
+                        19.0,
+                        Color::WHITE,
+                    );
+                    row(p, |r| {
+                        for g in options {
+                            if gun_unlocked(level, g) {
+                                button_sized(
+                                    r,
+                                    gun_def(g).name,
+                                    UiAction::LoadoutGun(slot as u8, g),
+                                    Some(250.0),
+                                    chosen[slot].0 == g,
+                                );
+                            } else {
+                                let lv = unlock_level(Unlock::Gun(g));
+                                button_sized(
+                                    r,
+                                    format!("{} (lv {lv})", gun_def(g).name),
+                                    UiAction::Locked,
+                                    Some(250.0),
+                                    false,
+                                );
+                            }
+                        }
+                    });
+                    let (gun, attach) = chosen[slot];
+                    label(
+                        p,
+                        format!("Right mouse: {}", alt_fire(gun).describe()),
+                        15.0,
+                        DIM,
+                    );
+                    attach_rows(p, level, slot, gun, attach);
+                });
+            }
+        });
         row(p, |r| {
             button_sized(
                 r,
@@ -195,6 +127,79 @@ pub(super) fn loadout_screen(commands: &mut Commands, profile: &Profile) {
             button_sized(r, "Back", UiAction::BackToMain, Some(260.0), false);
         });
     });
+}
+
+/// The attachment pickers for one of the class's guns.
+fn attach_rows(p: &mut ChildSpawnerCommands, level: u32, gun_slot: usize, gun: u8, attach: Attach) {
+    let opts = attach_options_for(gun);
+    let h = attach.handling(gun);
+    let pct = |k: f32| ((k - 1.0) * 100.0).round() as i32;
+    label(
+        p,
+        format!(
+            "Aim {:+}%  spread {:+}%  recoil {:+}%  reload {:+}%  damage {:+}%",
+            pct(h.ads_time),
+            pct(h.hip_spread),
+            pct(h.recoil_up),
+            pct(h.reload),
+            pct(h.damage)
+        ),
+        14.0,
+        Color::WHITE,
+    );
+    for (i, slot) in Slot::ALL.into_iter().enumerate() {
+        let fitted = match slot {
+            Slot::Optic => attach.optic(),
+            Slot::Muzzle => attach.muzzle(),
+            Slot::Under => attach.under(),
+            Slot::Mag => attach.ext_mag() as u8,
+        };
+        let choices = opts.for_slot(slot);
+        if choices.is_empty() {
+            continue;
+        }
+        row(p, |r| {
+            r.spawn((
+                Text::new(slot.name()),
+                TextFont {
+                    font_size: 15.0,
+                    ..default()
+                },
+                TextColor(DIM),
+                Node {
+                    width: Val::Px(96.0),
+                    ..default()
+                },
+            ));
+            button_sized(
+                r,
+                "None",
+                UiAction::LoadoutAttach(gun_slot as u8, i as u8, 0),
+                Some(70.0),
+                fitted == 0,
+            );
+            for &id in choices {
+                let Some(index) = ATTACHMENTS
+                    .iter()
+                    .position(|a| a.slot == slot && a.id == id)
+                else {
+                    continue;
+                };
+                if attachment_unlocked(level, index) {
+                    button_sized(
+                        r,
+                        ATTACHMENTS[index].name,
+                        UiAction::LoadoutAttach(gun_slot as u8, i as u8, id),
+                        Some(115.0),
+                        fitted == id,
+                    );
+                } else {
+                    let lv = unlock_level(Unlock::Attachment(index));
+                    button_sized(r, format!("Lv {lv}"), UiAction::Locked, Some(115.0), false);
+                }
+            }
+        });
+    }
 }
 
 pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) {
@@ -215,7 +220,7 @@ pub(super) fn guide_screen(commands: &mut Commands, profile: &Profile, tab: u8) 
         });
         label(
             p,
-            "Guns from the mystery box come with random attachments.\nYour loadout gun uses the ones you pick.",
+            "The Armory fits random attachments to the gun in your hands.\nYour class guns start with the ones you pick.",
             14.0,
             DIM,
         );
