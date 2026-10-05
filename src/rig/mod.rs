@@ -403,6 +403,8 @@ pub struct Rig {
     pub crawl: bool,
     /// Zombies: seconds since the last swing (big = not attacking).
     pub swing: f32,
+    /// How fast the swing animation plays (bosses wind up slower).
+    pub swing_rate: f32,
     /// Jolt from being hit, fading.
     pub flinch: f32,
     /// Dying: seconds since death and which way it falls.
@@ -536,6 +538,7 @@ pub fn spawn_rig_with(
         gait: model.gait(),
         crawl: false,
         swing: 9.0,
+        swing_rate: 1.0,
         flinch: 0.0,
         dying: None,
         pitch: 0.0,
@@ -928,9 +931,10 @@ fn zombie_pose(rig: &Rig, gait: Gait) -> Pose {
         _ => [[0.35, 0.45, 0.5, 0.55]; 2],
     };
     // Attacking.
-    if rig.swing < 0.7 {
-        let k = smooth(rig.swing / 0.35);
-        let back = 1.0 - smooth((rig.swing - 0.35) / 0.25);
+    let t = rig.swing * rig.swing_rate;
+    if t < 0.7 {
+        let k = smooth(t / 0.35);
+        let back = 1.0 - smooth((t - 0.35) / 0.25);
         match gait {
             Gait::Hunch => {
                 // Rears back, then thrusts the head forward to spit.
@@ -940,9 +944,9 @@ fn zombie_pose(rig: &Rig, gait: Gait) -> Pose {
             Gait::Stomp => {
                 // Two-handed overhead smash: raised, then down as the slam
                 // lands (crate::sim::BRUTE_WINDUP).
-                let raise = smooth(rig.swing / 0.25);
-                let k = smooth((rig.swing - 0.25) / 0.2);
-                let back = 1.0 - smooth((rig.swing - 0.5) / 0.2);
+                let raise = smooth(t / 0.25);
+                let k = smooth((t - 0.25) / 0.2);
+                let back = 1.0 - smooth((t - 0.5) / 0.2);
                 for side in 0..2 {
                     let x = sx(side);
                     let up = v(x * 0.2, HIP_Y + 1.25, 0.05);

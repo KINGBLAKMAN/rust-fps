@@ -43,33 +43,13 @@ pub enum Ground {
 /// Half size of the whole map.
 pub const OUTER: f32 = 58.0;
 
-/// A blocked way through that players buy open. Opening it unlocks area
-/// `zone` and `zone2` (0 for none); area 0 is where you start. A door
-/// between two areas opens by itself once both are open.
+/// A wide doorway between areas. (These were doors bought open before v9;
+/// now every area is open from the start.)
 #[derive(Clone)]
 pub struct DoorDef {
     pub pos: Vec3,
-    /// The door runs along X (in a wall along X) or along Z.
+    /// The doorway runs along X (in a wall along X) or along Z.
     pub along_x: bool,
-    pub cost: u32,
-    pub zone: u8,
-    pub zone2: u8,
-    pub name: &'static str,
-    /// What blocks the way until it's bought.
-    pub blocker: Blocker,
-}
-
-/// What blocks a way through until it's opened (it sinks away).
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Blocker {
-    /// Crates and pallets strapped together.
-    Crates,
-    /// Boards nailed across, with sandbags.
-    Planks,
-    /// A toppled bookcase and loose books.
-    Books,
-    /// Tables, chairs and shopping carts piled up.
-    Furniture,
 }
 
 pub const DOOR_WIDTH: f32 = 4.0;
@@ -85,25 +65,6 @@ pub struct WallBuy {
     pub attach: crate::data::Attach,
     /// Who brought it, if anyone.
     pub owner: Option<String>,
-}
-
-impl DoorDef {
-    /// The areas this door opens, as bits.
-    pub fn opens(&self) -> u8 {
-        (1 << self.zone) | if self.zone2 > 0 { 1 << self.zone2 } else { 0 }
-    }
-
-    /// Still shut, given the areas open so far?
-    pub fn locked(&self, open: u8) -> bool {
-        open & self.opens() != self.opens()
-    }
-
-    /// Close enough to buy it (from either side).
-    pub fn near(&self, feet: Vec3) -> bool {
-        let d = feet.with_y(0.0) - self.pos;
-        let (along, across) = if self.along_x { (d.x, d.z) } else { (d.z, d.x) };
-        along.abs() < DOOR_WIDTH / 2.0 + 0.6 && across.abs() < 2.4
-    }
 }
 
 impl WallBuy {
@@ -163,11 +124,6 @@ impl MapLayout {
             doors: Vec::new(),
             wall_buys: Vec::new(),
         }
-    }
-
-    /// Is a spot in an area that's open (bit `zone` set in `open`)?
-    pub fn zone_open(open: u8, zone: u8) -> bool {
-        zone == 0 || open & (1 << zone) != 0
     }
 
     /// Enemy spawn points in area `zone`.
@@ -245,19 +201,19 @@ fn shipping_yard() -> MapLayout {
     let garage = look(Finish::Metal, c(0.72, 0.58, 0.25), c(0.25, 0.25, 0.27));
 
     // Doors: from the start, then between the wings.
-    m.door_z(-10.0, 2.0, 1, 0, 750, "Container Stacks", Blocker::Crates);
-    m.door_z(10.0, 2.0, 2, 0, 750, "Warehouse", Blocker::Crates);
-    m.door_x(0.0, -16.0, 4, 0, 1000, "Dockside", Blocker::Crates);
-    m.door_z(-10.0, 14.0, 1, 3, 1000, "Port Office", Blocker::Furniture);
-    m.door_z(10.0, 14.0, 2, 3, 1000, "Port Office", Blocker::Furniture);
-    m.door_x(16.0, -16.0, 2, 4, 1000, "Dockside", Blocker::Crates);
-    m.door_x(-24.0, 20.0, 1, 5, 1250, "Rail Yard", Blocker::Crates);
-    m.door_z(-10.0, 36.0, 3, 5, 1250, "Rail Yard", Blocker::Furniture);
-    m.door_x(30.0, 20.0, 2, 6, 1250, "Machine Shop", Blocker::Crates);
-    m.door_z(10.0, 36.0, 3, 6, 1250, "Machine Shop", Blocker::Furniture);
-    m.door_z(-36.0, 2.0, 1, 7, 1250, "Truck Depot", Blocker::Crates);
-    m.door_z(-36.0, -40.0, 4, 7, 1250, "Truck Depot", Blocker::Crates);
-    m.door_x(-47.0, 20.0, 5, 7, 1250, "Truck Depot", Blocker::Crates);
+    m.door_z(-10.0, 2.0);
+    m.door_z(10.0, 2.0);
+    m.door_x(0.0, -16.0);
+    m.door_z(-10.0, 14.0);
+    m.door_z(10.0, 14.0);
+    m.door_x(16.0, -16.0);
+    m.door_x(-24.0, 20.0);
+    m.door_z(-10.0, 36.0);
+    m.door_x(30.0, 20.0);
+    m.door_z(10.0, 36.0);
+    m.door_z(-36.0, 2.0);
+    m.door_z(-36.0, -40.0);
+    m.door_x(-47.0, 20.0);
 
     let mut p = Plan::default();
     // Customs hall and its gate yard (the start).
@@ -665,17 +621,17 @@ fn central_park() -> MapLayout {
     let chapel = look(Finish::Stone, c(0.62, 0.62, 0.6), c(0.4, 0.4, 0.42));
     let fence = look(Finish::Fence, c(0.55, 0.55, 0.53), c(0.6, 0.6, 0.62));
 
-    m.door_z(-10.0, -51.0, 1, 0, 750, "Hedge Maze", Blocker::Planks);
-    m.door_z(10.0, -51.0, 2, 0, 750, "Lakeside", Blocker::Planks);
-    m.door_x(0.0, -26.0, 3, 0, 1000, "Museum", Blocker::Planks);
-    m.door_x(-36.0, -26.0, 1, 4, 1000, "Old Zoo", Blocker::Planks);
-    m.door_x(36.0, -26.0, 2, 5, 1000, "Conservatory", Blocker::Planks);
-    m.door_z(-14.0, -6.0, 3, 4, 1250, "Old Zoo", Blocker::Books);
-    m.door_z(14.0, -6.0, 3, 5, 1250, "Conservatory", Blocker::Books);
-    m.door_x(-36.0, 14.0, 4, 6, 1250, "Chapel", Blocker::Planks);
-    m.door_x(-7.0, 14.0, 3, 7, 1250, "Bandstand Green", Blocker::Books);
-    m.door_x(36.0, 14.0, 5, 7, 1250, "Bandstand Green", Blocker::Planks);
-    m.door_z(-10.0, 36.0, 6, 7, 1250, "Bandstand Green", Blocker::Planks);
+    m.door_z(-10.0, -51.0);
+    m.door_z(10.0, -51.0);
+    m.door_x(0.0, -26.0);
+    m.door_x(-36.0, -26.0);
+    m.door_x(36.0, -26.0);
+    m.door_z(-14.0, -6.0);
+    m.door_z(14.0, -6.0);
+    m.door_x(-36.0, 14.0);
+    m.door_x(-7.0, 14.0);
+    m.door_x(36.0, 14.0);
+    m.door_z(-10.0, 36.0);
 
     let mut p = Plan::default();
     // Visitor centre and the fountain court (the start).
@@ -1103,18 +1059,18 @@ fn neighborhood() -> MapLayout {
     let yellow = look(Finish::Siding, c(0.92, 0.82, 0.5), c(0.95, 0.95, 0.92));
     let pink = look(Finish::Siding, c(0.85, 0.65, 0.65), c(0.95, 0.95, 0.92));
 
-    m.door_x(-5.0, -8.0, 1, 0, 750, "Main Street", Blocker::Planks);
-    m.door_z(-12.0, -21.0, 2, 0, 1000, "Diner", Blocker::Furniture);
-    m.door_z(12.0, -21.0, 3, 0, 1000, "School", Blocker::Books);
-    m.door_x(-24.0, -8.0, 1, 2, 1000, "Diner", Blocker::Furniture);
-    m.door_x(-41.0, -8.0, 1, 2, 1000, "Corner Store", Blocker::Furniture);
-    m.door_x(29.0, -8.0, 1, 3, 1000, "School", Blocker::Books);
-    m.door_x(-38.0, 8.0, 1, 4, 1250, "Police Station", Blocker::Planks);
-    m.door_x(0.0, 8.0, 1, 7, 1000, "Community Centre", Blocker::Books);
-    m.door_x(36.0, 8.0, 1, 5, 1250, "Maple Court", Blocker::Planks);
-    m.door_x(-38.0, 44.0, 4, 6, 1250, "Back Alley", Blocker::Planks);
-    m.door_x(0.0, 44.0, 7, 6, 1250, "Back Alley", Blocker::Planks);
-    m.door_x(24.0, 44.0, 5, 6, 1250, "Back Alley", Blocker::Planks);
+    m.door_x(-5.0, -8.0);
+    m.door_z(-12.0, -21.0);
+    m.door_z(12.0, -21.0);
+    m.door_x(-24.0, -8.0);
+    m.door_x(-41.0, -8.0);
+    m.door_x(29.0, -8.0);
+    m.door_x(-38.0, 8.0);
+    m.door_x(0.0, 8.0);
+    m.door_x(36.0, 8.0);
+    m.door_x(-38.0, 44.0);
+    m.door_x(0.0, 44.0);
+    m.door_x(24.0, 44.0);
 
     let mut p = Plan::default();
     // The Hendersons' house and back yard (the start).

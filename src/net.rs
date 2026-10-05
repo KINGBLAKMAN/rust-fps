@@ -25,7 +25,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 8;
+const PROTOCOL_VERSION: u32 = 9;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -1066,7 +1066,7 @@ fn client_receive(
 
     // Follow the host between the party screen and the match.
     let in_game = *app_state.get() == AppState::InGame;
-    if *app_state.get() == AppState::Lobby && state.started && !state.game_over && !state.extracted
+    if *app_state.get() == AppState::Lobby && state.started && !state.game_over && !state.won
     {
         next.set(AppState::InGame);
         return;

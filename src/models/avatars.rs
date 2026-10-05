@@ -246,7 +246,7 @@ fn setup(
 
 /// Per-enemy materials so hits, burning and slows can tint each one.
 #[derive(Component)]
-struct EnemyLook(Handle<StandardMaterial>, f32);
+struct EnemyLook(Handle<StandardMaterial>, f32, Color, LinearRgba);
 
 #[derive(Component)]
 struct Spin;
@@ -442,7 +442,7 @@ fn dress(
     pos: Vec3,
 ) {
     match kind {
-        NetKind::Grunt | NetKind::Shooter | NetKind::Brute => {
+        NetKind::Grunt | NetKind::Shooter | NetKind::Brute | NetKind::Boss(_) => {
             let model = match kind {
                 NetKind::Grunt => Model::Walker((root.index() % 3) as u8),
                 NetKind::Shooter => Model::Spitter,
@@ -450,11 +450,41 @@ fn dress(
             };
             // Each zombie gets its own copy of the body material so hits,
             // burning and slows can tint just that one.
-            let body = materials.add(crate::kit::vertex_material(0.75, 0.05));
+            let mut look = crate::kit::vertex_material(0.75, 0.05);
+            // Bosses are huge Brutes: rust red for a map boss, bruise purple
+            // with a glow for the final one.
+            match kind {
+                NetKind::Boss(0) => look.base_color = Color::srgb(1.0, 0.62, 0.55),
+                NetKind::Boss(_) => {
+                    look.base_color = Color::srgb(0.78, 0.6, 1.0);
+                    look.emissive = LinearRgba::rgb(0.08, 0.02, 0.14);
+                }
+                _ => {}
+            }
+            if let NetKind::Boss(level) = kind {
+                let color = if level == 0 {
+                    Color::srgb(1.0, 0.35, 0.2)
+                } else {
+                    Color::srgb(0.7, 0.3, 1.0)
+                };
+                commands.entity(root).with_children(|p| {
+                    p.spawn((
+                        PointLight {
+                            intensity: 60_000.0,
+                            color,
+                            range: 9.0,
+                            ..default()
+                        },
+                        Transform::from_xyz(0.0, 1.4, 0.6),
+                    ));
+                });
+            }
+            let (base, base_glow) = (look.base_color, look.emissive);
+            let body = materials.add(look);
             commands.entity(root).insert((
                 Enemy,
                 EnemyStatus::default(),
-                EnemyLook(body.clone(), 0.0),
+                EnemyLook(body.clone(), 0.0, base, base_glow),
                 Transform::from_translation(pos).with_scale(Vec3::splat(enemy_scale(kind))),
             ));
             crate::rig::spawn_rig_with(commands, rigs, root, model, None, Some(body));
@@ -674,7 +704,7 @@ fn enemy_colors(
                 LinearRgba::rgb(0.02, 0.08, 0.18),
             )
         } else {
-            (Color::WHITE, LinearRgba::BLACK)
+            (look.2, look.3)
         };
         let glow = glow + LinearRgba::rgb(0.45, 0.42, 0.40) * look.1;
         // Only touch the material when it changes (every change is re-sent

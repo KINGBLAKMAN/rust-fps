@@ -1,6 +1,7 @@
 //! The in-game HUD: crosshair, health, level and XP, points, ammo, ability
 //! cooldowns, perks, prompts for the box and perk machines, power-up and
-//! round banners, the scoreboard, the level-up picker and the end screen.
+//! round banners, the boss bar, the teleporter, the scoreboard, the level-up
+//! picker and the end screen.
 
 /// Quiet text colour for the sandbox hint.
 const DIM_HINT: Color = Color::srgba(1.0, 1.0, 1.0, 0.55);
@@ -9,8 +10,10 @@ use bevy::prelude::*;
 
 use crate::config::{key_name, Action, Settings};
 use crate::data::{
-    elements_in, gun_def, has_perk, skin_def, wall_cost, xp_to_next, Perk, BOX_COST, MAX_LEVEL,
+    boss_name, elements_in, gun_def, has_perk, skin_def, wall_cost, xp_to_next, Perk, BOX_COST,
+    FINAL_BOSS_NAME, MAX_LEVEL, ROUNDS_PER_STAGE, STAGES,
 };
+use crate::sim::TELEPORT_HOLD;
 use crate::game::{match_ended, MatchResult, Overlay};
 use crate::maps::{map_name, CurrentMap};
 use crate::ui::{button, UiAction, ACCENT, PANEL};
@@ -34,6 +37,7 @@ impl Plugin for HudPlugin {
                     update_scoreboard,
                     upgrade_panel,
                     end_screen,
+                    boss_bar,
                 )
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
@@ -86,6 +90,13 @@ struct ScoreboardText;
 struct UpgradePanel;
 #[derive(Component)]
 struct EndPanel;
+/// The boss's name and health bar at the top of the screen.
+#[derive(Component)]
+struct BossBar;
+#[derive(Component)]
+struct BossName;
+#[derive(Component)]
+struct BossFill;
 
 fn text(value: impl Into<String>, size: f32, color: Color) -> (Text, TextFont, TextColor) {
     (
@@ -325,6 +336,28 @@ fn spawn_hud(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         .with_children(|c| {
             c.spawn((HudText::Round, text("", 44.0, Color::srgb(0.85, 0.12, 0.1))));
             c.spawn((HudText::Info, text("", 17.0, dim)));
+        });
+
+    // Top centre: the boss's health bar (hidden until a boss is out).
+    commands
+        .spawn((
+            InGameEntity,
+            BossBar,
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                top: Val::Px(10.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(4.0),
+                ..default()
+            },
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ))
+        .with_children(|c| {
+            c.spawn((BossName, text("", 24.0, Color::srgb(1.0, 0.55, 0.4))));
+            bar(c, 520.0, 16.0, Color::srgb(0.85, 0.18, 0.12), BossFill);
         });
 
     // Top centre banner and centre prompt.
@@ -580,7 +613,20 @@ fn update_hud(
             }
             HudText::Info => {
                 let mut info = map_name(state.map).to_string();
-                if state.round > 0 {
+                if !state.sandbox.on {
+                    info += &format!("  -  map {} of {}", state.stage + 1, STAGES);
+                    if state.teleport {
+                        info += &format!("\nBoss down: on to map {}", state.stage + 2);
+                    } else if state.stage_round > ROUNDS_PER_STAGE {
+                        info += "\nBOSS ROUND";
+                    } else if state.stage_round > 0 {
+                        info += &format!(
+                            "\nRound {} of {}, then the boss",
+                            state.stage_round, ROUNDS_PER_STAGE
+                        );
+                    }
+                }
+                if state.round > 0 && !state.teleport {
                     info += &format!("\nEnemies left: {}", enemy_count + state.to_spawn);
                 }
                 if state.insta_kill > 0.0 {
@@ -855,18 +901,6 @@ fn update_prompt(
             }
         }
         let feet3 = me.feet();
-        if let Some(door) = map
-            .0
-            .doors
-            .iter()
-            .find(|d| d.near(feet3) && d.locked(state.doors))
-        {
-            msg = if me.points >= door.cost {
-                format!("[{key}] Clear the way to {} ({} pts)", door.name, door.cost)
-            } else {
-                format!("Way to {} - need {} pts", door.name, door.cost)
-            };
-        }
         if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet3)) {
             // A gun someone brought shows whose it is and what's fitted.
             let fitted = wall.attach.names();
@@ -930,24 +964,24 @@ fn update_banner(
             return;
         }
     }
-    if state.extraction > 0.0 {
+    if state.teleport {
         let dist = match (roster.me(&session), &map) {
             (Some(me), Some(map)) => me.feet().with_y(0.0).distance(map.0.extraction),
             _ => 0.0,
         };
-        let hold = if state.extract_hold > 0.0 {
-            format!("\nExtracting... {:.1} / 5.0", state.extract_hold)
+        let hold = if state.teleport_hold > 0.0 {
+            format!("\nTeleporting... {:.1} / {:.1}", state.teleport_hold, TELEPORT_HOLD)
         } else {
             String::new()
         };
         set(
             &mut text,
             format!(
-                "EXTRACTION OPEN {:.0}s - whole team to the green beam ({:.0}m)\nor stay and keep fighting{hold}",
-                state.extraction, dist
+                "BOSS DOWN! Teleporter open ({:.0}m)\nWhole team into the purple light{hold}",
+                dist
             ),
         );
-        color.0 = Color::srgb(0.3, 1.0, 0.5);
+        color.0 = Color::srgb(0.75, 0.55, 1.0);
         return;
     }
     if state.sandbox.on && !state.sandbox.waves {
@@ -955,17 +989,39 @@ fn update_banner(
         color.0 = DIM_HINT;
         return;
     }
-    if state.round == 0 {
+    if state.stage_round == 0 {
+        let lead = if state.sandbox.on {
+            String::new()
+        } else {
+            format!("Map {} of {}: {}\n", state.stage + 1, STAGES, map_name(state.map))
+        };
         set(
             &mut text,
-            format!("Get ready... {:.0}", state.intermission.max(0.0).ceil()),
+            format!("{lead}Get ready... {:.0}", state.intermission.max(0.0).ceil()),
         );
         color.0 = ACCENT;
         return;
     }
-    if state.to_spawn == 0 && state.intermission > 0.0 && state.intermission < 4.5 {
-        set(&mut text, format!("Round {} cleared!", state.round));
-        color.0 = ACCENT;
+    if state.to_spawn == 0 && state.intermission > 0.0 && state.intermission < 7.5 {
+        let boss_next = !state.sandbox.on && state.stage_round == ROUNDS_PER_STAGE;
+        if boss_next {
+            let name = boss_name(state.map, state.stage + 1 >= STAGES);
+            set(
+                &mut text,
+                format!(
+                    "Round {} cleared!\n{} is coming... {:.0}",
+                    state.round,
+                    name,
+                    state.intermission.ceil()
+                ),
+            );
+            color.0 = Color::srgb(1.0, 0.45, 0.3);
+        } else if state.intermission < 4.5 {
+            set(&mut text, format!("Round {} cleared!", state.round));
+            color.0 = ACCENT;
+        } else {
+            set(&mut text, String::new());
+        }
         return;
     }
     set(&mut text, String::new());
@@ -1110,10 +1166,17 @@ fn end_screen(
         return;
     }
     let me = roster.me(&session);
-    let (title, color) = if state.extracted {
-        ("EXTRACTED!", Color::srgb(0.3, 1.0, 0.5))
+    let (title, color) = if state.won {
+        ("RUN COMPLETE!", Color::srgb(0.75, 0.55, 1.0))
     } else {
         ("GAME OVER", Color::srgb(0.95, 0.2, 0.15))
+    };
+    let how_far = if state.won {
+        format!("All {STAGES} maps cleared and {FINAL_BOSS_NAME} defeated")
+    } else if state.sandbox.on {
+        String::new()
+    } else {
+        format!("Fell on map {} of {} ({})", state.stage + 1, STAGES, map_name(state.map))
     };
     commands
         .spawn((
@@ -1144,6 +1207,9 @@ fn end_screen(
             ))
             .with_children(|p| {
                 p.spawn(text(title, 54.0, color));
+                if !how_far.is_empty() {
+                    p.spawn(text(how_far.clone(), 20.0, Color::srgb(0.85, 0.85, 0.95)));
+                }
                 p.spawn(text(
                     format!("Rounds survived: {}", result.round),
                     22.0,
@@ -1228,4 +1294,27 @@ fn end_screen(
                 button(p, "Quit to main menu", UiAction::Leave);
             });
         });
+}
+
+/// Shows the boss's name and health while one is out.
+fn boss_bar(
+    state: Res<MatchState>,
+    mut bar: Single<&mut Visibility, With<BossBar>>,
+    mut name: Single<&mut Text, With<BossName>>,
+    mut fill: Single<&mut Node, With<BossFill>>,
+) {
+    let show = state.boss != 0 && !match_ended(&state);
+    let want = if show {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    if **bar != want {
+        **bar = want;
+    }
+    if !show {
+        return;
+    }
+    set(&mut name, boss_name(state.map, state.boss == 2).to_uppercase());
+    fill.width = Val::Percent(state.boss_hp * 100.0);
 }

@@ -7,7 +7,7 @@ use bevy::window::PrimaryWindow;
 use rand::Rng;
 
 use crate::config::{Action, InputExt, Settings};
-use crate::data::{gun_def, has_perk, mag_size, Attach, FireMode, GunClass, Perk};
+use crate::data::{gun_def, has_perk, mag_size, Attach, FireMode, GunClass, Perk, Stat};
 use crate::fx::{Fx, FxQueue};
 use crate::game::Paused;
 use crate::physics::{collect_boxes, trace_shot};
@@ -275,6 +275,17 @@ fn switch_weapon(
     }
 }
 
+/// How fast you reload: the Quick Hands perk doubles it, and each Sleight
+/// of Hand upgrade adds a bit.
+fn reload_speed(me: &crate::PlayerInfo) -> f32 {
+    let perk = if has_perk(me.perks, Perk::QuickHands) {
+        2.0
+    } else {
+        1.0
+    };
+    perk * (1.0 + me.stat(Stat::Sleight) * Stat::Sleight.per_stack())
+}
+
 fn reload(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -283,12 +294,7 @@ fn reload(
     roster: Res<Roster>,
     mut loadout: ResMut<Loadout>,
 ) {
-    let perks = roster.me(&session).map(|m| m.perks).unwrap_or(0);
-    let speed = if has_perk(perks, Perk::QuickHands) {
-        2.0
-    } else {
-        1.0
-    };
+    let speed = roster.me(&session).map_or(1.0, reload_speed);
     let active = loadout.active;
     let Some(gun) = loadout.slots[active] else {
         return;
@@ -472,11 +478,7 @@ pub fn fire(
     if gun.mag == 0 && !overdrive {
         loadout.burst_left = 0;
         if gun.reserve > 0 {
-            let speed = if has_perk(me.perks, Perk::QuickHands) {
-                2.0
-            } else {
-                1.0
-            };
+            let speed = reload_speed(me);
             loadout.reload = def.reload * gun.attach.handling(gun.id).reload / speed;
             loadout.reload_total = loadout.reload;
         }

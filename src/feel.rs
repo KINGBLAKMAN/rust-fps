@@ -11,8 +11,7 @@ use crate::config::Settings;
 use crate::fx::{Fx, FxQueue};
 use crate::player::LocalPlayer;
 use crate::rig::Rig;
-use crate::sim::BRUTE_WINDUP;
-use crate::{AppState, InGameEntity, MatchState, NetKind, Phase, Replicated};
+use crate::{AppState, InGameEntity, MatchState, Phase, Replicated};
 
 /// Camera shake, 0 to 1. Anything can add to it; it fades on its own.
 #[derive(Resource, Default)]
@@ -84,12 +83,14 @@ fn shake_sources(
     }
     swings.retain(|e, _| brutes.contains(*e));
     for (e, r, tf, rig) in &brutes {
-        if r.kind != NetKind::Brute {
+        if !r.kind.slams() {
             continue;
         }
+        let windup = crate::sim::slam_spec(r.kind).0;
         let before = swings.insert(e, rig.swing).unwrap_or(9.0);
-        if before < BRUTE_WINDUP && rig.swing >= BRUTE_WINDUP && rig.dying.is_none() {
-            shake.add(0.5 * near(tf.translation.to_array(), 8.0));
+        if before < windup && rig.swing >= windup && rig.dying.is_none() {
+            let big = if r.kind.is_boss() { 1.6 } else { 1.0 };
+            shake.add(0.5 * big * near(tf.translation.to_array(), 8.0 * big));
         }
     }
 }

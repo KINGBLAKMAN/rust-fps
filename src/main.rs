@@ -72,6 +72,9 @@ pub enum AppState {
     /// The party screen before a match.
     Lobby,
     InGame,
+    /// One frame between maps of a run: leaving it rebuilds the match on
+    /// the next map.
+    Travel,
 }
 
 /// Entities that only exist during a match; removed when it ends.
@@ -174,6 +177,8 @@ pub struct PlayerInfo {
     pub tiers: [u8; 3],
     pub gun_elements: u8,
     pub ability_elements: u8,
+    /// Stacks of each stat upgrade (see `data::Stat`).
+    pub stats: [u8; data::Stat::COUNT],
 
     pub cooldowns: [f32; 2],
     pub ult_charge: f32,
@@ -227,6 +232,7 @@ impl PlayerInfo {
             tiers: [0; 3],
             gun_elements: 0,
             ability_elements: 0,
+            stats: [0; data::Stat::COUNT],
             cooldowns: [0.0; 2],
             ult_charge: 0.0,
             overdrive: 0.0,
@@ -255,11 +261,17 @@ impl PlayerInfo {
     }
 
     pub fn max_health(&self) -> f32 {
-        if data::has_perk(self.perks, data::Perk::Juggernaut) {
+        let base = if data::has_perk(self.perks, data::Perk::Juggernaut) {
             200.0
         } else {
             BASE_HEALTH
-        }
+        };
+        base + self.stat(data::Stat::Vitality) * data::Stat::Vitality.per_stack()
+    }
+
+    /// Stacks of a stat upgrade, as a number to multiply by.
+    pub fn stat(&self, s: data::Stat) -> f32 {
+        self.stats[s as usize] as f32
     }
 
     pub fn damage(&mut self, amount: f32) {
@@ -314,7 +326,15 @@ pub struct MatchState {
     pub round: u32,
     pub started: bool,
     pub game_over: bool,
-    pub extracted: bool,
+    /// The run is won (the final boss is dead).
+    pub won: bool,
+    /// Which map of the run this is (0 to STAGES - 1).
+    pub stage: u8,
+    /// Rounds played on this map; the one after ROUNDS_PER_STAGE is the boss.
+    pub stage_round: u32,
+    /// Boss on the map: 0 none, 1 map boss, 2 final boss. Its health 0-1.
+    pub boss: u8,
+    pub boss_hp: f32,
     pub intermission: f32,
     pub to_spawn: u32,
     pub spawn_timer: f32,
@@ -332,11 +352,12 @@ pub struct MatchState {
     pub box_uses: u32,
     pub box_move_after: u32,
 
-    /// Seconds left to extract (0 = extraction not available).
-    pub extraction: f32,
-    /// How long the whole team has been standing in the zone.
-    pub extract_hold: f32,
-    /// Areas opened by buying doors (bit 1 north, 2 south, 3 east, 4 west).
+    /// The teleporter to the next map is open (the boss is dead).
+    pub teleport: bool,
+    /// How long the whole team has been standing in it.
+    pub teleport_hold: f32,
+    /// Open areas (bit 1 north, 2 south, 3 east, 4 west). Every area is
+    /// open since v9; the bits stay so maps keep their zones.
     pub doors: u8,
     /// Night version of the map (picked by the host in the lobby).
     pub night: bool,
@@ -383,6 +404,7 @@ impl MatchState {
         Self {
             map,
             intermission: 3.0,
+            doors: 0xFE,
             box_move_after: 6,
             ..default()
         }
@@ -440,6 +462,8 @@ pub enum NetKind {
     Grunt,
     Shooter,
     Brute,
+    /// 0 a map boss, 1 the final boss.
+    Boss(u8),
     Fireball,
     Grenade,
     PowerUp(data::PowerUp),
@@ -450,6 +474,17 @@ pub enum NetKind {
     Missile(u8),
     Mine,
     Drone,
+}
+
+impl NetKind {
+    /// Brutes and bosses wind up and slam the ground.
+    pub fn slams(self) -> bool {
+        matches!(self, NetKind::Brute | NetKind::Boss(_))
+    }
+
+    pub fn is_boss(self) -> bool {
+        matches!(self, NetKind::Boss(_))
+    }
 }
 
 /// An entity the host replicates to clients (enemies, projectiles, pickups).

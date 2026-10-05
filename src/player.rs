@@ -6,7 +6,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::config::{Action, InputExt, Settings};
-use crate::data::{has_perk, Perk};
+use crate::data::{has_perk, Perk, Stat};
 use crate::game::Paused;
 use crate::maps::{player_spawn, CurrentMap};
 use crate::physics::{collect_boxes, ground_height, resolve_collisions};
@@ -236,7 +236,7 @@ pub fn can_act(
     window: &Window,
 ) -> bool {
     !state.game_over
-        && !state.extracted
+        && !state.won
         && !paused.0
         && cursor_locked(window)
         && roster.me(session).is_none_or(|me| me.alive)
@@ -300,6 +300,8 @@ pub fn movement(
         1.0
     };
     // Combat Stim: a third faster on your feet.
+    let swift = 1.0
+        + me.map_or(0.0, |m| m.stat(Stat::Swift)) * Stat::Swift.per_stack();
     let stim = if me.is_some_and(|m| m.stim > 0.0) {
         1.3
     } else {
@@ -361,6 +363,7 @@ pub fn movement(
     } else {
         WALK_SPEED
     } * stim
+        * swift
         * (1.0 - 0.4 * aim.amount);
 
     // Jumping takes a fresh press: holding the key doesn't hop again. A press

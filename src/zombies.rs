@@ -74,9 +74,13 @@ fn start_dying(
 }
 
 /// Copies the host's status onto the rig so every machine animates the same.
-fn sync_rigs(mut zombies: Query<(&EnemyStatus, &mut Rig), (With<Enemy>, Without<Dying>)>) {
-    for (status, mut rig) in &mut zombies {
+fn sync_rigs(
+    mut zombies: Query<(&EnemyStatus, &Replicated, &mut Rig), (With<Enemy>, Without<Dying>)>,
+) {
+    for (status, r, mut rig) in &mut zombies {
         rig.crawl = status.crawler;
+        // The smash lands when the host's slam does.
+        rig.swing_rate = crate::sim::BRUTE_WINDUP / crate::sim::slam_spec(r.kind).0;
         if status.attacking && rig.swing > 0.6 {
             rig.swing = 0.0;
         }

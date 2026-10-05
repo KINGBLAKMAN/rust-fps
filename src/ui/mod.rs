@@ -509,6 +509,7 @@ fn rebuild_ui(
                 )
             )
         }
+        AppState::Travel => "travel".to_string(),
         AppState::InGame => format!(
             "game {:?} {:?} {:?} {:?} {} {} {:?} {:?}",
             *overlay,
@@ -561,6 +562,7 @@ fn rebuild_ui(
             ready.0,
             &public_ip,
         ),
+        AppState::Travel => {}
         AppState::InGame => match *overlay {
             Overlay::Pause => {
                 let solo = session.role == Role::Solo;
@@ -701,7 +703,7 @@ fn main_screen(commands: &mut Commands, profile: &Profile, notice: &Notice, focu
         label(
             p,
             format!(
-                "Career level {level} ({into}/{need} XP)    Best round: {}    Extractions: {}    Version {}",
+                "Career level {level} ({into}/{need} XP)    Best round: {}    Runs won: {}    Version {}",
                 profile.best_round, profile.extractions, crate::VERSION
             ),
             15.0,
@@ -1493,7 +1495,16 @@ fn lobby_screen(
             14.0,
             DIM,
         );
-        label(p, "Map:", 17.0, Color::WHITE);
+        label(
+            p,
+            format!(
+                "A run is {} maps: {} rounds on each, then its boss and a teleporter to the next. Start on:",
+                crate::data::STAGES,
+                crate::data::ROUNDS_PER_STAGE
+            ),
+            15.0,
+            DIM,
+        );
         if authority {
             row(p, |r| {
                 button_sized(r, "<", UiAction::CycleMap(-1), Some(40.0), false);
@@ -2079,7 +2090,7 @@ fn menu_scene(
     // (character, skin, gun).
     let mut showcase_skin = None;
     let people: Vec<(Character, u8, u8)> = match app_state.get() {
-        AppState::InGame => Vec::new(),
+        AppState::InGame | AppState::Travel => Vec::new(),
         AppState::Menu => {
             let mut gun = MENU_GUN;
             let mut skin = profile.skin_for(MENU_GUN);

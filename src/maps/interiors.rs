@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use crate::kit::c;
-use crate::maps::{Blocker, DoorDef, MapLayout, DOOR_WIDTH};
+use crate::maps::{DoorDef, MapLayout, DOOR_WIDTH};
 use crate::props::{boxr, hash, shade, v, Art};
 
 /// What a wall is made of.
@@ -178,50 +178,19 @@ const SILL: f32 = 1.0;
 const WIN_TOP: f32 = 2.4;
 
 impl MapLayout {
-    /// A bought door in a wall along X (at `z`). Opening it opens `zone`
-    /// and `zone2` (0 for none).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn door_x(
-        &mut self,
-        x: f32,
-        z: f32,
-        zone: u8,
-        zone2: u8,
-        cost: u32,
-        name: &'static str,
-        blocker: Blocker,
-    ) {
+    /// A wide doorway in a wall along X (at `z`).
+    pub(crate) fn door_x(&mut self, x: f32, z: f32) {
         self.doors.push(DoorDef {
             pos: v(x, 0.0, z),
             along_x: true,
-            cost,
-            zone,
-            zone2,
-            name,
-            blocker,
         });
     }
 
-    /// A bought door in a wall along Z (at `x`).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn door_z(
-        &mut self,
-        x: f32,
-        z: f32,
-        zone: u8,
-        zone2: u8,
-        cost: u32,
-        name: &'static str,
-        blocker: Blocker,
-    ) {
+    /// A wide doorway in a wall along Z (at `x`).
+    pub(crate) fn door_z(&mut self, x: f32, z: f32) {
         self.doors.push(DoorDef {
             pos: v(x, 0.0, z),
             along_x: false,
-            cost,
-            zone,
-            zone2,
-            name,
-            blocker,
         });
     }
 

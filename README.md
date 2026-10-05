@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v8.1** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v8); small updates bump the minor number (v8.1, v8.2...).
+Current version: **v9.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v9); small updates bump the minor number (v9.1, v9.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -29,7 +29,7 @@ Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the
 - **Gun Crates**: open crates with your spins to win skins.
 - **Gun Skins**: pick any gun and put one of your skins on it. It shows in game for you and your party.
 - **Attachment Guide**: every attachment and exactly what it changes, with a tab per slot.
-- **Sandbox**: a practice match with no waves and a tools panel (F1) to spawn zombies, switch on god mode and free abilities, add points, jump rounds and try any gun with any attachments.
+- **Sandbox**: a practice match with no waves and a tools panel (F1) to spawn zombies or a boss, switch on god mode and free abilities, add points, jump rounds and try any gun with any attachments.
 - **Settings**: field of view, mouse sensitivity, volume (master plus guns, enemies, movement, effects and interface), graphics (shadows, smoothed edges, glow, soft corner shading, outlines, camera shake, air particles), windowed / borderless / fullscreen, resolution and key remapping.
 
 Before a match you're on the party screen: pick your character, the host picks the map and day or night, friends press Ready and the host presses Start. Friends can also join a match that's already running.
@@ -50,7 +50,7 @@ Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rus
 | C | Crouch. Press while running to slide; hold it as you land from a jump to chain jump-slides |
 | R | Reload |
 | Right mouse | Aim down sights (zooms in, steadier shots) |
-| F | Buy / use (mystery box, perk machines, doors, wall guns) |
+| F | Buy / use (mystery box, perk machines, wall guns) |
 | Q / E | Abilities 1 and 2 (see casting below) |
 | X | Ultimate |
 | T, 1 / 2, mouse wheel | Swap between your two guns |
@@ -79,23 +79,24 @@ Every gun is modelled (23 in all) and held in gloved first-person hands, with an
 
 ## Gameplay
 
-- **Rounds:** zombies come in rounds that get bigger and tougher. Grunts rush you, Shooters throw fireballs from a distance (round 3+), Brutes are big and tanky (round 6+). Downed players get back up at the start of the next round; if the whole team is down, it's game over.
+- **The run:** a match is a run through 5 maps. On each map you survive 4 rounds, then its boss comes (7 seconds' warning). Kill the boss and its zombies fall with it, everyone gets 500 points, 300 XP and a free upgrade pick, and a purple teleporter opens. Get every living teammate into it for 3 seconds to go to the next map. You keep your guns, perks, levels and upgrades, and everyone comes back up at full health. The run goes through the three maps in order from the one the host picked, then the first two again at the other time of day. The fifth map ends with the final boss; beat it to win the run.
+- **Rounds:** zombies come in rounds that get bigger and tougher, and the round number keeps counting up over the whole run. Grunts rush you, Shooters throw fireballs from a distance (round 3+), Brutes are big and tanky (round 6+). Each map hits 15% harder than the last and sends more Brutes and Shooters. Downed players get back up at the start of the next round; if the whole team is down, it's game over.
+- **Bosses:** each map has one: The Foreman (Shipping Yard), The Groundskeeper (Central Park) and The Landlord (The Neighborhood), huge rust-red Brutes. The final boss, The Abomination, is bigger, purple and twice as tough. Bosses slam the ground (a big red circle fills up first, so step out), throw fans of fireballs, and call in a ring of zombies at two-thirds and one-third health. The final boss throws more, calls in Brutes too, and speeds up below 30% health. Bosses get tougher with more players, shrug off stuns, Insta-Kill and Nukes, and can't be turned into crawlers. A bar at the top of the screen shows the boss's health.
 - **Points:** 10 per hit, 60 per kill (Brutes 120), +40 for headshots. Spend them on the mystery box and perks.
 - **Two guns:** you start with the M9 Sidearm and can carry two guns. Spare ammo is topped up at the start of each round.
 - **Mystery box:** 750 points per spin, always. Its beam goes up into the sky so you can find it from anywhere. It gives one of 20 guns, or rarely one of 2 wonder weapons (Ray Blaster: explosive shots; Thunder Cannon: lightning that chains between enemies). Box guns come with random attachments: all, some or none of an optic (Red Dot, Holo Sight, 3x Scope), a muzzle, an underbarrel grip or laser and an extended mag. The box sits at one of 5 spots and every few spins it may fly away to another (you get your points back).
 - **Perk machines:** Quick Hands (3000, reload twice as fast), Stamina Rush (2000, faster sprint and slides), Boom Shot (3500, headshots can explode), Juggernaut (2500, 200 max health), Rapid Fire (2000, shoot 33% faster). You lose your perks when you go down.
 - **Power-ups** sometimes drop from zombies (rarely, and never two within 25 seconds of each other): Nuke (kills everything, +400 points each), Insta-Kill, Double Points (30 seconds each) and Max Ammo.
-- **Maps and doors:** every map is a set of rooms, corridors, yards and buildings to explore, split into a starting area and 7 more areas behind doors you buy open (750-1250 points). Areas loop into each other, so there's usually more than one way round. Zombies only come from areas that are open, and the perk machines are spread through the areas.
-  - **Shipping Yard:** start in the Customs Hall and Gate Yard; open up the Container Stacks, the Warehouse (with a cold store), the Dockside, the Port Office, the Rail Yard, the Machine Shop and the Truck Depot.
-  - **Central Park:** start in the Visitor Centre and Fountain Court; open up the Hedge Maze, Lakeside (boat shed and café), the Museum, the Old Zoo, the Conservatory, the Chapel and Bandstand Green.
-  - **The Neighborhood:** start in the Hendersons' house and back yard; open up Main Street, the Diner and Corner Store, the School, the Police Station, the Community Centre, Maple Court and the Back Alley.
+- **Maps:** every map is a set of rooms, corridors, yards and buildings to explore, all open from the start (there are no doors to buy since v9). Areas loop into each other, so there's usually more than one way round. Zombies come from all over the map, and the perk machines are spread through it.
+  - **Shipping Yard:** the Customs Hall and Gate Yard, the Container Stacks, the Warehouse (with a cold store), the Dockside, the Port Office, the Rail Yard, the Machine Shop and the Truck Depot.
+  - **Central Park:** the Visitor Centre and Fountain Court, the Hedge Maze, Lakeside (boat shed and café), the Museum, the Old Zoo, the Conservatory, the Chapel and Bandstand Green.
+  - **The Neighborhood:** the Hendersons' house and back yard, Main Street, the Diner and Corner Store, the School, the Police Station, the Community Centre, Maple Court and the Back Alley.
 - **Melee:** press V for a quick knife slash at whatever is right in front of you, crawlers included.
-- **Wall guns:** each map has 8 guns hanging on walls (chalk outline). Guns players bring from their loadout take the first two boards (one in the starting area, one just past the first door). Buy the gun (pistol 500, SMG or shotgun 1000, rifle 1250), or ammo for half price if you already have it. Wall guns never come out of the mystery box on that map.
-- **Day and night:** the host picks Day or Night on the party screen. At night the sky is dark, the street lamps are brighter and everyone has a flashlight.
+- **Wall guns:** each map has 8 guns hanging on walls (chalk outline). Guns players bring from their loadout take the first two boards (both near where you start). Buy the gun (pistol 500, SMG or shotgun 1000, rifle 1250), or ammo for half price if you already have it. Wall guns never come out of the mystery box on that map.
+- **Day and night:** the host picks Day or Night on the party screen (maps 4 and 5 of a run are the other one). At night the sky is dark, the street lamps are brighter and everyone has a flashlight.
 - **Emotes and pings:** press G for the emote list; the camera pulls out so you can see your character (move or shoot to stop). Press Z to ping a spot (yellow beam) or an enemy (red marker that follows it), with your name and the distance.
 - **Characters:** every character has their own model, two abilities (Q and E) and an ultimate (X). Ultimates charge over time and with kills. See Character levels below for every ability.
-- **Levels:** kills give XP. Every level adds 3% damage, and every 5 levels you pick an upgrade (press B): a stronger ability tier, or an element. At levels 5, 10, 15, 20 and 25 one of the choices is always an element. Elements: Fire (burns over time), Ice (slows) and Shock (arcs to nearby enemies), for your guns or your abilities.
-- **Extraction:** after clearing round 15, and every 10 rounds after that (25, 35...), a green extraction beam opens for 45 seconds. Get every living teammate into it for 5 seconds to extract, or ignore it and keep fighting.
+- **Levels:** kills give XP. Every level adds 3% damage, and every 2 levels (plus after each boss) you pick one of three upgrades (press B): a stronger ability tier, an element, or a stat. At every tenth level one of the choices is always an element. Elements: Fire (burns over time), Ice (slows) and Shock (arcs to nearby enemies), for your guns or your abilities. Stats stack up to 5 times each: Vitality (+20 max health), Firepower (+8% gun damage), Focus (6% shorter ability cooldowns), Swift (+5% move speed) and Sleight of Hand (10% faster reloads).
 - **Zombies:** walkers (in three outfits), spitters that spit fireballs from range and hulking brutes.
 
 ## Character levels and abilities
@@ -115,7 +116,7 @@ Iaido Slash is charged: hold Q and Ronin draws the sword and focuses; let go and
 
 ## Career and loadout
 
-Every match earns career XP (150 per round survived, 3 per kill, 600 for extracting). Each career level unlocks a gun or attachment for your loadout, 27 levels in all; the Viper .45, Hornet MP and Breacher 12 are unlocked from the start.
+Every match earns career XP (150 per round survived, 3 per kill, 400 per map cleared and 1500 for winning the run). Each career level unlocks a gun or attachment for your loadout, 27 levels in all; the Viper .45, Hornet MP and Breacher 12 are unlocked from the start.
 
 On the Loadout screen pick a gun to bring and its attachments. In every match it hangs on one of the map's wall boards with your attachments on it (with your name), and the mystery box leaves it out. With two or more players, the first two loadouts take the two boards.
 
@@ -132,7 +133,7 @@ Crates open with a carousel that slides through the skins and slows down onto yo
 | 20 | 10 |
 | 25 | 15 |
 
-Extracting gives the same spins as reaching that round; it doesn't double them.
+Winning the run gives the same spins as reaching that round; it doesn't double them.
 
 There are 35 skins in 5 crates. 12 are finishes that fit every gun; the other 23 are patterned skins made for one gun each (camo, tiger stripes, carbon fibre, damascus, marble, dragon scales, glowing lava, circuits, starfields...).
 
@@ -175,13 +176,13 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | `src/weapons.rs` | Two gun slots, firing, recoil, reloading, melee |
 | `src/abilities/` | Ability and buy input, cast modes and charged casts (`mod.rs`), aiming previews (`preview.rs`) |
 | `src/viewmodel.rs` | First-person gun and hands, with all their animations and ability props |
-| `src/sim/` | Host-only simulation: rounds, zombie AI, damage, elements, XP, box, perks, power-ups, extraction, sandbox (`mod.rs`), and every ability with its projectiles, grenades, mines, turrets, drones and air strikes (`powers.rs`) |
+| `src/sim/` | Host-only simulation: rounds, the run's maps and bosses, the teleporter, zombie AI, damage, elements, XP, box, perks, power-ups, sandbox (`mod.rs`), and every ability with its projectiles, grenades, mines, turrets, drones and air strikes (`powers.rs`) |
 | `src/zombies.rs` | Zombie animation, crawlers and death falls |
 | `src/physics.rs` | Box collisions and ray casts |
 | `src/emotes.rs`, `src/pings.rs` | Emotes and the third-person emote camera; pings |
 | `src/hud.rs` | In-game HUD, hit markers, scoreboard, level-up picker, end screen |
 | `src/net.rs` | Command line, UDP messages, host and client networking, internet address lookup |
-| `src/maps/` | The three maps (`mod.rs`), the floor-plan kit for rooms, walls and furniture (`interiors.rs`), props, doors (`strips.rs`) and zombie pathfinding (`nav.rs`) |
+| `src/maps/` | The three maps (`mod.rs`), the floor-plan kit for rooms, walls and furniture (`interiors.rs`), props and wall guns (`strips.rs`) and zombie pathfinding (`nav.rs`) |
 | `src/models/` | The modelling kit, the 23 gun models, gun skins, hands, gun mounts, other players' models and ability projectiles and gadgets (`projectiles.rs`) |
 | `src/rig/` | Skeleton and animation (`mod.rs`), the 6 hero models and the zombie models |
 | `src/fx/` | Tracers, explosions, ability effects (`spells.rs` for the newer ones), and the ability auras |

@@ -939,7 +939,7 @@ fn enemy_sounds(
         if entry.1 <= 0.0 {
             entry.1 = rng.gen_range(3.5..9.0);
             let snd = match r.kind {
-                NetKind::Brute => Snd::BruteRoar,
+                NetKind::Brute | NetKind::Boss(_) => Snd::BruteRoar,
                 NetKind::Shooter => Snd::ShooterHiss,
                 _ if crawler => Snd::CrawlerRasp,
                 _ => Snd::Groan,
@@ -954,7 +954,11 @@ fn enemy_sounds(
     known.retain(|id, (pos, _, _, kind)| {
         let keep = alive.contains(id);
         if !keep {
-            let pitch = if *kind == NetKind::Brute { 0.7 } else { 1.0 };
+            let pitch = match kind {
+                NetKind::Brute => 0.7,
+                NetKind::Boss(_) => 0.45,
+                _ => 1.0,
+            };
             sounds.push(Snd::ZombieDeath, Some(*pos), 1.0, pitch);
         }
         keep
@@ -1000,7 +1004,7 @@ fn match_sounds(
         if state.game_over && !prev.game_over {
             sounds.here(Snd::GameOver);
         }
-        if state.extracted && !prev.extracted {
+        if state.won && !prev.won {
             sounds.here(Snd::Extract);
         }
         let box_pos = map.0.box_spots[(state.box_spot as usize).min(4)];
@@ -1013,10 +1017,13 @@ fn match_sounds(
             }
             _ => {}
         }
-        for d in &map.0.doors {
-            if d.locked(prev.doors) && !d.locked(state.doors) {
-                sounds.at(Snd::Door, d.pos + Vec3::Y * 2.0);
-            }
+        // The teleporter opens, and a boss arrives.
+        if state.teleport && !prev.teleport {
+            sounds.at(Snd::Door, map.0.extraction + Vec3::Y * 2.0);
+            sounds.here(Snd::Extract);
+        }
+        if state.boss != 0 && prev.boss == 0 {
+            sounds.push(Snd::BruteRoar, None, 1.0, 0.55);
         }
         if state.powerup_seq != prev.powerup_seq {
             sounds.here(Snd::PowerUp);

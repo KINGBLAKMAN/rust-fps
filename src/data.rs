@@ -1742,6 +1742,81 @@ pub fn elements_in(mask: u8) -> impl Iterator<Item = Element> {
         .filter(move |e| mask & e.bit() != 0)
 }
 
+/// Maps in a run. The last one ends with the final boss.
+pub const STAGES: u8 = 5;
+/// Rounds on each map before its boss.
+pub const ROUNDS_PER_STAGE: u32 = 4;
+
+/// Boss names: one per map, then the final boss.
+pub const BOSS_NAMES: [&str; 3] = ["The Foreman", "The Groundskeeper", "The Landlord"];
+pub const FINAL_BOSS_NAME: &str = "The Abomination";
+
+pub fn boss_name(map: u8, final_boss: bool) -> &'static str {
+    if final_boss {
+        FINAL_BOSS_NAME
+    } else {
+        BOSS_NAMES[map as usize % BOSS_NAMES.len()]
+    }
+}
+
+/// Stat upgrades from level-ups, each stacking up to `MAX_STACKS` times.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Stat {
+    /// More max health.
+    Vitality,
+    /// More gun damage.
+    Firepower,
+    /// Shorter ability cooldowns.
+    Focus,
+    /// Faster movement.
+    Swift,
+    /// Faster reloads.
+    Sleight,
+}
+
+impl Stat {
+    pub const COUNT: usize = 5;
+    pub const ALL: [Stat; Stat::COUNT] = [
+        Stat::Vitality,
+        Stat::Firepower,
+        Stat::Focus,
+        Stat::Swift,
+        Stat::Sleight,
+    ];
+    pub const MAX_STACKS: u8 = 5;
+
+    /// What one stack adds: health points, or a fraction for the rest.
+    pub fn per_stack(self) -> f32 {
+        match self {
+            Stat::Vitality => 20.0,
+            Stat::Firepower => 0.08,
+            Stat::Focus => 0.06,
+            Stat::Swift => 0.05,
+            Stat::Sleight => 0.10,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Stat::Vitality => "Vitality",
+            Stat::Firepower => "Firepower",
+            Stat::Focus => "Focus",
+            Stat::Swift => "Swift",
+            Stat::Sleight => "Sleight of Hand",
+        }
+    }
+
+    pub fn effect(self) -> &'static str {
+        match self {
+            Stat::Vitality => "+20 max health",
+            Stat::Firepower => "+8% gun damage",
+            Stat::Focus => "6% shorter ability cooldowns",
+            Stat::Swift => "+5% move speed",
+            Stat::Sleight => "10% faster reloads",
+        }
+    }
+}
+
 /// A level-up reward the player can pick.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Upgrade {
@@ -1749,6 +1824,7 @@ pub enum Upgrade {
     Ability(u8),
     GunElement(u8),
     AbilityElement(u8),
+    Stat(Stat),
 }
 
 impl Upgrade {
@@ -1760,12 +1836,13 @@ impl Upgrade {
             }
             Upgrade::GunElement(e) => {
                 let e = Element::ALL[e as usize];
-                format!("{} rounds: guns {}", e.name(), e.effect())
+                format!("{} rounds: {}", e.name(), e.effect())
             }
             Upgrade::AbilityElement(e) => {
                 let e = Element::ALL[e as usize];
-                format!("{} abilities: abilities {}", e.name(), e.effect())
+                format!("{} abilities: {}", e.name(), e.effect())
             }
+            Upgrade::Stat(s) => format!("{}: {}", s.name(), s.effect()),
         }
     }
 }

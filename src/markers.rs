@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::physics::{collect_boxes, ray_world};
 use crate::player::LocalPlayer;
 use crate::rig::Rig;
-use crate::sim::{BRUTE_SLAM_AHEAD, BRUTE_SLAM_RADIUS, BRUTE_WINDUP, FIREBALL_SPEED};
+use crate::sim::{slam_spec, FIREBALL_SPEED};
 use crate::{AppState, Collider, EnemyStatus, NetKind, Phase, Replicated};
 
 const SHADER: Handle<Shader> = weak_handle!("6c1d8e52-3f7a-4b90-a2e4-5d9c0b7f1e38");
@@ -278,25 +278,20 @@ fn enemy_warnings(
     colliders: Query<(&Transform, &Collider)>,
 ) {
     for (r, tf, rig, status) in &enemies {
-        if r.kind != NetKind::Brute || status.stunned || rig.dying.is_some() {
+        if !r.kind.slams() || status.stunned || rig.dying.is_some() {
             continue;
         }
+        let (windup, radius, ahead, _) = slam_spec(r.kind);
         let s = rig.swing;
-        if s > BRUTE_WINDUP + FLASH {
+        if s > windup + FLASH {
             continue;
         }
-        let ahead = (tf.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
-        let m = Marker::new(
-            tf.translation + ahead * BRUTE_SLAM_AHEAD,
-            Shape::Circle {
-                radius: BRUTE_SLAM_RADIUS,
-            },
-            DANGER,
-        );
-        markers.push(if s < BRUTE_WINDUP {
-            m.fill(s / BRUTE_WINDUP)
+        let dir = (tf.rotation * Vec3::NEG_Z).with_y(0.0).normalize_or(Vec3::NEG_Z);
+        let m = Marker::new(tf.translation + dir * ahead, Shape::Circle { radius }, DANGER);
+        markers.push(if s < windup {
+            m.fill(s / windup)
         } else {
-            m.fill(1.0).flash(1.0 - (s - BRUTE_WINDUP) / FLASH)
+            m.fill(1.0).flash(1.0 - (s - windup) / FLASH)
         });
     }
 

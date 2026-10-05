@@ -1,5 +1,6 @@
 //! Host-side game simulation: rounds, enemy AI, damage, elements, points, XP
-//! and levels, abilities, the mystery box, perks, power-ups and extraction.
+//! and levels, abilities, the mystery box, perks, power-ups, bosses and the
+//! teleporter between the maps of a run.
 //! Only the host (or a solo player) runs this; clients mirror its results.
 
 use bevy::prelude::*;
@@ -9,7 +10,8 @@ use std::collections::HashMap;
 use crate::avatars::spawn_replicated;
 use crate::data::{
     elements_in, gun_def, has_perk, roll_attachments, roll_box_gun, wall_cost,
-    xp_to_next, Element, GunSpecial, Perk, PowerUp, Upgrade, BOX_COST, MAX_LEVEL,
+    xp_to_next, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, BOX_COST, MAX_LEVEL,
+    ROUNDS_PER_STAGE, STAGES,
     MAX_TIER,
 };
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
@@ -44,6 +46,7 @@ impl Plugin for SimPlugin {
             .init_resource::<Zones>()
             .init_resource::<powers::Forces>()
             .init_resource::<LastHurt>()
+            .init_resource::<Summons>()
             .add_systems(
                 Update,
                 (
@@ -64,7 +67,7 @@ impl Plugin for SimPlugin {
                     enemy_ai,
                     powerups,
                     mystery_box,
-                    extraction,
+                    teleporter,
                     check_game_over,
                 )
                     .chain()
@@ -90,6 +93,8 @@ fn is_authority(session: Res<Session>) -> bool {
 pub fn enemy_scale(kind: NetKind) -> f32 {
     match kind {
         NetKind::Brute => 1.35,
+        NetKind::Boss(0) => 2.3,
+        NetKind::Boss(_) => 3.0,
         NetKind::Shooter => 1.05,
         _ => 1.0,
     }
@@ -113,8 +118,31 @@ pub struct EnemyBrain {
     pub swing: f32,
     /// Stunned: can't move or attack.
     pub stun: f32,
-    /// A Brute slam is winding up (it lands `BRUTE_WINDUP` after the swing starts).
+    /// A Brute slam is winding up (it lands `slam_spec` windup after the swing starts).
     slam: bool,
+    /// Bosses: seconds to the next fireball volley, and summons used (at
+    /// two-thirds and one-third health).
+    volley: f32,
+    summons: u8,
+}
+
+/// How a Brute or boss slam lands: windup seconds, radius, how far ahead
+/// of it the circle is, and damage.
+pub fn slam_spec(kind: NetKind) -> (f32, f32, f32, f32) {
+    match kind {
+        NetKind::Boss(0) => (0.7, 3.4, 1.9, 45.0),
+        NetKind::Boss(_) => (0.6, 4.2, 2.4, 60.0),
+        _ => (BRUTE_WINDUP, BRUTE_SLAM_RADIUS, BRUTE_SLAM_AHEAD, 35.0),
+    }
+}
+
+/// Zombies a boss calls in (handled by `rounds`, which can spawn them).
+#[derive(Resource, Default)]
+struct Summons(Vec<(Vec3, NetKind)>);
+
+/// Zombie hits get harder on each map of a run.
+fn stage_damage(state: &MatchState) -> f32 {
+    1.0 + 0.15 * state.stage as f32
 }
 
 /// How long a Brute's slam takes to land, so players can see it coming.
@@ -252,7 +280,7 @@ fn level_multiplier(p: &PlayerInfo) -> f32 {
     m
 }
 
-/// Three random level-up rewards. Milestone levels 5-25 always include an
+/// Three random level-up rewards. Every tenth level always includes an
 /// element if one is left.
 fn roll_choices(p: &PlayerInfo) -> Vec<Upgrade> {
     let mut rng = rand::thread_rng();
@@ -269,11 +297,15 @@ fn roll_choices(p: &PlayerInfo) -> Vec<Upgrade> {
             elements.push(Upgrade::AbilityElement(i as u8));
         }
     }
+    let stats = Stat::ALL
+        .into_iter()
+        .filter(|s| p.stats[*s as usize] < Stat::MAX_STACKS)
+        .map(Upgrade::Stat);
     let mut picks = Vec::new();
-    if p.level <= 25 && !elements.is_empty() {
+    if p.level % 10 == 0 && !elements.is_empty() {
         picks.push(elements.swap_remove(rng.gen_range(0..elements.len())));
     }
-    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).collect();
+    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).chain(stats).collect();
     while picks.len() < 3 && !pool.is_empty() {
         picks.push(pool.swap_remove(rng.gen_range(0..pool.len())));
     }
@@ -288,10 +320,15 @@ fn give_xp(p: &mut PlayerInfo, amount: u32) {
     while p.level < MAX_LEVEL && p.xp >= xp_to_next(p.level) {
         p.xp -= xp_to_next(p.level);
         p.level += 1;
-        if p.level % 5 == 0 {
+        if p.level % 2 == 0 {
             p.pending_picks += 1;
         }
     }
+    offer_picks(p);
+}
+
+/// Rolls the next three choices if a pick is waiting.
+fn offer_picks(p: &mut PlayerInfo) {
     if p.pending_picks > 0 && p.choices.is_empty() {
         p.choices = roll_choices(p);
         if p.choices.is_empty() {
@@ -343,7 +380,7 @@ fn process_actions(
             continue;
         }
         p.action_ack = seq;
-        if state.game_over || state.extracted {
+        if state.game_over || state.won {
             continue;
         }
         match action {
@@ -401,6 +438,10 @@ fn process_actions(
                     Upgrade::AbilityElement(e) => {
                         p.ability_elements |= Element::ALL[e as usize].bit()
                     }
+                    Upgrade::Stat(st) => {
+                        let n = &mut p.stats[st as usize];
+                        *n = (*n + 1).min(Stat::MAX_STACKS);
+                    }
                 }
                 p.pending_picks = p.pending_picks.saturating_sub(1);
                 p.choices = if p.pending_picks > 0 {
@@ -444,7 +485,9 @@ fn process_actions(
                     })
                     .min_by(|a, b| a.1.total_cmp(&b.1));
                 if let Some((e, _, b)) = target {
-                    let amount = (150.0 + 0.2 * b.max_health) * level_multiplier(p);
+                    // Bosses only lose a sliver to a knife.
+                    let share = if b.kind.is_boss() { 0.01 } else { 0.2 };
+                    let amount = (150.0 + share * b.max_health) * level_multiplier(p);
                     // A melee kill is worth more than a shot kill.
                     if amount >= b.health || state.insta_kill > 0.0 {
                         give_points(p, 70, &state);
@@ -498,19 +541,6 @@ fn process_actions(
                         continue;
                     }
                     _ => {}
-                }
-                // Doors to the other areas.
-                if let Some(door) = map
-                    .0
-                    .doors
-                    .iter()
-                    .find(|d| d.near(feet) && d.locked(state.doors))
-                {
-                    if p.points >= door.cost {
-                        p.points -= door.cost;
-                        state.doors |= door.opens();
-                    }
-                    continue;
                 }
                 // Guns on the wall: buy the gun, or ammo for it if you have it.
                 if let Some(wall) = map.0.wall_buys.iter().find(|w| w.near(feet)) {
@@ -566,7 +596,8 @@ fn process_actions(
                     if p.cooldowns[s] > 0.0 {
                         continue;
                     }
-                    p.cooldowns[s] = ability.cooldown(p.tiers[s]);
+                    let focus = 1.0 - p.stat(Stat::Focus) * Stat::Focus.per_stack();
+                    p.cooldowns[s] = ability.cooldown(p.tiers[s]) * focus;
                 }
                 let origin = Vec3::from_array(origin);
                 let dir = Vec3::from_array(dir).normalize_or_zero();
@@ -661,7 +692,9 @@ fn resolve_shots(
             .iter()
             .position(|g| *g == Some(shot.gun))
             .unwrap_or(0);
-        let mult = level_multiplier(p) * p.attach[slot].handling(shot.gun).damage;
+        let mult = level_multiplier(p)
+            * p.attach[slot].handling(shot.gun).damage
+            * (1.0 + p.stat(Stat::Firepower) * Stat::Firepower.per_stack());
         let elements = p.gun_elements;
         if let GunSpecial::Explosive { radius } = def.special {
             explode(
@@ -794,6 +827,7 @@ fn apply_damage(
         .collect();
     let mut rng = rand::thread_rng();
     let round = state.round;
+    let mut boss_down = None;
     let mut i = 0;
     while i < queue.0.len() {
         let ev = &queue.0[i];
@@ -814,12 +848,16 @@ fn apply_damage(
         if brain.health <= 0.0 {
             continue;
         }
-        if state.insta_kill > 0.0 && from.is_some() && !chained {
+        if state.insta_kill > 0.0 && from.is_some() && !chained && !brain.kind.is_boss() {
             amount = amount.max(brain.health);
         }
         brain.health -= amount;
-        // Brutes shrug off half of it.
-        let resist = if brain.kind == NetKind::Brute { 0.5 } else { 1.0 };
+        // Brutes shrug off half of it, bosses nearly all.
+        let resist = match brain.kind {
+            NetKind::Brute => 0.5,
+            NetKind::Boss(_) => 0.15,
+            _ => 1.0,
+        };
         brain.stun = brain.stun.max(stun * resist);
         if !chained || amount > 5.0 {
             status.flash = 0.08;
@@ -865,7 +903,7 @@ fn apply_damage(
         }
         let killed = brain.health <= 0.0;
         // Enough damage to the legs and it goes down and crawls.
-        if legs && !killed {
+        if legs && !killed && !brain.kind.is_boss() {
             brain.leg_damage += amount;
             let needed = if brain.kind == NetKind::Brute {
                 0.55
@@ -881,16 +919,15 @@ fn apply_damage(
             if let Some(p) = roster.0.get_mut(&pid) {
                 if killed {
                     let bonus = if headshot { 40 } else { 0 };
-                    let base = if brain.kind == NetKind::Brute {
-                        120
-                    } else {
-                        60
+                    let (base, xp) = match brain.kind {
+                        NetKind::Brute => (120, 60),
+                        NetKind::Boss(_) => (1500, 400),
+                        _ => (60, 25),
                     };
                     give_points(p, base + bonus, &state);
                     p.kills += 1;
                     p.ult_charge = (p.ult_charge + 3.0).min(100.0);
-                    let xp = if brain.kind == NetKind::Brute { 60 } else { 25 }
-                        + if headshot { 15 } else { 0 };
+                    let xp = xp + if headshot { 15 } else { 0 };
                     give_xp(p, xp);
                 } else if !chained {
                     give_points(p, 10, &state);
@@ -899,6 +936,10 @@ fn apply_damage(
         }
         if killed {
             crate::zombies::kill(&mut commands, target);
+            if let NetKind::Boss(level) = brain.kind {
+                boss_down = Some(level);
+                continue;
+            }
             let now = time.elapsed_secs();
             let ready = last_drop.map_or(true, |t| now - t >= POWERUP_GAP || now < t);
             if ready && rng.gen_bool(POWERUP_CHANCE) {
@@ -919,6 +960,38 @@ fn apply_damage(
         }
     }
     queue.0.clear();
+    if let Some(level) = boss_down {
+        boss_defeated(&mut state, &mut roster, level);
+        for (e, _, mut b, _) in &mut enemies {
+            if b.health > 0.0 {
+                b.health = 0.0;
+                crate::zombies::kill(&mut commands, e);
+            }
+        }
+    }
+}
+
+/// The boss is dead: its zombies fall with it, everyone gets points, XP and
+/// a free pick, and the teleporter opens (or the run is won).
+fn boss_defeated(state: &mut MatchState, roster: &mut Roster, level: u8) {
+    if state.sandbox.on {
+        return;
+    }
+    state.boss = 0;
+    state.boss_hp = 0.0;
+    state.to_spawn = 0;
+    for p in roster.0.values_mut() {
+        give_points(p, 500, state);
+        give_xp(p, 300);
+        p.pending_picks += 1;
+        offer_picks(p);
+    }
+    if level >= 1 || state.stage + 1 >= STAGES {
+        state.won = true;
+    } else {
+        state.teleport = true;
+        state.teleport_hold = 0.0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -963,36 +1036,83 @@ fn rounds(
     map: Res<CurrentMap>,
     mut state: ResMut<MatchState>,
     mut roster: ResMut<Roster>,
-    enemies: Query<(), With<EnemyBrain>>,
+    mut summons: ResMut<Summons>,
+    enemies: Query<&EnemyBrain>,
 ) {
-    if state.game_over || state.extracted || !state.started {
+    if state.game_over || state.won || !state.started {
         return;
+    }
+    let players = roster.0.len().max(1) as u32;
+    for (pos, kind) in std::mem::take(&mut summons.0) {
+        spawn_zombie(
+            &mut commands,
+            &assets,
+            &rigs,
+            &mut materials,
+            &mut state,
+            kind,
+            pos,
+            false,
+            1.0,
+        );
+    }
+    // The boss health bar.
+    match enemies.iter().find(|b| b.kind.is_boss() && b.health > 0.0) {
+        Some(b) => {
+            state.boss = if b.kind == NetKind::Boss(0) { 1 } else { 2 };
+            state.boss_hp = (b.health / b.max_health).clamp(0.0, 1.0);
+        }
+        None => {
+            state.boss = 0;
+            state.boss_hp = 0.0;
+        }
     }
     if state.sandbox.on && !state.sandbox.waves {
         return;
     }
+    // The boss is dead: waiting for the team at the teleporter.
+    if state.teleport {
+        return;
+    }
     let dt = time.delta_secs();
-    let alive_enemies = enemies.iter().count() as u32;
+    let alive_enemies = enemies.iter().filter(|b| b.health > 0.0).count() as u32;
+    let run = !state.sandbox.on;
 
     if state.to_spawn == 0 && alive_enemies == 0 {
         if state.intermission <= 0.0 {
-            // Round cleared.
-            state.intermission = 4.0;
-            let r = state.round;
-            if r >= 15 && (r - 15) % 10 == 0 {
-                state.extraction = 45.0;
-                state.intermission = 45.0;
-                state.extract_hold = 0.0;
-            }
+            // Round cleared; a longer breather before a boss.
+            state.intermission = if run && state.stage_round == ROUNDS_PER_STAGE {
+                7.0
+            } else {
+                4.0
+            };
         }
         state.intermission -= dt;
         if state.intermission <= 0.0 {
-            state.extraction = 0.0;
             state.round += 1;
+            state.stage_round += 1;
             let r = state.round;
-            let players = roster.0.len().max(1) as u32;
             state.to_spawn = 5 + 3 * r + (players - 1) * (2 + r);
             state.spawn_timer = 0.5;
+            if run && state.stage_round > ROUNDS_PER_STAGE {
+                // Boss round: the boss, and zombies trickling in with it.
+                state.to_spawn = 8 + 3 * state.stage as u32 + (players - 1) * 3;
+                state.spawn_timer = 4.0;
+                let final_boss = state.stage + 1 >= STAGES;
+                let pos = farthest_spawn(&map, &roster);
+                let toughness = 1.0 + 0.75 * (players - 1) as f32;
+                spawn_zombie(
+                    &mut commands,
+                    &assets,
+                    &rigs,
+                    &mut materials,
+                    &mut state,
+                    NetKind::Boss(final_boss as u8),
+                    pos,
+                    false,
+                    toughness,
+                );
+            }
             // Downed players get back up at the start of each round.
             for p in roster.0.values_mut().filter(|p| !p.alive) {
                 p.alive = true;
@@ -1006,7 +1126,6 @@ fn rounds(
     if state.to_spawn == 0 {
         return;
     }
-    let players = roster.0.len().max(1) as u32;
     if alive_enemies >= 24 + 4 * players {
         return;
     }
@@ -1015,7 +1134,12 @@ fn rounds(
         return;
     }
     let r = state.round;
-    state.spawn_timer = (1.6 - r as f32 * 0.08).max(0.3);
+    let boss_round = state.boss != 0;
+    state.spawn_timer = if boss_round {
+        (2.6 - 0.2 * state.stage as f32).max(1.2)
+    } else {
+        (1.6 - r as f32 * 0.08).max(0.3)
+    };
     state.to_spawn -= 1;
 
     let mut rng = rand::thread_rng();
@@ -1025,14 +1149,7 @@ fn rounds(
         .filter(|p| p.alive)
         .map(|p| p.feet())
         .collect();
-    // Only areas the team has opened spawn enemies.
-    let open: Vec<Vec3> = map
-        .0
-        .enemy_spawns
-        .iter()
-        .filter(|(_, zone)| crate::maps::MapLayout::zone_open(state.doors, *zone))
-        .map(|(p, _)| *p)
-        .collect();
+    let open: Vec<Vec3> = map.0.enemy_spawns.iter().map(|(p, _)| *p).collect();
     let far: Vec<Vec3> = open
         .iter()
         .copied()
@@ -1042,9 +1159,11 @@ fn rounds(
     let base = pool[rng.gen_range(0..pool.len())];
     let pos = base + Vec3::new(rng.gen_range(-1.5..1.5), 0.0, rng.gen_range(-1.5..1.5));
 
-    let kind = if r >= 6 && rng.gen_bool(0.1) {
+    // Later maps send more Brutes and Shooters.
+    let stage = state.stage as f64;
+    let kind = if r >= 6 && rng.gen_bool(0.1 + 0.03 * stage) {
         NetKind::Brute
-    } else if r >= 3 && rng.gen_bool(0.2) {
+    } else if r >= 3 && rng.gen_bool(0.2 + 0.03 * stage) {
         NetKind::Shooter
     } else {
         NetKind::Grunt
@@ -1058,7 +1177,32 @@ fn rounds(
         kind,
         pos,
         false,
+        1.0,
     );
+}
+
+/// The enemy spawn furthest from every living player (where the boss comes in).
+fn farthest_spawn(map: &CurrentMap, roster: &Roster) -> Vec3 {
+    let living: Vec<Vec3> = roster
+        .0
+        .values()
+        .filter(|p| p.alive)
+        .map(|p| p.feet())
+        .collect();
+    map.0
+        .enemy_spawns
+        .iter()
+        .map(|(p, _)| *p)
+        .max_by(|a, b| {
+            let near = |s: &Vec3| {
+                living
+                    .iter()
+                    .map(|p| p.distance(*s))
+                    .fold(f32::MAX, f32::min)
+            };
+            near(a).total_cmp(&near(b))
+        })
+        .unwrap_or(Vec3::ZERO)
 }
 
 /// Spawns a zombie of `kind` at `pos`, as tough as the current round makes it.
@@ -1072,6 +1216,7 @@ fn spawn_zombie(
     kind: NetKind,
     pos: Vec3,
     crawler: bool,
+    toughness: f32,
 ) {
     let mut rng = rand::thread_rng();
     let r = state.round.max(1);
@@ -1083,6 +1228,8 @@ fn spawn_zombie(
     let (health, speed) = match kind {
         NetKind::Shooter => (base_hp * 0.7, 2.6),
         NetKind::Brute => (base_hp * 3.0, (2.4 + 0.1 * r as f32).min(4.5)),
+        NetKind::Boss(0) => (base_hp * 35.0 * toughness, 3.0),
+        NetKind::Boss(_) => (base_hp * 70.0 * toughness, 3.4),
         _ => (
             base_hp,
             (2.8 + 0.25 * r as f32).min(7.0) * rng.gen_range(0.9..1.1),
@@ -1106,6 +1253,8 @@ fn spawn_zombie(
         swing: 9.0,
         stun: 0.0,
         slam: false,
+        volley: 3.0,
+        summons: 0,
     });
 }
 
@@ -1140,8 +1289,11 @@ fn sandbox(
                 let net = match kind {
                     1 => NetKind::Shooter,
                     2 => NetKind::Brute,
+                    4 => NetKind::Boss(0),
+                    5 => NetKind::Boss(1),
                     _ => NetKind::Grunt,
                 };
+                let count = if net.is_boss() { 1 } else { count };
                 for i in 0..count.min(20) {
                     let spread = (i as f32 - (count as f32 - 1.0) / 2.0) * 1.4;
                     let pos = (at + fwd * 9.0 + side * spread).with_y(0.0);
@@ -1154,6 +1306,7 @@ fn sandbox(
                         net,
                         pos,
                         kind == 3,
+                        1.0,
                     );
                 }
             }
@@ -1186,6 +1339,9 @@ fn enemy_ai(
     mut roster: ResMut<Roster>,
     mut hurt: ResMut<LastHurt>,
     forces: Res<powers::Forces>,
+    mut fx: ResMut<FxQueue>,
+    mut out: ResMut<FxOutbox>,
+    mut summons: ResMut<Summons>,
     mut enemies: Query<(Entity, &mut Transform, &mut EnemyBrain)>,
     colliders: Query<(&Transform, &Collider), Without<EnemyBrain>>,
 ) {
@@ -1225,10 +1381,16 @@ fn enemy_ai(
         } else {
             nav.direction(pos).unwrap_or(direct)
         };
-        let speed = enemy.speed * if enemy.slow > 0.0 { 0.5 } else { 1.0 };
+        // The final boss gets faster when it's nearly dead.
+        let enraged = enemy.kind == NetKind::Boss(1) && enemy.health < enemy.max_health * 0.3;
+        let speed = enemy.speed
+            * if enemy.slow > 0.0 { 0.5 } else { 1.0 }
+            * if enraged { 1.4 } else { 1.0 };
+        let (windup, slam_radius, slam_ahead, slam_damage) = slam_spec(enemy.kind);
         let desired = match enemy.kind {
             NetKind::Shooter if sees => 12.0,
             NetKind::Brute => 1.6,
+            NetKind::Boss(_) => slam_ahead + 0.6,
             _ => 1.1,
         };
         if dist > desired {
@@ -1286,12 +1448,79 @@ fn enemy_ai(
             enemy.slam = false;
             continue;
         }
-        if enemy.slam && enemy.swing >= BRUTE_WINDUP {
+        let hits = stage_damage(&state);
+        if enemy.slam && enemy.swing >= windup {
             enemy.slam = false;
-            let at = new_pos + tf.rotation * Vec3::NEG_Z * BRUTE_SLAM_AHEAD;
+            let at = new_pos + tf.rotation * Vec3::NEG_Z * slam_ahead;
             for p in roster.0.values_mut().filter(|p| p.alive) {
-                if p.feet().with_y(0.0).distance(at.with_y(0.0)) < BRUTE_SLAM_RADIUS + 0.3 {
-                    hurt_player(p, 35.0, &mut hurt);
+                if p.feet().with_y(0.0).distance(at.with_y(0.0)) < slam_radius + 0.3 {
+                    hurt_player(p, slam_damage * hits, &mut hurt);
+                }
+            }
+            if enemy.kind.is_boss() {
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Slam {
+                        pos: at.to_array(),
+                        radius: slam_radius,
+                    },
+                );
+            }
+        }
+        if let NetKind::Boss(level) = enemy.kind {
+            // Calls in zombies at two-thirds and one-third health.
+            let due = if enemy.health < enemy.max_health / 3.0 {
+                2
+            } else if enemy.health < enemy.max_health * 2.0 / 3.0 {
+                1
+            } else {
+                0
+            };
+            if enemy.summons < due {
+                enemy.summons += 1;
+                let n = 5 + 2 * level as usize;
+                for i in 0..n {
+                    let a = i as f32 / n as f32 * std::f32::consts::TAU;
+                    let at = new_pos + Vec3::new(a.cos(), 0.0, a.sin()) * 3.5;
+                    let kind = if level == 1 && i % 3 == 0 {
+                        NetKind::Brute
+                    } else {
+                        NetKind::Grunt
+                    };
+                    summons.0.push((at, kind));
+                }
+            }
+            // A fan of fireballs at whoever it's after.
+            enemy.volley -= dt;
+            if sees && dist < 35.0 && enemy.volley <= 0.0 && !enemy.slam {
+                enemy.volley = match (level, enraged) {
+                    (0, _) => 5.0,
+                    (_, false) => 3.5,
+                    (_, true) => 2.2,
+                };
+                let count = 5 + 2 * level as i32;
+                let start = new_pos + Vec3::Y * 1.6 * scale + direct * 0.8 * scale;
+                let eye = target_feet + Vec3::Y * (EYE_HEIGHT - 0.3);
+                let aim = (eye - start).normalize_or_zero();
+                for i in 0..count {
+                    let off = (i as f32 - (count - 1) as f32 / 2.0) * 0.16;
+                    let dir = Quat::from_rotation_y(off) * aim;
+                    let id = state.next_net_id;
+                    state.next_net_id += 1;
+                    commands.spawn((
+                        crate::InGameEntity,
+                        Replicated {
+                            id,
+                            kind: NetKind::Fireball,
+                        },
+                        FireballBrain {
+                            velocity: dir * FIREBALL_SPEED * 0.85,
+                            life: 4.0,
+                            damage: (10.0 + state.round as f32 * 0.4) * hits,
+                        },
+                        Transform::from_translation(start),
+                    ));
                 }
             }
         }
@@ -1314,24 +1543,28 @@ fn enemy_ai(
                         FireballBrain {
                             velocity: aim * FIREBALL_SPEED,
                             life: 4.0,
-                            damage: 12.0 + state.round as f32 * 0.5,
+                            damage: (12.0 + state.round as f32 * 0.5) * hits,
                         },
                         Transform::from_translation(start),
                     ));
                 }
             }
             kind => {
-                let reach = if kind == NetKind::Brute { 2.1 } else { 1.6 };
+                let reach = match kind {
+                    NetKind::Brute => 2.1,
+                    NetKind::Boss(_) => slam_ahead + slam_radius * 0.6,
+                    _ => 1.6,
+                };
                 if dist < reach && enemy.attack_timer <= 0.0 {
                     enemy.swing = 0.0;
-                    if kind == NetKind::Brute {
+                    if kind.slams() {
                         // Winds up first; the slam lands above.
-                        enemy.attack_timer = 1.4 + BRUTE_WINDUP;
+                        enemy.attack_timer = if kind.is_boss() { 1.1 } else { 1.4 } + windup;
                         enemy.slam = true;
                     } else {
                         enemy.attack_timer = 0.9;
                         if let Some(p) = roster.0.get_mut(&target_id) {
-                            hurt_player(p, 15.0, &mut hurt);
+                            hurt_player(p, 15.0 * hits, &mut hurt);
                         }
                     }
                 }
@@ -1506,7 +1739,7 @@ fn powerups(
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
     mut pickups: Query<(Entity, &Transform, &mut PowerUpBrain)>,
-    enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
+    enemies: Query<(Entity, &Transform, &EnemyBrain)>,
 ) {
     let dt = time.delta_secs();
     for (e, tf, mut p) in &mut pickups {
@@ -1527,7 +1760,8 @@ fn powerups(
         state.powerup_seq += 1;
         match p.kind {
             PowerUp::Nuke => {
-                for (enemy, t) in &enemies {
+                // Bosses shrug it off.
+                for (enemy, t, _) in enemies.iter().filter(|(_, _, b)| !b.kind.is_boss()) {
                     damage.0.push(DamageEvent {
                         target: enemy,
                         amount: f32::MAX / 4.0,
@@ -1620,33 +1854,59 @@ fn mystery_box(
     };
 }
 
-fn extraction(
+/// Once the boss is dead, the whole team standing in the teleporter for
+/// `TELEPORT_HOLD` seconds moves the run on to the next map.
+fn teleporter(
     time: Res<Time>,
     map: Res<CurrentMap>,
     mut state: ResMut<MatchState>,
-    roster: Res<Roster>,
+    mut roster: ResMut<Roster>,
 ) {
-    if state.extraction <= 0.0 || state.game_over {
+    if !state.teleport || state.game_over {
         return;
     }
-    let dt = time.delta_secs();
-    state.extraction -= dt;
     let living: Vec<&PlayerInfo> = roster.0.values().filter(|p| p.alive).collect();
     let all_in = !living.is_empty()
         && living
             .iter()
             .all(|p| p.feet().with_y(0.0).distance(map.0.extraction) < EXTRACT_RADIUS);
-    if all_in {
-        state.extract_hold += dt;
-        if state.extract_hold >= 5.0 {
-            state.extracted = true;
-            state.extraction = 0.0;
-        }
-    } else {
-        state.extract_hold = 0.0;
+    if !all_in {
+        state.teleport_hold = 0.0;
+        return;
     }
-    if state.extraction <= 0.0 && !state.extracted {
-        state.intermission = 0.01;
+    state.teleport_hold += time.delta_secs();
+    if state.teleport_hold < TELEPORT_HOLD {
+        return;
+    }
+    next_stage(&mut state, &mut roster);
+}
+
+/// Seconds the team has to stand in the teleporter.
+pub const TELEPORT_HOLD: f32 = 3.0;
+
+/// On to the next map of the run. Everyone keeps their guns, levels and
+/// upgrades, and comes back up at full health.
+fn next_stage(state: &mut MatchState, roster: &mut Roster) {
+    let mut rng = rand::thread_rng();
+    state.teleport = false;
+    state.teleport_hold = 0.0;
+    state.stage += 1;
+    state.stage_round = 0;
+    state.map = (state.map + 1) % crate::maps::MAP_NAMES.len() as u8;
+    // The second time round the maps, it's the other time of day.
+    if state.stage == crate::maps::MAP_NAMES.len() as u8 {
+        state.night = !state.night;
+    }
+    state.to_spawn = 0;
+    state.intermission = 8.0;
+    state.box_spot = rng.gen_range(0..5);
+    state.box_state = crate::BoxState::Idle;
+    state.box_uses = 0;
+    state.box_move_after = rng.gen_range(4..9);
+    for p in roster.0.values_mut() {
+        p.alive = true;
+        p.health = p.max_health();
+        p.spawn_seq += 1;
     }
 }
 
@@ -1667,16 +1927,13 @@ pub fn new_match(state: &mut MatchState, roster: &mut Roster, map: u8) {
     *state = MatchState::new(map);
     state.night = night;
     state.sandbox = sandbox;
-    if sandbox.on {
-        // Everything open and plenty of points to try things with.
-        state.doors = 0xFE;
-    }
     state.started = true;
     state.box_spot = rng.gen_range(0..5);
     state.box_move_after = rng.gen_range(4..9);
     for p in roster.0.values_mut() {
         p.reset_for_match();
         if sandbox.on {
+            // Plenty of points to try things with.
             p.points = 50_000;
         }
     }

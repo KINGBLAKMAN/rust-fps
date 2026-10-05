@@ -1,6 +1,7 @@
 //! Match flow: loading the map when a match starts and clearing it after,
-//! the in-game menus (pause, level-up picks), cursor locking, the mystery
-//! box and extraction visuals, and handing out gacha spins at the end.
+//! travelling between the maps of a run, the in-game menus (pause, level-up
+//! picks), cursor locking, the mystery box and teleporter visuals, and
+//! handing out gacha spins at the end.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -23,18 +24,22 @@ impl Plugin for GamePlugin {
         app.init_resource::<Paused>()
             .init_resource::<Overlay>()
             .init_resource::<MatchResult>()
+            .init_resource::<LoadedStage>()
             .add_systems(OnEnter(AppState::InGame), start_match)
             .add_systems(OnExit(AppState::InGame), end_match)
+            .add_systems(OnEnter(AppState::Travel), |mut next: ResMut<NextState<AppState>>| {
+                next.set(AppState::InGame)
+            })
             .add_systems(
                 Update,
-                (menu_keys, cursor_control, award_spins)
+                (travel, menu_keys, cursor_control, award_spins)
                     .chain()
                     .before(Phase::Local)
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(
                 Update,
-                (box_visuals, extraction_visuals, crate::strips::door_visuals)
+                (box_visuals, teleporter_visuals)
                     .in_set(Phase::Present)
                     .run_if(in_state(AppState::InGame)),
             );
@@ -76,7 +81,24 @@ pub struct MatchResult {
 }
 
 pub fn match_ended(state: &MatchState) -> bool {
-    state.game_over || state.extracted
+    state.game_over || state.won
+}
+
+/// The map of the run that is built (the host moves `MatchState::stage` on
+/// when the team takes the teleporter).
+#[derive(Resource, Default)]
+pub struct LoadedStage(u8);
+
+/// Leaves the match for a frame when the run moves to the next map, so it
+/// is rebuilt there (players keep everything; it lives in the Roster).
+fn travel(
+    state: Res<MatchState>,
+    loaded: Res<LoadedStage>,
+    mut next: ResMut<NextState<AppState>>,
+) {
+    if state.started && state.stage != loaded.0 {
+        next.set(AppState::Travel);
+    }
 }
 
 #[derive(Component)]
@@ -101,7 +123,9 @@ pub fn start_match(
     mut ambient: ResMut<AmbientLight>,
     camera: Single<Entity, With<crate::player::LocalPlayer>>,
     roster: Res<crate::Roster>,
+    mut loaded: ResMut<LoadedStage>,
 ) {
+    loaded.0 = state.stage;
     let mut layout = spawn_map(
         &mut commands,
         &mut meshes,
@@ -149,7 +173,7 @@ pub fn start_match(
         commands.entity(*camera).add_child(torch);
     }
     commands.insert_resource(NavGrid::new(layout.half));
-    crate::strips::spawn_doors(&mut commands, &mut meshes, &mut materials, &guns, &layout);
+    crate::strips::spawn_wall_guns(&mut commands, &mut materials, &guns, &layout);
     commands.insert_resource(CurrentMap(layout));
     *overlay = Overlay::None;
     paused.0 = false;
@@ -326,7 +350,7 @@ fn award_spins(
         return;
     }
     // The round you were on only counts if you got through it.
-    let survived = if state.extracted {
+    let survived = if state.won {
         state.round
     } else {
         state.round.saturating_sub(1)
@@ -341,11 +365,12 @@ fn award_spins(
     if new_best {
         profile.best_round = survived;
     }
-    if state.extracted {
+    if state.won {
         profile.extractions += 1;
     }
     let kills = roster.me(&session).map_or(0, |p| p.kills);
-    let xp = crate::progression::match_xp(survived, kills, state.extracted);
+    let cleared = state.stage as u32 + state.won as u32;
+    let xp = crate::progression::match_xp(survived, kills, cleared, state.won);
     let before = crate::progression::career(profile.career_xp).0;
     profile.career_xp += xp;
     let after = crate::progression::career(profile.career_xp).0;
@@ -507,15 +532,17 @@ fn box_visuals(
     }
 }
 
-fn extraction_visuals(
+fn teleporter_visuals(
+    time: Res<Time>,
     state: Res<MatchState>,
-    mut beacon: Query<&mut Visibility, With<ExtractionBeacon>>,
+    mut beacon: Query<(&mut Visibility, &mut Transform), With<ExtractionBeacon>>,
 ) {
-    for mut vis in &mut beacon {
-        *vis = if state.extraction > 0.0 && !match_ended(&state) {
+    for (mut vis, mut tf) in &mut beacon {
+        *vis = if state.teleport && !match_ended(&state) {
             Visibility::Inherited
         } else {
             Visibility::Hidden
         };
+        tf.rotation = Quat::from_rotation_y(time.elapsed_secs() * 0.6);
     }
 }

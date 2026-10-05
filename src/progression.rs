@@ -101,8 +101,10 @@ pub fn loadout_guns() -> Vec<u8> {
 }
 
 /// What a finished match is worth.
-pub fn match_xp(rounds: u32, kills: u32, extracted: bool) -> u32 {
-    rounds * 150 + kills * 3 + if extracted { 600 } else { 0 }
+/// Career XP for a run: rounds survived, kills, maps cleared and a bonus
+/// for beating the final boss.
+pub fn match_xp(rounds: u32, kills: u32, maps_cleared: u32, won: bool) -> u32 {
+    rounds * 150 + kills * 3 + maps_cleared * 400 + if won { 1500 } else { 0 }
 }
 
 /// Is this a valid loadout (a gun that can be brought, attachments it takes)?

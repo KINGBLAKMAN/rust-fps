@@ -51,6 +51,10 @@ fn left(p: &mut ChildSpawnerCommands, state: &MatchState, tools: &Tools) {
         }
     });
     row(p, |r| {
+        button_sized(r, "Map boss", UiAction::SandboxSpawn(4, 1), Some(140.0), false);
+        button_sized(r, "Final boss", UiAction::SandboxSpawn(5, 1), Some(140.0), false);
+    });
+    row(p, |r| {
         let on = |b: bool| if b { "ON" } else { "OFF" };
         button_sized(r, format!("Waves {}", on(sb.waves)), UiAction::SandboxToggle(0), Some(140.0), sb.waves);
         button_sized(r, format!("God mode {}", on(sb.god)), UiAction::SandboxToggle(1), Some(140.0), sb.god);

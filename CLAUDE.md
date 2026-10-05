@@ -23,12 +23,12 @@ Rust FPS: a co-op zombie wave-survival shooter in Rust with Bevy 0.16. Solo, or 
 
 ## Code map
 
-- `main.rs`: app setup, shared state (`Roster`, `MatchState`, `PlayerAction`) and system ordering. Systems run in `Phase` sets in this order: NetIn, Local (only in a match), Sim (only on the host, while the match runs), NetOut, Present.
+- `main.rs`: app setup, shared state (`Roster`, `MatchState`, `PlayerAction`) and system ordering. Systems run in `Phase` sets in this order: NetIn, Local (only in a match), Sim (only on the host, while the match runs), NetOut, Present. Moving to the next map of a run goes through `AppState::Travel` for a frame, which rebuilds the match; anything that must survive it lives in `Roster` or `MatchState`.
 - `data.rs`: all tables (guns, attachments, characters, abilities, skins, perks). Start here when balancing.
-- `sim.rs`: the host-only simulation (rounds, zombie AI, damage, box, perks, sandbox). Clients never run it.
+- `sim/`: the host-only simulation (the run's maps, rounds and bosses, zombie AI, damage, box, perks, sandbox; abilities in `powers.rs`). Clients never run it.
 - `net.rs`: UDP and serde messages. The host is authoritative; clients send actions, and the host sends snapshots.
 - `player.rs`, `weapons.rs`, `abilities.rs`, `viewmodel.rs`: the local player, guns, ability input and first-person animation.
-- `maps/`: maps (`mod.rs`), props, door areas (`strips.rs`), walk-through buildings (`interiors.rs`) and pathfinding (`nav.rs`).
+- `maps/`: maps (`mod.rs`), props and wall guns (`strips.rs`), the floor-plan kit (`interiors.rs`) and pathfinding (`nav.rs`).
 - `models/`: the shape kit (`kit.rs`) that everything is modelled with, gun models, skins, hands and other players.
 - `rig/`: skeleton and animation for heroes and zombies. `fx/`: effects and auras. `audio/`: synthesised sounds. `ui/`: menus.
 - `progression.rs`: career XP, unlocks and loadouts. `graphics.rs`: applies the graphics settings.
