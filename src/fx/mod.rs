@@ -406,6 +406,7 @@ struct Particle {
 #[derive(Component)]
 struct Pending {
     delay: f32,
+    total: f32,
     pos: Vec3,
     radius: f32,
 }
@@ -1110,6 +1111,7 @@ pub fn play(
                     InGameEntity,
                     Pending {
                         delay,
+                        total: delay.max(0.01),
                         pos: p,
                         radius,
                     },
@@ -1712,12 +1714,21 @@ fn markers(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut pending: Query<(Entity, &mut Pending, &mut Transform), Without<Burst>>,
     mut lines: ResMut<Lines>,
+    mut ground: ResMut<crate::markers::Markers>,
 ) {
     let dt = time.delta_secs();
     let t = time.elapsed_secs();
     let a = &*assets;
     for (e, mut p, mut tf) in &mut pending {
         p.delay -= dt;
+        ground.push(
+            crate::markers::Marker::new(
+                p.pos,
+                crate::markers::Shape::Circle { radius: p.radius },
+                crate::markers::PREVIEW,
+            )
+            .fill(1.0 - p.delay / p.total),
+        );
         let pulse = 1.0 + 0.06 * (t * 14.0).sin();
         tf.rotation = Quat::from_rotation_y(t * 2.5);
         tf.scale = Vec3::new(p.radius * pulse, 1.0, p.radius * pulse);

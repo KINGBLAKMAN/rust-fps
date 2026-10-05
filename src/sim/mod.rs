@@ -111,7 +111,17 @@ pub struct EnemyBrain {
     pub swing: f32,
     /// Stunned: can't move or attack.
     pub stun: f32,
+    /// A Brute slam is winding up (it lands `BRUTE_WINDUP` after the swing starts).
+    slam: bool,
 }
+
+/// How long a Brute's slam takes to land, so players can see it coming.
+pub const BRUTE_WINDUP: f32 = 0.45;
+/// The slam hits everyone in this circle, `BRUTE_SLAM_AHEAD` in front of the Brute.
+pub const BRUTE_SLAM_RADIUS: f32 = 2.0;
+pub const BRUTE_SLAM_AHEAD: f32 = 1.0;
+/// Shooters' fireballs fly straight at this speed.
+pub const FIREBALL_SPEED: f32 = 15.0;
 
 #[derive(Component)]
 pub struct FireballBrain {
@@ -1088,6 +1098,7 @@ fn spawn_zombie(
         crawler,
         swing: 9.0,
         stun: 0.0,
+        slam: false,
     });
 }
 
@@ -1218,7 +1229,7 @@ fn enemy_ai(
         } else if enemy.kind == NetKind::Shooter && dist < desired - 4.0 {
             velocity = -direct * speed * 0.6;
         }
-        if enemy.stun > 0.0 {
+        if enemy.stun > 0.0 || enemy.slam {
             velocity = Vec3::ZERO;
         }
         // Singularities pull, barrier domes push out.
@@ -1256,7 +1267,8 @@ fn enemy_ai(
         } else {
             velocity.with_y(0.0).normalize_or_zero()
         };
-        if face != Vec3::ZERO {
+        // A winding-up Brute is committed to where it's facing.
+        if face != Vec3::ZERO && !enemy.slam {
             let look = Quat::from_rotation_arc(Vec3::NEG_Z, face);
             tf.rotation = tf.rotation.slerp(look, (dt * 10.0).min(1.0));
         }
@@ -1264,7 +1276,17 @@ fn enemy_ai(
         enemy.attack_timer -= dt;
         enemy.swing += dt;
         if enemy.stun > 0.0 {
+            enemy.slam = false;
             continue;
+        }
+        if enemy.slam && enemy.swing >= BRUTE_WINDUP {
+            enemy.slam = false;
+            let at = new_pos + tf.rotation * Vec3::NEG_Z * BRUTE_SLAM_AHEAD;
+            for p in roster.0.values_mut().filter(|p| p.alive) {
+                if p.feet().with_y(0.0).distance(at.with_y(0.0)) < BRUTE_SLAM_RADIUS + 0.3 {
+                    hurt_player(p, 35.0, &mut hurt);
+                }
+            }
         }
         match enemy.kind {
             NetKind::Shooter => {
@@ -1283,7 +1305,7 @@ fn enemy_ai(
                             kind: NetKind::Fireball,
                         },
                         FireballBrain {
-                            velocity: aim * 15.0,
+                            velocity: aim * FIREBALL_SPEED,
                             life: 4.0,
                             damage: 12.0 + state.round as f32 * 0.5,
                         },
@@ -1294,15 +1316,16 @@ fn enemy_ai(
             kind => {
                 let reach = if kind == NetKind::Brute { 2.1 } else { 1.6 };
                 if dist < reach && enemy.attack_timer <= 0.0 {
-                    let (cd, dmg) = if kind == NetKind::Brute {
-                        (1.4, 35.0)
-                    } else {
-                        (0.9, 15.0)
-                    };
-                    enemy.attack_timer = cd;
                     enemy.swing = 0.0;
-                    if let Some(p) = roster.0.get_mut(&target_id) {
-                        hurt_player(p, dmg, &mut hurt);
+                    if kind == NetKind::Brute {
+                        // Winds up first; the slam lands above.
+                        enemy.attack_timer = 1.4 + BRUTE_WINDUP;
+                        enemy.slam = true;
+                    } else {
+                        enemy.attack_timer = 0.9;
+                        if let Some(p) = roster.0.get_mut(&target_id) {
+                            hurt_player(p, 15.0, &mut hurt);
+                        }
                     }
                 }
             }

@@ -198,14 +198,16 @@ fn build_all(
     commands.insert_resource(GunAssets {
         guns,
         attach,
-        detail_mat: materials.add(vertex_material(0.45, 0.35)),
+        // Rough by default; metal parts are made metallic by the painted material.
+        detail_mat: materials.add(vertex_material(0.55, 0.0)),
         glow_mat: materials.add(glow_material(1.0)),
         glass_mat: materials.add(glass_material()),
         skins,
     });
 }
 
-/// Spawns a gun's parts under `parent`. `body` is the painted material.
+/// Spawns a gun's parts under `parent`. `body` is the painted material;
+/// `outline` draws outlines on its solid parts.
 pub fn spawn_gun(
     parent: &mut ChildSpawnerCommands,
     assets: &GunAssets,
@@ -213,13 +215,19 @@ pub fn spawn_gun(
     attach: Attach,
     body: Handle<StandardMaterial>,
     no_shadow: bool,
+    outline: Option<crate::outline::Outline>,
 ) {
     let g = assets.gun(id);
     let rig = g.rig;
+    let glow_mat = assets.glow_mat.id();
     let mut part = |mesh: &Handle<Mesh>, mat: Handle<StandardMaterial>, tf: Transform, tag: u8| {
+        let solid = tag != 3 && mat.id() != glow_mat;
         let mut e = parent.spawn((GunPart, Mesh3d(mesh.clone()), MeshMaterial3d(mat), tf));
         if no_shadow {
             e.insert(NotShadowCaster);
+        }
+        if let (Some(o), true) = (outline, solid) {
+            e.insert(o);
         }
         match tag {
             1 => {
@@ -661,12 +669,10 @@ const W: Color = c(1.0, 1.0, 1.0);
 const W2: Color = c(0.78, 0.78, 0.78);
 const W3: Color = c(0.6, 0.6, 0.6);
 const BLACK: Color = c(0.06, 0.06, 0.065);
-const GUNMETAL: Color = c(0.17, 0.18, 0.2);
-const STEEL: Color = c(0.42, 0.43, 0.45);
+use crate::kit::{BRASS, GUNMETAL, STEEL};
 const RUBBER: Color = c(0.035, 0.035, 0.035);
 const WOOD: Color = c(0.46, 0.25, 0.11);
 const WOOD_D: Color = c(0.3, 0.16, 0.07);
-const BRASS: Color = c(0.8, 0.62, 0.25);
 const POLY: Color = c(0.12, 0.12, 0.11);
 const TAN: Color = c(0.55, 0.47, 0.33);
 

@@ -1046,7 +1046,7 @@ pub fn spawn_doors(
                 Visibility::default(),
             ))
             .with_children(|g| {
-                crate::gunmodels::spawn_gun(g, guns, w.gun, w.attach, chalk.clone(), false)
+                crate::gunmodels::spawn_gun(g, guns, w.gun, w.attach, chalk.clone(), false, None)
             });
     }
 }

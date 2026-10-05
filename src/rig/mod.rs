@@ -92,7 +92,9 @@ pub fn emote_length(emote: u8) -> f32 {
 const HIP_Y: f32 = 0.98;
 const SPINE_UP: f32 = 0.08;
 const NECK_UP: f32 = 0.56;
-const SHOULDER: Vec3 = Vec3::new(0.27, 0.47, 0.0);
+/// Shoulder joints sit 0.20 m out (0.27 before v8), for shoulders about
+/// 0.45 m across like a real adult's.
+const SHOULDER: Vec3 = Vec3::new(0.20, 0.47, 0.0);
 const HIP_X: f32 = 0.11;
 const UPPER_ARM: f32 = 0.31;
 const FOREARM: f32 = 0.27;
@@ -100,8 +102,8 @@ const FOREARM: f32 = 0.27;
 const PALM: f32 = 0.065;
 const THIGH: f32 = 0.45;
 const KNUCKLES: f32 = 0.1;
-/// Guns look right a little bigger than life on these figures.
-const GUN_SCALE: f32 = 1.15;
+/// Guns are life size on the life-size figures.
+const GUN_SCALE: f32 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Bone {
@@ -175,34 +177,37 @@ fn base_body(p: &mut Parts, pal: &Palette, bulk: f32) {
         v(0.18, 0.12, 0.13) * bulk,
         pal.suit_dark,
     );
-    // Torso: abdomen and chest.
+    // Torso: a waist, the chest with a flat front, collarbones and
+    // shoulder blades, so it isn't one smooth egg.
     let s = Bone::Spine;
-    p.k(s)
-        .blob(v(0.0, 0.1, 0.0), v(0.16, 0.16, 0.12) * bulk, pal.suit);
-    p.k(s)
-        .blob(v(0.0, 0.33, 0.0), v(0.23, 0.2, 0.14) * bulk, pal.suit);
+    torso(p, pal.suit, bulk);
     p.k(s)
         .cyl(v(0.0, 0.52, 0.0), 0.06, 0.1, Quat::IDENTITY, pal.skin);
     for side in 0..2 {
         let x = sx(side);
-        // Upper arm with a round shoulder.
+        // Upper arm, tapering to the elbow, with a small deltoid. (Limb
+        // radii here are before the 0.85 thinning in `proportion`.)
         let u = Bone::UpperArm(side);
-        p.k(u).sphere(v(0.0, -0.02, 0.0), 0.08 * bulk, pal.suit);
-        p.k(u).capsule_between(
+        p.k(u)
+            .blob(v(x * 0.008, -0.03, 0.0), v(0.066, 0.075, 0.064) * bulk, pal.suit);
+        p.k(u).capsule_tapered(
             v(0.0, -0.04, 0.0),
-            v(0.0, -0.27, 0.0),
-            0.058 * bulk,
+            v(0.0, -0.28, 0.0),
+            0.061 * bulk,
+            0.049 * bulk,
             pal.suit,
         );
-        // Forearm with a cuff.
+        // Forearm, thicker near the elbow, with a cuff.
         let f = Bone::Forearm(side);
-        p.k(f).sphere(v(0.0, 0.0, 0.0), 0.052 * bulk, pal.suit);
-        p.k(f).capsule_between(
-            v(0.0, -0.02, 0.0),
+        p.k(f).capsule_tapered(
+            v(0.0, -0.01, 0.0),
             v(0.0, -0.22, 0.0),
-            0.05 * bulk,
+            0.054 * bulk,
+            0.04 * bulk,
             pal.suit,
         );
+        p.k(f)
+            .blob(v(0.0, -0.07, 0.006), v(0.058, 0.07, 0.056) * bulk, pal.suit);
         p.k(f)
             .cyl(v(0.0, -0.235, 0.0), 0.047, 0.05, Quat::IDENTITY, pal.glove);
         // Hand: palm, back and thumb. Fingers are separate joints.
@@ -215,23 +220,26 @@ fn base_body(p: &mut Parts, pal: &Palette, bulk: f32) {
             0.014,
             pal.glove,
         );
-        // Thigh.
+        // Thigh, tapering to the knee.
         let t = Bone::Thigh(side);
-        p.k(t).capsule_between(
+        p.k(t).capsule_tapered(
             v(0.0, -0.02, 0.0),
-            v(0.0, -0.42, 0.0),
-            0.078 * bulk,
-            pal.suit_dark,
-        );
-        // Shin and boot.
-        let n = Bone::Shin(side);
-        p.k(n).sphere(v(0.0, 0.0, 0.0), 0.066 * bulk, pal.suit_dark);
-        p.k(n).capsule_between(
-            v(0.0, -0.02, 0.0),
-            v(0.0, -0.38, 0.0),
+            v(0.0, -0.43, 0.0),
+            0.086 * bulk,
             0.062 * bulk,
             pal.suit_dark,
         );
+        // Shin with a calf, slimming to the ankle, and a boot.
+        let n = Bone::Shin(side);
+        p.k(n).capsule_tapered(
+            v(0.0, 0.0, 0.0),
+            v(0.0, -0.38, 0.0),
+            0.058 * bulk,
+            0.042 * bulk,
+            pal.suit_dark,
+        );
+        p.k(n)
+            .blob(v(0.0, -0.13, 0.016), v(0.058, 0.1, 0.058) * bulk, pal.suit_dark);
         p.k(n)
             .cyl(v(0.0, -0.4, 0.0), 0.068, 0.12, Quat::IDENTITY, pal.boot);
         p.k(n)
@@ -240,6 +248,36 @@ fn base_body(p: &mut Parts, pal: &Palette, bulk: f32) {
             v(0.0, -0.505, -0.05),
             v(0.13, 0.02, 0.27),
             c(0.08, 0.08, 0.08),
+        );
+    }
+}
+
+/// A torso with some structure: narrower waist, chest with a flatter
+/// front, collarbones and shoulder blades. Before the thinning in
+/// `proportion`.
+fn torso(p: &mut Parts, col: Color, bulk: f32) {
+    let s = Bone::Spine;
+    p.k(s)
+        .blob(v(0.0, 0.1, 0.0), v(0.15, 0.16, 0.115) * bulk, col);
+    p.k(s)
+        .blob(v(0.0, 0.33, 0.005), v(0.23, 0.2, 0.135) * bulk, col);
+    // Flatter chest front and a slight drop under it.
+    p.k(s).cuboid(
+        v(0.0, 0.36, -0.105 * bulk),
+        v(0.3, 0.16, 0.05) * bulk,
+        col,
+    );
+    for x in [-1.0f32, 1.0] {
+        p.k(s).beam(
+            v(x * 0.03, 0.47, -0.08 * bulk),
+            v(x * 0.2, 0.49, -0.04 * bulk),
+            Vec2::new(0.035, 0.03) * bulk,
+            col,
+        );
+        p.k(s).blob(
+            v(x * 0.1, 0.38, 0.1 * bulk),
+            v(0.08, 0.1, 0.035) * bulk,
+            col,
         );
     }
 }
@@ -279,12 +317,34 @@ pub fn model_parts(model: Model) -> Vec<(Bone, Kit, bool)> {
     }
     let mut out = Vec::new();
     for (b, k) in p.solid {
-        out.push((b, k, false));
+        out.push((b, proportion(model, b, k), false));
     }
     for (b, k) in p.glow {
-        out.push((b, k, true));
+        out.push((b, proportion(model, b, k), true));
     }
     out
+}
+
+/// Brings each part to real adult proportions (v8). The parts were
+/// modelled chibi-sized: big heads, broad chests, thick limbs and gear.
+/// Each bone's part is scaled about its joint, so outfits, helmets and
+/// gear shrink with what they're on. Heads go from about 0.24 to 0.16 m
+/// wide; chests from 0.46 to 0.35 m. The skeleton itself is unchanged.
+fn proportion(model: Model, bone: Bone, k: Kit) -> Kit {
+    let brute = model == Model::Brute;
+    let (pivot, scale) = match bone {
+        // About the bottom of the head, so it stays on the neck.
+        Bone::Neck => (v(0.0, 0.03, 0.0), v(0.65, 0.82, 0.75)),
+        Bone::Spine if brute => (Vec3::ZERO, v(0.88, 1.0, 0.92)),
+        Bone::Spine => (Vec3::ZERO, v(0.76, 1.0, 0.86)),
+        Bone::Pelvis if brute => (Vec3::ZERO, v(0.92, 1.0, 0.95)),
+        Bone::Pelvis => (Vec3::ZERO, v(0.85, 1.0, 0.9)),
+        Bone::UpperArm(_) | Bone::Forearm(_) if brute => (Vec3::ZERO, v(0.95, 1.0, 0.95)),
+        Bone::UpperArm(_) | Bone::Forearm(_) => (Vec3::ZERO, v(0.85, 1.0, 0.85)),
+        Bone::Thigh(_) | Bone::Shin(_) => (Vec3::ZERO, v(0.9, 1.0, 0.92)),
+        Bone::Hand(_) | Bone::Finger(..) => return k,
+    };
+    k.scaled(pivot, scale)
 }
 
 fn build_models(
@@ -420,9 +480,12 @@ pub fn spawn_rig_with(
                 } else {
                     body.clone()
                 };
-                commands
-                    .entity(e)
-                    .with_child((Mesh3d(mesh.clone()), MeshMaterial3d(mat)));
+                let mut part = commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(mat)));
+                if !*glow {
+                    part.insert(crate::outline::Outline::Figure);
+                }
+                let part = part.id();
+                commands.entity(e).add_child(part);
             }
         }
         joints.insert(bone, e);
@@ -447,6 +510,7 @@ pub fn spawn_rig_with(
             commands.entity(e).with_child((
                 Mesh3d(assets.finger[&model].clone()),
                 MeshMaterial3d(body.clone()),
+                crate::outline::Outline::Figure,
             ));
         }
         let t = joint(
@@ -864,7 +928,7 @@ fn zombie_pose(rig: &Rig, gait: Gait) -> Pose {
         _ => [[0.35, 0.45, 0.5, 0.55]; 2],
     };
     // Attacking.
-    if rig.swing < 0.6 {
+    if rig.swing < 0.7 {
         let k = smooth(rig.swing / 0.35);
         let back = 1.0 - smooth((rig.swing - 0.35) / 0.25);
         match gait {
@@ -874,18 +938,27 @@ fn zombie_pose(rig: &Rig, gait: Gait) -> Pose {
                 p.neck = Quat::from_rotation_x(0.5 + 0.5 * k * back);
             }
             Gait::Stomp => {
-                // Two-handed overhead smash.
+                // Two-handed overhead smash: raised, then down as the slam
+                // lands (crate::sim::BRUTE_WINDUP).
+                let raise = smooth(rig.swing / 0.25);
+                let k = smooth((rig.swing - 0.25) / 0.2);
+                let back = 1.0 - smooth((rig.swing - 0.5) / 0.2);
                 for side in 0..2 {
                     let x = sx(side);
                     let up = v(x * 0.2, HIP_Y + 1.25, 0.05);
                     let down = v(x * 0.15, HIP_Y + 0.15, -0.65);
                     p.arms[side] = Reach {
-                        target: up.lerp(down, k).lerp(p.arms[side].target, 1.0 - back),
+                        target: p.arms[side]
+                            .target
+                            .lerp(up, raise)
+                            .lerp(down, k)
+                            .lerp(p.arms[side].target, 1.0 - back),
                         elbow: v(x, 0.0, 0.5),
                         hand: None,
                     };
                 }
-                p.spine = Quat::from_rotation_x(0.3 * (1.0 - k) - 0.55 * k);
+                let smash = Quat::from_rotation_x(0.3 * raise * (1.0 - k) - 0.55 * k);
+                p.spine = p.spine.slerp(smash, back.min(raise));
             }
             _ => {
                 // Right-handed claw swipe across the body.

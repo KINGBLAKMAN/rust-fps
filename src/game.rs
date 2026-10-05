@@ -87,7 +87,7 @@ struct BoxGun;
 #[derive(Component)]
 struct BoxGunModel(Option<u8>);
 
-fn start_match(
+pub fn start_match(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -111,18 +111,22 @@ fn start_match(
         state.night,
     );
     crate::progression::apply_loadouts(&mut layout, &roster);
-    clear.0 = layout.sky;
+    clear.0 = crate::graphics::sky_colors(layout.sky, state.night).0;
     // Night: dim blue ambient and a flashlight on your head.
     *ambient = if state.night {
         AmbientLight {
             color: Color::srgb(0.55, 0.65, 1.0),
-            brightness: 45.0,
+            // Up from 45: the film tone mapping darkens the low end.
+            brightness: 70.0,
             ..default()
         }
     } else {
+        // Low, so shapes keep their shading; the fill light and the painted
+        // material's cool shadow side do the rest. Nearly white so rooms
+        // the sun can't reach keep their colours.
         AmbientLight {
-            color: Color::WHITE,
-            brightness: 350.0,
+            color: Color::srgb(0.96, 0.97, 1.0),
+            brightness: 140.0,
             ..default()
         }
     };
@@ -182,6 +186,7 @@ fn start_match(
                         crate::data::Attach::NONE,
                         glow.clone(),
                         false,
+                        None,
                     )
                 });
             }

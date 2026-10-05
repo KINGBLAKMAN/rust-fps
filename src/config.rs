@@ -216,6 +216,12 @@ pub struct Settings {
     pub antialias: bool,
     pub bloom: bool,
     pub ambient_occlusion: bool,
+    /// Thin drawn outlines on characters, zombies and nearby props.
+    pub outlines: bool,
+    /// The camera shakes from explosions and Brute slams.
+    pub camera_shake: bool,
+    /// Dust, pollen or ash drifting in the air.
+    pub particles: bool,
     pub keys: Vec<(Action, KeyCode)>,
     /// Cast mode for ability 1, ability 2 and the ultimate.
     pub cast_modes: [CastMode; 3],
@@ -238,6 +244,9 @@ impl Default for Settings {
             antialias: true,
             bloom: true,
             ambient_occlusion: false,
+            outlines: true,
+            camera_shake: true,
+            particles: true,
             keys: Action::ALL.iter().map(|a| (*a, a.default_key())).collect(),
             cast_modes: [CastMode::Quick; 3],
         }

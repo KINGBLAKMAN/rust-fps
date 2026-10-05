@@ -246,7 +246,7 @@ fn setup(
 
 /// Per-enemy materials so hits, burning and slows can tint each one.
 #[derive(Component)]
-struct EnemyLook(Handle<StandardMaterial>);
+struct EnemyLook(Handle<StandardMaterial>, f32);
 
 #[derive(Component)]
 struct Spin;
@@ -454,7 +454,7 @@ fn dress(
             commands.entity(root).insert((
                 Enemy,
                 EnemyStatus::default(),
-                EnemyLook(body.clone()),
+                EnemyLook(body.clone(), 0.0),
                 Transform::from_translation(pos).with_scale(Vec3::splat(enemy_scale(kind))),
             ));
             crate::rig::spawn_rig_with(commands, rigs, root, model, None, Some(body));
@@ -645,14 +645,18 @@ fn dress(
 fn enemy_colors(
     time: Res<Time>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut enemies: Query<(&mut EnemyStatus, &EnemyLook)>,
+    mut enemies: Query<(&mut EnemyStatus, &mut EnemyLook)>,
 ) {
     let dt = time.delta_secs();
-    for (mut status, look) in &mut enemies {
+    for (mut status, mut look) in &mut enemies {
         status.flash -= dt;
-        let (tint, glow) = if status.flash > 0.0 {
-            (Color::WHITE, LinearRgba::rgb(0.6, 0.6, 0.6))
-        } else if status.stunned {
+        // A hit lights them up warm-white, fading quickly (`look.1`).
+        if status.flash > 0.0 {
+            look.1 = 1.0;
+        } else {
+            look.1 = (look.1 - 7.0 * dt).max(0.0);
+        }
+        let (tint, glow) = if status.stunned {
             // Frozen stiff (or choking in smoke): pale and glowing.
             (
                 Color::srgb(0.75, 0.9, 1.0),
@@ -672,9 +676,17 @@ fn enemy_colors(
         } else {
             (Color::WHITE, LinearRgba::BLACK)
         };
-        if let Some(m) = materials.get_mut(&look.0) {
-            m.base_color = tint;
-            m.emissive = glow;
+        let glow = glow + LinearRgba::rgb(0.45, 0.42, 0.40) * look.1;
+        // Only touch the material when it changes (every change is re-sent
+        // to the GPU).
+        let same = materials
+            .get(&look.0)
+            .is_some_and(|m| m.base_color == tint && m.emissive == glow);
+        if !same {
+            if let Some(m) = materials.get_mut(&look.0) {
+                m.base_color = tint;
+                m.emissive = glow;
+            }
         }
     }
 }

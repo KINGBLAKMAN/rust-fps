@@ -59,9 +59,16 @@ pub fn hash(a: f32, b: f32) -> f32 {
 }
 
 impl MapLayout {
-    /// Adds a prop's art at `pos` turned by `yaw`.
+    /// Adds a prop's art at `pos` turned by `yaw`. Small things go with the
+    /// props (outlined up close), big ones with the buildings.
     pub fn place(&mut self, art: Art, pos: Vec3, yaw: f32) {
-        self.art.append(
+        let size = art.paint.size().max(art.metal.size());
+        let to = if size.max_element() <= 4.5 {
+            &mut self.prop_art
+        } else {
+            &mut self.art
+        };
+        to.append(
             art,
             Transform::from_translation(pos).with_rotation(Quat::from_rotation_y(yaw)),
         );

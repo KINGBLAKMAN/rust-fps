@@ -217,6 +217,8 @@ pub fn forearm_kit(suit: Color, trim: Color) -> Kit {
         Quat::IDENTITY,
         trim,
     );
+    // The forearm muscle swells below the elbow, then slims to the wrist.
+    k.blob(Vec3::new(0.0, 0.66, 0.004), Vec3::new(0.044, 0.22, 0.043), suit);
     // Elbow pad seam.
     k.frustum(
         Vec3::new(0.0, 0.75, 0.0),

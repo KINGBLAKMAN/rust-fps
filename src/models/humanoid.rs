@@ -46,7 +46,15 @@ fn fill_gun_mounts(
         commands.entity(e).despawn_related::<Children>();
         if let Some((gun, skin, attach)) = want {
             commands.entity(e).with_children(|p| {
-                crate::gunmodels::spawn_gun(p, &guns, gun, attach, guns.skin(skin), false)
+                crate::gunmodels::spawn_gun(
+                    p,
+                    &guns,
+                    gun,
+                    attach,
+                    guns.skin(skin),
+                    false,
+                    Some(crate::outline::Outline::Figure),
+                )
             });
         }
     }

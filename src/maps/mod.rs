@@ -125,6 +125,9 @@ pub struct MapLayout {
     pub sun: f32,
     pub solids: Vec<Solid>,
     pub art: Art,
+    /// Small props (everything placed that fits in a 4.5 m box): drawn
+    /// with outlines up close.
+    pub prop_art: Art,
     /// Lamps: position, colour, brightness.
     pub lights: Vec<(Vec3, Color, f32)>,
     pub player_spawns: Vec<Vec3>,
@@ -149,6 +152,7 @@ impl MapLayout {
             sun,
             solids: Vec::new(),
             art: Art::default(),
+            prop_art: Art::default(),
             lights: Vec::new(),
             player_spawns: Vec::new(),
             enemy_spawns: Vec::new(),
@@ -1946,17 +1950,25 @@ fn perk_art(perk: Perk) -> Art {
     a
 }
 
+/// `art_meshes` marker: outlines on the solid parts of a prop.
+fn outline_solid(e: &mut EntityCommands, solid: bool) {
+    if solid {
+        e.insert(crate::outline::Outline::Prop);
+    }
+}
+
 fn art_meshes(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     mats: &[Handle<StandardMaterial>; 4],
     art: Art,
     parent: Option<Entity>,
-    marker: impl Fn(&mut EntityCommands),
+    marker: impl Fn(&mut EntityCommands, bool),
 ) {
-    for (kit, mat) in [art.paint, art.metal, art.glow, art.glass]
+    for (i, (kit, mat)) in [art.paint, art.metal, art.glow, art.glass]
         .into_iter()
         .zip(mats.iter())
+        .enumerate()
     {
         if let Some(mesh) = kit.build() {
             let mut e = commands.spawn((
@@ -1964,7 +1976,8 @@ fn art_meshes(
                 MeshMaterial3d(mat.clone()),
                 Transform::default(),
             ));
-            marker(&mut e);
+            // The marker also learns if this is a solid part (not glow or glass).
+            marker(&mut e, i < 2);
             if let Some(p) = parent {
                 let id = e.id();
                 commands.entity(p).add_child(id);
@@ -1974,6 +1987,11 @@ fn art_meshes(
         }
     }
 }
+
+/// Daytime sun strength over each map's own value, and the cool fill
+/// light's share (the ambient light is much lower than before v8).
+const SUN_BOOST: f32 = 0.7;
+const FILL: f32 = 0.14;
 
 pub fn spawn_map(
     commands: &mut Commands,
@@ -2033,7 +2051,9 @@ pub fn spawn_map(
         }
     }
     let art = std::mem::take(&mut layout.art);
-    art_meshes(commands, meshes, &mats, art, None, |_| {});
+    art_meshes(commands, meshes, &mats, art, None, |_, _| {});
+    let props = std::mem::take(&mut layout.prop_art);
+    art_meshes(commands, meshes, &mats, props, None, outline_solid);
     // At night the lamps do the work: brighter and reaching further.
     let (lamp, reach) = if night { (3.0, 24.0) } else { (1.0, 18.0) };
     for (pos, color, intensity) in &layout.lights {
@@ -2050,12 +2070,14 @@ pub fn spawn_map(
         ));
     }
 
-    // Sun by day, a pale moon by night.
+    // Sun by day, a pale moon by night. The sun is a little warm; a weak
+    // cool light from the opposite side of the sky fills the shadows.
     let (sun, sun_color) = if night {
-        (layout.sun * 0.04, Color::srgb(0.6, 0.7, 1.0))
+        (layout.sun * 0.06, Color::srgb(0.6, 0.7, 1.0))
     } else {
-        (layout.sun, Color::WHITE)
+        (layout.sun * SUN_BOOST, Color::srgb(1.0, 0.95, 0.86))
     };
+    let sun_pos = Vec3::new(20.0, 40.0, 15.0);
     commands.spawn((
         InGameEntity,
         DirectionalLight {
@@ -2064,8 +2086,22 @@ pub fn spawn_map(
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_xyz(20.0, 40.0, 15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(sun_pos).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+    if !night {
+        commands.spawn((
+            InGameEntity,
+            crate::graphics::FillLight,
+            DirectionalLight {
+                illuminance: layout.sun * FILL,
+                color: Color::srgb(0.82, 0.87, 1.0),
+                shadows_enabled: false,
+                ..default()
+            },
+            Transform::from_xyz(-20.0, 30.0, -15.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ));
+    }
+    crate::graphics::spawn_sky(commands, meshes, materials, layout.sky, night, sun_pos);
 
     // Perk machines, turned the way the map says.
     for ((spot, yaw), perk) in layout
@@ -2102,7 +2138,7 @@ pub fn spawn_map(
             &mats,
             perk_art(perk),
             Some(holder),
-            |_| {},
+            outline_solid,
         );
         let light = commands
             .spawn((
@@ -2129,7 +2165,7 @@ pub fn spawn_map(
             Collider { half: BOX_HALF },
         ))
         .id();
-    art_meshes(commands, meshes, &mats, body, Some(root), |_| {});
+    art_meshes(commands, meshes, &mats, body, Some(root), outline_solid);
     let hinge = commands
         .spawn((
             BoxLid,
@@ -2138,7 +2174,7 @@ pub fn spawn_map(
         ))
         .id();
     commands.entity(root).add_child(hinge);
-    art_meshes(commands, meshes, &mats, lid, Some(hinge), |_| {});
+    art_meshes(commands, meshes, &mats, lid, Some(hinge), outline_solid);
     let extras = [
         // A wide soft beam and a bright core, tall enough to see from
         // anywhere on the map.

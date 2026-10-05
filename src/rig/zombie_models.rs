@@ -27,10 +27,7 @@ fn zombie_body(p: &mut Parts, pal: &ZPal, bulk: f32, bare_feet: [bool; 2]) {
     p.k(Bone::Pelvis)
         .blob(v(0.0, -0.02, 0.0), v(0.18, 0.12, 0.13) * bulk, pal.pants);
     let s = Bone::Spine;
-    p.k(s)
-        .blob(v(0.0, 0.1, 0.0), v(0.16, 0.16, 0.12) * bulk, pal.shirt);
-    p.k(s)
-        .blob(v(0.0, 0.33, 0.0), v(0.23, 0.2, 0.14) * bulk, pal.shirt);
+    torso(p, pal.shirt, bulk);
     p.k(s).cyl(
         v(0.0, 0.52, 0.0),
         0.06 * bulk,
@@ -59,20 +56,21 @@ fn zombie_body(p: &mut Parts, pal: &ZPal, bulk: f32, bare_feet: [bool; 2]) {
         // Torn sleeve stub, then bare arm.
         p.k(u)
             .blob(v(0.0, -0.03, 0.0), v(0.085, 0.09, 0.085) * bulk, pal.shirt);
-        p.k(u).capsule_between(
+        p.k(u).capsule_tapered(
             v(0.0, -0.05, 0.0),
-            v(0.0, -0.27, 0.0),
-            0.05 * bulk,
+            v(0.0, -0.28, 0.0),
+            0.058 * bulk,
+            0.046 * bulk,
             pal.skin,
         );
         p.k(u)
             .blob(v(x * 0.02, -0.15, -0.03), v(0.03, 0.05, 0.02), dark_skin);
         let f = Bone::Forearm(side);
-        p.k(f).sphere(v(0.0, 0.0, 0.0), 0.047 * bulk, pal.skin);
-        p.k(f).capsule_between(
-            v(0.0, -0.02, 0.0),
+        p.k(f).capsule_tapered(
+            v(0.0, -0.01, 0.0),
             v(0.0, -0.23, 0.0),
-            0.043 * bulk,
+            0.05 * bulk,
+            0.037 * bulk,
             pal.skin,
         );
         // A wound on the forearm.
@@ -88,22 +86,25 @@ fn zombie_body(p: &mut Parts, pal: &ZPal, bulk: f32, bare_feet: [bool; 2]) {
             pal.skin,
         );
         let t = Bone::Thigh(side);
-        p.k(t).capsule_between(
+        p.k(t).capsule_tapered(
             v(0.0, -0.02, 0.0),
-            v(0.0, -0.42, 0.0),
-            0.075 * bulk,
+            v(0.0, -0.43, 0.0),
+            0.083 * bulk,
+            0.06 * bulk,
             pal.pants,
         );
         p.k(t)
             .blob(v(x * 0.03, -0.25, -0.06), v(0.03, 0.05, 0.02), BLOOD);
         let n = Bone::Shin(side);
-        p.k(n).sphere(v(0.0, 0.0, 0.0), 0.064 * bulk, pal.pants);
-        p.k(n).capsule_between(
-            v(0.0, -0.02, 0.0),
+        p.k(n).capsule_tapered(
+            v(0.0, 0.0, 0.0),
             v(0.0, -0.3, 0.0),
-            0.06 * bulk,
+            0.058 * bulk,
+            0.047 * bulk,
             pal.pants,
         );
+        p.k(n)
+            .blob(v(0.0, -0.12, 0.014), v(0.056, 0.09, 0.056) * bulk, pal.pants);
         // Shredded trouser ends.
         for i in 0..5 {
             let a = i as f32 / 5.0 * std::f32::consts::TAU + side as f32;
@@ -118,10 +119,11 @@ fn zombie_body(p: &mut Parts, pal: &ZPal, bulk: f32, bare_feet: [bool; 2]) {
                 pal.pants,
             );
         }
-        p.k(n).capsule_between(
+        p.k(n).capsule_tapered(
             v(0.0, -0.3, 0.0),
             v(0.0, -0.42, 0.0),
             0.045 * bulk,
+            0.037 * bulk,
             pal.skin,
         );
         if bare_feet[side] {

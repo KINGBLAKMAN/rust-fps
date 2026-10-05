@@ -36,8 +36,8 @@ impl Kit {
     /// A kit that builds round shapes with many more segments.
     pub fn fine() -> Self {
         Self {
-            mesh: None,
             fine: true,
+            ..default()
         }
     }
 
@@ -60,7 +60,24 @@ impl Kit {
         if mesh.attribute(Mesh::ATTRIBUTE_UV_0).is_none() {
             mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0f32, 0.0]; n]);
         }
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![lin(color); n]);
+        // A few percent lighter or darker per part, so rows of boards and
+        // posts aren't all exactly the same.
+        let p = tf.translation * 7.31;
+        let h = ((p.x.floor() as i32).wrapping_mul(73856093)
+            ^ (p.y.floor() as i32).wrapping_mul(19349663)
+            ^ (p.z.floor() as i32).wrapping_mul(83492791)) as u32;
+        let h = (h ^ (h >> 13)).wrapping_mul(1274126177);
+        let jitter = 1.0 + (((h >> 8) & 0xff) as f32 / 255.0 - 0.5) * 0.08;
+        let mut col = lin(color);
+        for ch in &mut col[..3] {
+            *ch *= jitter;
+        }
+        // Metal is marked in the vertex alpha, which solid materials don't
+        // otherwise use; the painted material makes it metallic.
+        if METALS.contains(&color) {
+            col[3] = METAL_ALPHA;
+        }
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![col; n]);
         mesh.transform_by(tf);
         match &mut self.mesh {
             None => self.mesh = Some(mesh),
@@ -284,6 +301,40 @@ impl Kit {
         );
     }
 
+    /// A limb from `a` (radius `r0`) to `b` (radius `r1`): a cone frustum
+    /// with a sphere on each end, so it tapers like a real arm or leg.
+    pub fn capsule_tapered(&mut self, a: Vec3, b: Vec3, r0: f32, r1: f32, color: Color) {
+        let d = b - a;
+        let len = d.length();
+        if len < 1e-4 {
+            self.sphere(a, r0.max(r1), color);
+            return;
+        }
+        self.frustum(
+            (a + b) / 2.0,
+            r1,
+            r0,
+            len,
+            Quat::from_rotation_arc(Vec3::Y, d / len),
+            color,
+        );
+        self.sphere(a, r0, color);
+        self.sphere(b, r1, color);
+    }
+
+    /// Everything added so far, scaled by `scale` about `pivot`.
+    pub fn scaled(self, pivot: Vec3, scale: Vec3) -> Kit {
+        let mut out = Kit {
+            fine: self.fine,
+            ..default()
+        };
+        out.append(
+            self,
+            Transform::from_translation(pivot - pivot * scale).with_scale(scale),
+        );
+        out
+    }
+
     /// Triangular prism (a roof): `size.x` wide at the base, `size.y` tall,
     /// `size.z` deep. The base sits at `center.y - size.y / 2`.
     pub fn wedge(&mut self, center: Vec3, size: Vec3, rot: Quat, color: Color) {
@@ -297,6 +348,23 @@ impl Kit {
             Transform::from_translation(center).with_rotation(rot),
             color,
         );
+    }
+
+    /// Size of the box around everything added so far.
+    pub fn size(&self) -> Vec3 {
+        let Some(VertexAttributeValues::Float32x3(pos)) = self
+            .mesh
+            .as_ref()
+            .and_then(|m| m.attribute(Mesh::ATTRIBUTE_POSITION))
+        else {
+            return Vec3::ZERO;
+        };
+        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+        for p in pos {
+            lo = lo.min(Vec3::from_array(*p));
+            hi = hi.max(Vec3::from_array(*p));
+        }
+        hi - lo
     }
 
     pub fn build(self) -> Option<Mesh> {
@@ -362,6 +430,15 @@ pub fn glass_material() -> StandardMaterial {
         ..default()
     }
 }
+
+/// Vertex alpha that marks a metal part.
+const METAL_ALPHA: f32 = 0.75;
+
+/// Gun metals: parts in these colours are always metal.
+pub const GUNMETAL: Color = c(0.17, 0.18, 0.2);
+pub const STEEL: Color = c(0.42, 0.43, 0.45);
+pub const BRASS: Color = c(0.8, 0.62, 0.25);
+const METALS: [Color; 3] = [GUNMETAL, STEEL, BRASS];
 
 /// Shorthand for an sRGB colour.
 pub const fn c(r: f32, g: f32, b: f32) -> Color {

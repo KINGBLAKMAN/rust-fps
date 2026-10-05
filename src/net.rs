@@ -54,6 +54,9 @@ pub struct Launch {
     pub map: Option<u8>,
     pub start: bool,
     pub error: Option<String>,
+    /// `lookdev`: the view to hold the camera at, and whether it's night.
+    pub lookdev: Option<crate::lookdev::View>,
+    pub night: bool,
 }
 
 pub fn parse_args() -> Launch {
@@ -63,7 +66,10 @@ pub fn parse_args() -> Launch {
         map: None,
         start: false,
         error: None,
+        lookdev: None,
+        night: false,
     };
+    let mut view = crate::lookdev::View::Spawn;
     let mut args = std::env::args().skip(1).peekable();
     let mut positional = Vec::new();
     while let Some(a) = args.next() {
@@ -76,12 +82,23 @@ pub fn parse_args() -> Launch {
                     .map(|m: u8| m.min(2))
             }
             "--start" => launch.start = true,
+            "--night" => launch.night = true,
+            "--view" => {
+                if let Some(v) = args.next().as_deref().and_then(crate::lookdev::View::parse) {
+                    view = v;
+                }
+            }
             _ => positional.push(a),
         }
     }
     launch.mode = match positional.first().map(String::as_str) {
         None => LaunchMode::Menu,
         Some("solo") => LaunchMode::Solo,
+        Some("lookdev") => {
+            launch.lookdev = Some(view);
+            launch.start = true;
+            LaunchMode::Solo
+        }
         Some("host") => match positional.get(1).map(|p| p.parse::<u16>()) {
             None => LaunchMode::Host(DEFAULT_PORT),
             Some(Ok(p)) => LaunchMode::Host(p),
@@ -450,6 +467,9 @@ fn apply_launch(
     session.autostart = launch.start;
     match &launch.mode {
         LaunchMode::Menu => {}
+        LaunchMode::Solo if launch.lookdev.is_some() => {
+            requests.write(PartyRequest::Sandbox);
+        }
         LaunchMode::Solo => {
             requests.write(PartyRequest::Solo);
         }

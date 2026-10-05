@@ -1,6 +1,6 @@
 # Rust FPS
 
-Current version: **v7.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v7); small updates bump the minor number (v7.1, v7.2...).
+Current version: **v8.0** (shown on the main menu and in the window title). Each version is one commit in this repo, its message starting with the version (v1 ... v8); small updates bump the minor number (v8.1, v8.2...).
 
 A co-op zombie-style wave-survival shooter written in Rust with [Bevy](https://bevyengine.org) 0.16. Play solo or with up to 8 friends.
 
@@ -30,13 +30,13 @@ Run the game (`cargo run --release`, or double-click `rust-fps.exe`) and use the
 - **Gun Skins**: pick any gun and put one of your skins on it. It shows in game for you and your party.
 - **Attachment Guide**: every attachment and exactly what it changes, with a tab per slot.
 - **Sandbox**: a practice match with no waves and a tools panel (F1) to spawn zombies, switch on god mode and free abilities, add points, jump rounds and try any gun with any attachments.
-- **Settings**: field of view, mouse sensitivity, volume (master plus guns, enemies, movement, effects and interface), graphics (shadows, smoothed edges, glow, soft corner shading), windowed / borderless / fullscreen, resolution and key remapping.
+- **Settings**: field of view, mouse sensitivity, volume (master plus guns, enemies, movement, effects and interface), graphics (shadows, smoothed edges, glow, soft corner shading, outlines, camera shake, air particles), windowed / borderless / fullscreen, resolution and key remapping.
 
 Before a match you're on the party screen: pick your character, the host picks the map and day or night, friends press Ready and the host presses Start. Friends can also join a match that's already running.
 
 **Playing over the internet:** on the same Wi-Fi it just works. Otherwise the host forwards UDP port 7777 on their router and shares their internet address (the party screen shows it when you click "Click to reveal", so it never appears on stream by accident), or everyone uses a virtual LAN like Tailscale or ZeroTier. Everyone must run the same version. On Windows, allow the game through the firewall when asked.
 
-Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rust-fps join <address>`, plus `--name <name>`, `--map <0-2>` and `--start` (skip the party screen).
+Command-line shortcuts still work: `rust-fps solo`, `rust-fps host [port]`, `rust-fps join <address>`, plus `--name <name>`, `--map <0-2>` and `--start` (skip the party screen). `rust-fps lookdev --map <0-2> [--night] --view <spawn|street|overhead|lineup|side|guns|heads|markers>` holds the camera at a fixed view with the HUD hidden, for comparing screenshots.
 
 ## Controls (default, all remappable)
 
@@ -72,6 +72,8 @@ Each ability can use its own cast mode (Settings > Casting):
 The frag grenade is held in your hand while you aim, for as long as you like: it only arms when it leaves your hand. Every ability has its own first-person animation (Ronin draws a katana for Iaido Slash, Valkyrie raises her spear, Tinker sets the turret down...), and while an ability or ultimate is active a glow in its colour surrounds the caster and the edge of your screen.
 
 ## What you see
+
+Since v8 the game aims to look like a painted illustration: soft warm sunlight with cool shadows, a faint brush grain on every surface, gently muted colour, a gradient sky that fades into the distance, and thin pencil lines round characters and nearby props. Heroes and zombies have realistic proportions. Ability previews and enemy attacks show as soft shapes painted on the ground: blue-grey for where your ability will land, ember red (filling up as it comes) for a Brute's slam or a Shooter's fireball. Hits flash zombies warm white, explosions shake the camera, and dust, pollen, fireflies or ash drift in the air depending on the map. The numbers behind the look are in `docs/art-direction.md`.
 
 Every gun is modelled (23 in all) and held in gloved first-person hands, with animations for equipping, recoil, reloading (the magazine comes out and a fresh one goes in; revolvers, the double barrel and pump shotguns load shell by shell), pumping, sprinting and throwing. Teammates hold the gun they're using. The Twin Fangs are a pair of full-auto SMGs, one in each hand, and both fire on every shot. Abilities have their own effects: dash trails, a grenade with a burning fuse and a fireball explosion with smoke and debris, a healing column, an ice nova with spikes, and an orbital strike with a targeting laser. The mystery box opens its lid and spins through the guns, and flies away when it moves; perk machines are vending machines; power-ups are little models. Every gun has its own recoil pattern and visible attachments, sights line up when you aim, tracers streak and fade, and hits show a hit marker (orange for headshots, red for kills). Zombies fall over with a death animation, and shooting their legs out turns them into crawlers. Everything has sound. The three maps are built room by room, with furnished interiors (offices, kitchens, classrooms, labs, cells, a diner, a museum and more), windows, lamps and roofs.
 
@@ -163,7 +165,12 @@ The host runs the game: rounds, zombies, damage, points, the box and perks. Each
 | `src/config.rs` | Settings, key bindings and the saved profile |
 | `src/progression.rs` | Career levels, unlocks and loadouts |
 | `src/game.rs` | Match start and end, in-game menus, cursor, box visuals, spin rewards |
-| `src/graphics.rs` | Applies the graphics settings and distance haze |
+| `src/graphics.rs` | Applies the graphics settings, tone mapping, colour grading, the sky and distance haze |
+| `src/painted.rs` | The painted material (brush grain, cool shadows, rim light) swapped onto every lit surface |
+| `src/outline.rs` | Pencil outlines (inverted hulls) |
+| `src/markers.rs` | Ground markers for ability previews and enemy warnings |
+| `src/feel.rs` | Camera shake, air particles and the effects warm-up |
+| `src/lookdev.rs` | `rust-fps lookdev` views for checking the art |
 | `src/player.rs` | Camera and movement (sprint, slide, crouch, bunny hop) |
 | `src/weapons.rs` | Two gun slots, firing, recoil, reloading, melee |
 | `src/abilities/` | Ability and buy input, cast modes and charged casts (`mod.rs`), aiming previews (`preview.rs`) |

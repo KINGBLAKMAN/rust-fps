@@ -457,7 +457,10 @@ fn rebuild_ui(
                 settings.shadows,
                 settings.antialias,
                 settings.bloom,
-                settings.ambient_occlusion
+                settings.ambient_occlusion,
+                settings.outlines,
+                settings.camera_shake,
+                settings.particles
             ),
             *spin,
             (profile.character, profile.kit(profile.character), profile.char_level(profile.character)),
@@ -517,7 +520,10 @@ fn rebuild_ui(
                 settings.shadows,
                 settings.antialias,
                 settings.bloom,
-                settings.ambient_occlusion
+                settings.ambient_occlusion,
+                settings.outlines,
+                settings.camera_shake,
+                settings.particles
             ),
             settings.display.name(),
             settings.resolution,
@@ -1245,6 +1251,24 @@ fn settings_body(
                     UiAction::CycleGraphics(3),
                     "Soft shadows in corners and creases (slower; turns anti-aliasing off).",
                 ),
+                (
+                    "Outlines",
+                    on(settings.outlines),
+                    UiAction::CycleGraphics(4),
+                    "Thin drawn lines round characters, zombies and nearby props.",
+                ),
+                (
+                    "Camera shake",
+                    on(settings.camera_shake),
+                    UiAction::CycleGraphics(5),
+                    "Explosions and Brute slams shake the view.",
+                ),
+                (
+                    "Air particles",
+                    on(settings.particles),
+                    UiAction::CycleGraphics(6),
+                    "Dust, pollen or ash drifting in the air.",
+                ),
             ] {
                 row(p, |r| {
                     label(r, format!("{name}:"), 16.0, Color::WHITE);
@@ -1554,7 +1578,7 @@ fn lobby_screen(
 // ---------------------------------------------------------------------------
 
 /// Starts the match straight away when launched with `--start`.
-fn autostart(
+pub fn autostart(
     app_state: Res<State<AppState>>,
     mut session: ResMut<Session>,
     mut state: ResMut<MatchState>,
@@ -1910,6 +1934,9 @@ fn handle_buttons(
                     }
                 }
                 2 => settings.bloom = !settings.bloom,
+                4 => settings.outlines = !settings.outlines,
+                5 => settings.camera_shake = !settings.camera_shake,
+                6 => settings.particles = !settings.particles,
                 _ => {
                     settings.ambient_occlusion = !settings.ambient_occlusion;
                     if settings.ambient_occlusion {
@@ -2130,6 +2157,7 @@ fn menu_scene(
                             crate::data::Attach::NONE,
                             guns.skin(skin),
                             false,
+                            Some(crate::outline::Outline::Figure),
                         );
                     });
             }

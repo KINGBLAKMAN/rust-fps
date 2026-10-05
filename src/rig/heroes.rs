@@ -6,6 +6,48 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use super::{base_body, sx, v, Bone, Palette, Parts};
 use crate::kit::c;
 
+/// Bone structure for a bare face, so a small head doesn't read as a ball:
+/// a brow ridge, cheekbones, a jaw line and chin. `eye_y` is the eye line,
+/// `front` how far forward the face is, `w` its half width.
+fn face_shape(p: &mut Parts, eye_y: f32, front: f32, w: f32, skin: Color) {
+    let n = Bone::Neck;
+    let shade = {
+        let l = skin.to_srgba();
+        c(l.red * 0.92, l.green * 0.9, l.blue * 0.9)
+    };
+    p.k(n).blob(
+        v(0.0, eye_y + 0.022, front + 0.012),
+        v(w * 0.85, 0.014, 0.022),
+        skin,
+    );
+    for x in [-1.0f32, 1.0] {
+        p.k(n).blob(
+            v(x * w * 0.55, eye_y - 0.03, front + 0.018),
+            v(0.028, 0.018, 0.022),
+            skin,
+        );
+        // Jaw line from below the ear to the chin.
+        p.k(n).beam(
+            v(x * w * 0.85, eye_y - 0.04, front + 0.06),
+            v(x * w * 0.3, eye_y - 0.1, front + 0.022),
+            Vec2::new(0.022, 0.026),
+            shade,
+        );
+    }
+    p.k(n).blob(
+        v(0.0, eye_y - 0.105, front + 0.022),
+        v(0.026, 0.02, 0.02),
+        skin,
+    );
+    // Nose bridge.
+    p.k(n).wedge(
+        v(0.0, eye_y - 0.03, front - 0.004),
+        v(0.022, 0.045, 0.018),
+        Quat::from_rotation_x(-FRAC_PI_2) * Quat::from_rotation_z(PI),
+        skin,
+    );
+}
+
 pub(super) fn striker(p: &mut Parts) {
     let blue = c(0.15, 0.35, 0.85);
     let navy = c(0.1, 0.14, 0.26);
@@ -623,6 +665,7 @@ pub(super) fn tinker(p: &mut Parts) {
         v(0.03, 0.025, 0.03),
         c(0.85, 0.62, 0.48),
     );
+    face_shape(p, 0.18, -0.125, 0.1, skin);
     p.k(n).blob(v(0.0, 0.25, 0.0), v(0.145, 0.1, 0.155), yellow);
     p.k(n)
         .cyl(v(0.0, 0.25, 0.0), 0.19, 0.015, Quat::IDENTITY, yellow);
@@ -931,7 +974,7 @@ pub(super) fn valkyrie(p: &mut Parts) {
     p.k(s).blob(v(0.0, 0.33, -0.01), v(0.2, 0.17, 0.13), silver);
     for x in [-0.06, 0.06] {
         p.k(s)
-            .blob(v(x, 0.355, -0.075), v(0.085, 0.07, 0.065), silver);
+            .blob(v(x * 1.1, 0.355, -0.07), v(0.075, 0.062, 0.052), silver);
     }
     p.k(s)
         .blob(v(0.0, 0.35, -0.07), v(0.07, 0.075, 0.06), silver);
@@ -1034,6 +1077,7 @@ pub(super) fn valkyrie(p: &mut Parts) {
         v(0.012, 0.025, 0.01),
         c(0.9, 0.74, 0.64),
     );
+    face_shape(p, 0.168, -0.1, 0.085, skin);
     p.k(n).blob(
         v(0.0, 0.105, -0.1),
         v(0.018, 0.006, 0.006),

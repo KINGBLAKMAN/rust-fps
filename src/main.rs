@@ -16,17 +16,22 @@ mod audio;
 mod config;
 mod data;
 mod emotes;
+mod feel;
 mod fx;
 mod game;
 mod graphics;
 mod hud;
+mod lookdev;
 mod maps;
+mod markers;
 mod models;
 // Shorter paths for the most used pieces of the map and model folders.
 use fx::auras;
 use maps::{nav, props, strips};
 use models::{avatars, gunmodels, hands, humanoid, kit, skins};
 mod net;
+mod outline;
+mod painted;
 mod physics;
 mod pings;
 mod player;
@@ -565,6 +570,13 @@ fn main() {
         humanoid::HumanoidPlugin,
         fx::FxPlugin,
         hud::HudPlugin,
+        (
+            lookdev::LookdevPlugin,
+            painted::PaintedPlugin,
+            outline::OutlinePlugin,
+            markers::MarkersPlugin,
+            feel::FeelPlugin,
+        ),
         gunmodels::GunModelPlugin,
         viewmodel::ViewModelPlugin,
     ))

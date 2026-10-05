@@ -11,6 +11,7 @@ Rust FPS: a co-op zombie wave-survival shooter in Rust with Bevy 0.16. Solo, or 
 - `cargo run` for a debug build (optimised enough to play). `cargo build --release` for a real build.
 - Windows exe for Jonah (no MSVC on their PC): `cargo build --release --target x86_64-pc-windows-gnu`, then `x86_64-w64-mingw32-strip`.
 - Command line: `rust-fps solo --start --map 0|1|2` skips the menus. Also `host [port]` and `join <address>`.
+- `rust-fps lookdev --map N [--night] --view spawn|street|overhead|lineup|side|guns|heads|markers` holds the camera still with the HUD hidden. Use it for before and after screenshots of art changes; `docs/art-direction.md` has the look's numbers.
 - Save data goes in `%APPDATA%\RustFPS` or `~/.config/rust-fps`. Set `RUST_FPS_DATA=<dir>` to use a throwaway folder when testing.
 
 ## Versions and releases

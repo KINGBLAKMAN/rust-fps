@@ -532,7 +532,8 @@ fn rebuild(
             continue;
         }
         commands.entity(e).with_children(|p| {
-            spawn_gun(p, &guns, gun, attach, skin.clone(), true);
+            // No outline on your own gun: it only made it look dirty.
+            spawn_gun(p, &guns, gun, attach, skin.clone(), true, None);
             if pivot.0 == 0 || def.rig.dual {
                 p.spawn((
                     Flash(pivot.0),
@@ -1368,4 +1369,3 @@ fn muzzle_light(
         light.color = anim.light.2;
     }
 }
-
