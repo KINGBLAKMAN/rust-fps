@@ -118,13 +118,18 @@ pub enum Fx {
         dir: [f32; 3],
         range: f32,
     },
-    /// A lasting area effect: 0 blade storm, 1 tesla field, 2 fire pool,
-    /// 3 inferno. `follow` is a player id (255 stays put).
+    /// A lasting area effect (see `sim::powers::zone` for the kinds).
+    /// `follow` is a player id (255 stays put).
     Zone {
         pos: [f32; 3],
         radius: f32,
         life: f32,
         follow: u8,
+        kind: u8,
+    },
+    /// A zone of this kind at `pos` was used up early (Catalyst).
+    ZoneEnd {
+        pos: [f32; 3],
         kind: u8,
     },
     /// A player used an ability (for their cast animation and aura).

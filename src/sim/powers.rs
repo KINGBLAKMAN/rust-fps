@@ -1,6 +1,7 @@
 //! What every ability does on the host, plus the things abilities leave
-//! behind: projectiles, grenades, mines, turrets and drones, delayed strikes
-//! and the pull/push areas zombies feel.
+//! behind: darts, chains and bombs, thrown canisters, claymores and traps,
+//! the med drone and spectral warriors, delayed strikes and the pull/push
+//! areas zombies feel.
 
 use bevy::prelude::*;
 use rand::Rng;
@@ -9,40 +10,75 @@ use super::{
     enemy_scale, explode, level_multiplier, DamageEvent, DamageQueue, EnemyBrain, Strikes, Zone,
     Zones,
 };
+use crate::abilities::{move_time, DASH_SPEED, GRAPPLE_RANGE};
 use crate::data::{elements_in, Ability, Element};
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
 use crate::physics::{collect_boxes, line_of_sight, ray_world, Boxes};
 use crate::{Collider, MatchState, NetKind, Replicated, Roster};
 
-/// Projectile looks (`NetKind::Missile`): crescent cuts in three sizes, then
-/// the rest.
+/// Projectile and gadget looks (`NetKind::Missile`).
 pub mod look {
-    pub const CRESCENT: u8 = 0;
-    pub const KUNAI: u8 = 3;
-    pub const ROCKET: u8 = 4;
-    pub const FIREBALL: u8 = 5;
-    pub const CRYO: u8 = 6;
-    pub const BOMBLET: u8 = 7;
-    pub const SMOKE: u8 = 8;
-    pub const GRAV: u8 = 9;
+    /// Medic's neurotoxin dart.
+    pub const DART: u8 = 0;
+    /// Demolisher's sticky bomb.
+    pub const STICKY: u8 = 1;
+    /// Medic's healing canister.
+    pub const MEDKIT: u8 = 2;
+    /// Chemist's acid flask.
+    pub const FLASK: u8 = 3;
+    /// Ranger's bear trap (thrown, then lying open).
+    pub const TRAP: u8 = 4;
+    /// Demolisher's claymore.
+    pub const CLAYMORE: u8 = 5;
+    pub const LAST: u8 = CLAYMORE;
 }
 
 /// Things falling from the sky (`Fx::Falling`).
 pub mod falling {
+    /// Payload's huge bomb.
     pub const BOMB: u8 = 0;
-    pub const SHELL: u8 = 1;
-    pub const METEOR: u8 = 2;
-    pub const SPEAR: u8 = 3;
+    /// Arrow Storm.
+    pub const ARROW: u8 = 1;
 }
 
-/// Zone kinds (`Fx::Zone`): 0 blade storm, 1 tesla, 2 fire pool, 3 inferno,
-/// 4 Ragnarok, then these.
+/// Zone kinds (`Fx::Zone`).
 pub mod zone {
-    pub const DOME: u8 = 5;
-    pub const BLIZZARD: u8 = 6;
-    pub const SMOKE: u8 = 7;
-    pub const SINGULARITY: u8 = 8;
+    /// Bulwark's Fortress: a golden aura that follows them.
+    pub const FORTRESS: u8 = 0;
+    /// Medic's healing mist.
+    pub const HEAL: u8 = 1;
+    /// A pool of fire (Dragon's Breath and the like).
+    pub const FIRE: u8 = 2;
+    /// Revenant's Reaper: spectral scythes whirling round them.
+    pub const REAPER: u8 = 3;
+    /// Chemist's acid pool.
+    pub const ACID: u8 = 4;
+    /// Chemist's toxic cloud.
+    pub const TOXIC: u8 = 5;
+    /// Chemist's Plague Bloom: spreads at `PLAGUE_GROW` up to `PLAGUE_MAX`.
+    pub const PLAGUE: u8 = 6;
 }
+
+pub const PLAGUE_START: f32 = 3.0;
+pub const PLAGUE_GROW: f32 = 1.0;
+pub const PLAGUE_MAX: f32 = 12.0;
+
+/// Extra bits in a damage event's element mask (above the real elements)
+/// for what abilities do to zombies.
+pub mod effect {
+    /// Poisons: damage over time and a short slow.
+    pub const POISON: u8 = 1 << 5;
+    /// Hunter's Mark.
+    pub const MARK: u8 = 1 << 6;
+    /// Heals whoever dealt it (`DRAIN_FRACTION` of the damage).
+    pub const DRAIN: u8 = 1 << 7;
+}
+
+/// Hunter's Mark: how long it lasts and the extra damage taken.
+pub const MARK_TIME: f32 = 8.0;
+pub const MARK_BONUS: f32 = 1.5;
+/// Share of scythe damage the Revenant gets back as health.
+pub const DRAIN_FRACTION: f32 = 0.12;
 
 /// A hit that lands after a delay.
 pub struct Strike {
@@ -53,7 +89,7 @@ pub struct Strike {
     pub damage: f32,
     pub elements: u8,
     pub stun: f32,
-    /// Hits this one enemy wherever it has got to (Thousand Cuts).
+    /// Hits this one enemy wherever it has got to (Deadeye, Petrify).
     pub target: Option<Entity>,
     /// Shown when it lands (for a target, at the target).
     pub fx: Option<Fx>,
@@ -84,20 +120,24 @@ pub struct Force {
     pub radius: f32,
     pub strength: f32,
     pub life: f32,
+    /// Only this zombie feels it (Soul Chains).
+    pub only: Option<Entity>,
 }
 
 #[derive(Resource, Default)]
 pub struct Forces(pub Vec<Force>);
 
-/// What a thrown grenade does when it goes off.
+/// What a thrown thing does when it lands.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Nade {
-    Frag,
-    Fire,
-    Cluster,
-    Smoke,
-    Grav,
-    Mine,
+    /// Sticks to the first zombie or surface and blows when the fuse runs out.
+    Sticky,
+    /// Bursts into a healing mist.
+    Heal,
+    /// Shatters into an acid pool.
+    Acid,
+    /// Lands and lies open as a bear trap.
+    Trap,
 }
 
 #[derive(Component)]
@@ -109,9 +149,32 @@ pub struct GrenadeBrain {
     pub radius: f32,
     pub elements: u8,
     pub kind: Nade,
+    /// What a sticky bomb is stuck to, and where on it.
+    pub stuck: Option<(Entity, Vec3)>,
+    pub landed: bool,
+    /// How long a bear trap holds its zombie.
+    pub stun: f32,
 }
 
-/// Tinker's sentry turret, or the combat drone when it follows a player.
+impl GrenadeBrain {
+    fn new(owner: u8, velocity: Vec3, fuse: f32, damage: f32, radius: f32, elements: u8, kind: Nade) -> Self {
+        Self {
+            owner,
+            velocity,
+            fuse,
+            damage,
+            radius,
+            elements,
+            kind,
+            stuck: None,
+            landed: false,
+            stun: 0.0,
+        }
+    }
+}
+
+/// The Medic's drone (follows its owner, heals and zaps), or one of the
+/// Revenant's spectral warriors (`wraith`: chases zombies and cuts them).
 #[derive(Component)]
 pub struct TurretBrain {
     pub owner: u8,
@@ -120,6 +183,20 @@ pub struct TurretBrain {
     pub damage: f32,
     pub elements: u8,
     pub follow: Option<u8>,
+    /// Heals players near the owner by this much a second.
+    pub heal: f32,
+    pub heal_timer: f32,
+    pub wraith: bool,
+    /// Where a warrior waits beside its owner (0-3).
+    pub slot: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MineKind {
+    /// Blasts a cone toward `facing`.
+    Claymore,
+    /// Snaps on one zombie and holds it.
+    Trap,
 }
 
 #[derive(Component)]
@@ -130,14 +207,17 @@ pub struct MineBrain {
     damage: f32,
     radius: f32,
     elements: u8,
+    kind: MineKind,
+    facing: Vec3,
+    stun: f32,
 }
 
 /// What a projectile does when it stops.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum End {
     Fizzle,
-    FirePool,
-    Shatter,
+    /// Neurotoxin: the poison jumps to zombies nearby.
+    Spread,
 }
 
 #[derive(Component)]
@@ -158,9 +238,6 @@ pub struct Missile {
     blast_damage: f32,
     /// Turns toward enemies ahead.
     homing: f32,
-    /// Chills enemies this close as it passes (Cryo Orb).
-    chill: f32,
-    chill_timer: f32,
     end: End,
     color: [f32; 3],
 }
@@ -181,8 +258,6 @@ impl Missile {
             blast: 0.0,
             blast_damage: 0.0,
             homing: 0.0,
-            chill: 0.0,
-            chill_timer: 0.0,
             end: End::Fizzle,
             color: [1.0, 0.6, 0.2],
         }
@@ -272,6 +347,35 @@ impl World<'_, '_, '_> {
         aim_ground(origin, dir, range, self.boxes)
     }
 
+    /// Enemies in a cone: within `range` of `origin` and `cos` of `dir`
+    /// (or right on top of you), that you can see.
+    fn cone(&self, origin: Vec3, dir: Vec3, range: f32, cos: f32) -> Vec<(Entity, Vec3)> {
+        self.enemies
+            .iter()
+            .filter(|(_, p)| {
+                let to = *p + Vec3::Y - origin;
+                let d = to.length();
+                d < range && (d < 2.0 || to.normalize().dot(dir) > cos) && line_of_sight(origin, *p + Vec3::Y, self.boxes)
+            })
+            .copied()
+            .collect()
+    }
+
+    /// Enemies within `width` of the line from `a` to `b` (flat).
+    fn along(&self, a: Vec3, b: Vec3, width: f32) -> Vec<(Entity, Vec3)> {
+        let (a, b) = (a.with_y(0.0), b.with_y(0.0));
+        let ab = b - a;
+        self.enemies
+            .iter()
+            .filter(|(_, p)| {
+                let q = p.with_y(0.0);
+                let t = ((q - a).dot(ab) / ab.length_squared().max(1e-4)).clamp(0.0, 1.0);
+                q.distance(a + ab * t) < width
+            })
+            .copied()
+            .collect()
+    }
+
     /// Enemies within `radius` of `pos` (on the ground plane).
     fn near(&self, pos: Vec3, radius: f32) -> Vec<(Entity, Vec3)> {
         self.enemies
@@ -314,6 +418,9 @@ fn zone(owner: u8, pos: Vec3, radius: f32, damage: f32, interval: f32, life: f32
         elements: 0,
         kind: 0,
         model: None,
+        heal: 0.0,
+        grow: 0.0,
+        max_radius: radius,
     }
 }
 
@@ -331,8 +438,9 @@ fn fan(dir: Vec3, count: usize, angle: f32) -> Vec<Vec3> {
         .collect()
 }
 
+
 /// Does the ability: player `id` casts their ability in `slot`, looking from
-/// `origin` along `dir`, charged up to `charge` (0 to 1).
+/// `origin` along `dir`, charged up to `charge` (0 to 1, unused since v12).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn cast(
     w: &mut World,
@@ -341,8 +449,9 @@ pub(super) fn cast(
     slot: u8,
     origin: Vec3,
     dir: Vec3,
-    charge: f32,
+    _charge: f32,
 ) {
+    use effect::{DRAIN, MARK, POISON};
     let Some(p) = roster.0.get(&id) else { return };
     let ability = p.kit[slot as usize];
     let tier = p.tiers[slot as usize] as f32;
@@ -354,662 +463,493 @@ pub(super) fn cast(
     let hand = origin + dir * 0.6 - Vec3::Y * 0.2;
     let mut rng = rand::thread_rng();
     let fire = el | Element::Fire.bit();
-    let ice = el | Element::Ice.bit();
-    let shock = el | Element::Shock.bit();
     let throw = |speed: f32| dir * speed + Vec3::Y * crate::abilities::GRENADE_LIFT;
+    let dash_end = |w: &World| {
+        let len = DASH_SPEED * move_time(ability, tier);
+        let dist = ray_world(feet + Vec3::Y * 0.5, flat, len, w.boxes);
+        feet + flat * (dist - 0.4).max(0.0)
+    };
     use Ability as A;
     match ability {
-        // --- Striker ---------------------------------------------------------
-        A::Dash => {
-            // The dash itself is done locally; everyone else sees the streak.
-            let b = feet + flat * 22.0 * (0.18 + 0.03 * tier);
-            w.send(Fx::Dash {
-                player: id,
-                a: feet.to_array(),
-                b: b.to_array(),
-            });
-            w.spell(ability, feet, flat, 1.0);
-        }
-        A::FragGrenade | A::ClusterGrenade => {
-            let cluster = ability == A::ClusterGrenade;
-            w.nade(
-                NetKind::Grenade,
-                origin + dir * 0.6,
-                GrenadeBrain {
-                    owner: id,
-                    velocity: throw(crate::abilities::GRENADE_SPEED),
-                    fuse: crate::abilities::GRENADE_FUSE,
-                    damage: if cluster { 90.0 + 35.0 * tier } else { 150.0 + 60.0 * tier } * mult,
-                    radius: if cluster { 3.5 } else { 4.0 + 0.5 * tier },
-                    elements: el,
-                    kind: if cluster { Nade::Cluster } else { Nade::Frag },
-                },
-            );
-        }
-        A::Overdrive => {
-            if let Some(p) = roster.0.get_mut(&id) {
-                p.overdrive = 8.0 + 2.0 * tier;
-            }
-            w.spell(ability, feet, flat, 1.0);
-        }
-        A::RocketBarrage => {
-            for (i, d) in fan(dir, 6, 0.7).into_iter().enumerate() {
-                let lift = Vec3::Y * (0.08 + 0.05 * (i % 2) as f32);
-                let mut m = Missile::new(id, (d + lift) * 30.0, 1.3, 0.0, el);
-                m.blast = 2.8;
-                m.blast_damage = (70.0 + 28.0 * tier) * mult;
-                m.homing = 3.0;
-                m.color = [1.0, 0.55, 0.2];
-                w.missile(look::ROCKET, hand + right * 0.1, m);
-            }
-            w.spell(ability, hand, dir, 1.0);
-        }
-        A::Airstrike => {
-            // Jets come in over your shoulder and walk bombs along the line.
-            let start = w.aim_ground(origin, dir, 18.0);
-            let len = 26.0;
-            w.spell(ability, start, flat, len);
-            for i in 0..12 {
-                let at = start + flat * (i as f32 * len / 11.0)
-                    + right * rng.gen_range(-2.0..2.0);
-                let delay = 1.1 + i as f32 * 0.09;
-                w.emit(Fx::Falling {
-                    kind: falling::BOMB,
-                    from: (at - flat * 10.0 + Vec3::Y * 22.0).to_array(),
-                    to: at.to_array(),
-                    time: delay,
+        // --- Bulwark ---------------------------------------------------------
+        A::ShieldCharge => {
+            // The charge itself is done locally; bowl over everything on
+            // the way and shove it aside.
+            let end = dash_end(w);
+            let dmg = (90.0 + 35.0 * tier) * mult;
+            for (e, pos) in w.along(feet, end, 1.9) {
+                w.hit(e, dmg, id, el, 1.2 + 0.15 * tier);
+                let side = if right.dot(pos - feet) >= 0.0 { 1.0 } else { -1.0 };
+                w.forces.0.push(Force {
+                    pos: pos - right * side,
+                    radius: 3.0,
+                    strength: -14.0,
+                    life: 0.35,
+                    only: Some(e),
                 });
-                let mut s = Strike::new(id, at, delay, 4.0, 320.0 * mult, el);
-                s.fx = Some(blast(at, 4.0, [1.0, 0.55, 0.15]));
-                w.strike(s);
             }
-        }
-        A::CombatStim => {
             if let Some(p) = roster.0.get_mut(&id) {
-                p.stim = 6.0 + 2.0 * tier;
-                p.health = (p.health + p.max_health() * 0.5).min(p.max_health());
-            }
-            w.spell(ability, feet, flat, 1.0);
-        }
-
-        // --- Warden ----------------------------------------------------------
-        A::HealPulse => {
-            let heal = 40.0 + 20.0 * tier;
-            for other in roster.0.values_mut() {
-                if other.alive && other.feet().distance(feet) < 8.0 {
-                    other.health = (other.health + heal).min(other.max_health());
-                }
-            }
-            w.emit(Fx::Heal {
-                pos: feet.to_array(),
-                radius: 8.0,
-            });
-        }
-        A::FrostNova => {
-            let dmg = (40.0 + 30.0 * tier) * mult;
-            for (e, _) in w.near(feet, 7.0) {
-                w.hit(e, dmg, id, ice, 0.8);
-            }
-            w.emit(Fx::Nova {
-                pos: feet.to_array(),
-                radius: 7.0,
-            });
-        }
-        A::OrbitalStrike => {
-            let target = w.aim_ground(origin, dir, 80.0);
-            let radius = 9.0 + tier;
-            w.strike(Strike::new(id, target, 1.2, radius, 3000.0 * mult, el));
-            w.emit(Fx::Beam {
-                pos: target.to_array(),
-                radius,
-                delay: 1.2,
-            });
-        }
-        A::GlacierSpike => {
-            // A wave of ice tearing along the ground, freezing what it hits.
-            let len = 16.0 + 2.0 * tier;
-            let dist = ray_world(feet + Vec3::Y * 0.5, flat, len, w.boxes);
-            let dmg = (110.0 + 45.0 * tier) * mult;
-            let steps = (dist / 1.6).ceil().max(1.0) as usize;
-            for i in 1..=steps {
-                let d = i as f32 * dist / steps as f32;
-                let mut s = Strike::new(id, feet + flat * d, d / 40.0, 1.9, dmg, ice);
-                s.stun = 1.6 + 0.3 * tier;
-                w.strike(s);
-            }
-            // One hit per enemy: the strikes overlap, so share the damage.
-            for s in w.strikes.0.iter_mut().rev().take(steps) {
-                s.damage *= 0.55;
-            }
-            w.spell(ability, feet, flat, dist);
-        }
-        A::BarrierDome => {
-            let life = 8.0 + 1.5 * tier;
-            let radius = 5.0;
-            let mut z = zone(id, feet, radius, 10.0 + 4.0 * tier, 0.5, life);
-            z.kind = zone::DOME;
-            w.zone(z);
-            w.forces.0.push(Force {
-                pos: feet,
-                radius: radius + 0.6,
-                strength: -9.0,
-                life,
-            });
-        }
-        A::Blizzard => {
-            let at = w.aim_ground(origin, dir, 60.0);
-            let mut z = zone(id, at, 9.0, 55.0 * mult, 0.35, 8.0 + tier);
-            z.kind = zone::BLIZZARD;
-            z.elements = ice;
-            w.zone(z);
-        }
-        A::CryoOrb => {
-            let mut m = Missile::new(id, dir * 9.0, 2.4, (60.0 + 20.0 * tier) * mult, ice);
-            m.pierce = true;
-            m.hit_radius = 1.0;
-            m.stun = 0.8;
-            m.chill = 3.5;
-            m.blast = 5.5;
-            m.blast_damage = (140.0 + 50.0 * tier) * mult;
-            m.end = End::Shatter;
-            m.color = [0.5, 0.85, 1.0];
-            w.missile(look::CRYO, hand, m);
-        }
-
-        // --- Ronin -----------------------------------------------------------
-        A::Iaido => {
-            // A flying crescent cut: further, wider and harder the longer
-            // the draw was held.
-            let speed = 38.0;
-            let range = 12.0 + 28.0 * charge + 2.0 * tier;
-            let size = (charge * 2.99) as u8;
-            let mut m = Missile::new(
-                id,
-                dir * speed,
-                range / speed,
-                (150.0 + 60.0 * tier) * (0.6 + 1.4 * charge) * mult,
-                el,
-            );
-            m.pierce = true;
-            m.hit_radius = 1.2 + 1.2 * charge;
-            m.color = [1.0, 0.85, 0.4];
-            w.missile(look::CRESCENT + size, origin + dir * 0.8 - Vec3::Y * 0.25, m);
-            // A point-blank cut too, so it never whiffs up close.
-            let dmg = (100.0 + 40.0 * tier) * mult;
-            for (e, pos) in w.near(feet, 2.6) {
-                if (pos - feet).with_y(0.0).normalize_or_zero().dot(flat) > 0.3 {
-                    w.hit(e, dmg, id, el, 0.0);
-                }
-            }
-            w.spell(ability, origin - Vec3::Y * 0.3, dir, charge);
-        }
-        A::ShadowStep => {
-            // The blink is done locally; cut everything along the path.
-            let len = 22.0 * (0.2 + 0.03 * tier);
-            let end = feet + flat * len;
-            let dmg = (120.0 + 50.0 * tier) * mult;
-            for (e, pos) in w.enemies.to_vec() {
-                let (a, b, q) = (feet.with_y(0.0), end.with_y(0.0), pos.with_y(0.0));
-                let ab = b - a;
-                let t = ((q - a).dot(ab) / ab.length_squared().max(1e-4)).clamp(0.0, 1.0);
-                if q.distance(a + ab * t) < 1.8 {
-                    w.hit(e, dmg, id, el, 0.0);
-                }
+                p.guard = p.guard.max(0.6);
+                p.guard_cut = p.guard_cut.max(0.6);
             }
             w.send(Fx::Dash {
                 player: id,
                 a: feet.to_array(),
                 b: end.to_array(),
             });
-            w.spell(ability, feet, flat, len);
+            w.spell(ability, feet, flat, feet.distance(end));
         }
-        A::BladeStorm => {
-            let life = 6.0 + tier;
-            let mut z = zone(id, feet, 5.0, 70.0 * mult, 0.25, life);
-            z.follow = Some(id);
-            z.elements = el;
-            w.zone(z);
-        }
-        A::KunaiFan => {
-            for d in fan(flat.with_y(dir.y).normalize(), 7, 0.75) {
-                let mut m = Missile::new(id, d * 45.0, 0.65, (70.0 + 25.0 * tier) * mult, el);
-                m.pierce = true;
-                m.hit_radius = 0.6;
-                m.color = [1.0, 0.3, 0.3];
-                w.missile(look::KUNAI, hand, m);
+        A::GroundPound => {
+            let radius = 6.0 + 0.4 * tier;
+            let dmg = (120.0 + 45.0 * tier) * mult;
+            for (e, _) in w.near(feet, radius) {
+                w.hit(e, dmg, id, el, 1.6 + 0.2 * tier);
             }
+            w.spell(ability, feet, flat, radius);
         }
-        A::SmokeBomb => {
-            w.nade(
-                NetKind::Missile(look::SMOKE),
-                origin + dir * 0.6,
-                GrenadeBrain {
-                    owner: id,
-                    velocity: throw(crate::abilities::GRENADE_SPEED),
-                    fuse: 1.2,
-                    damage: (12.0 + 5.0 * tier) * mult,
-                    radius: 5.0 + 0.5 * tier,
-                    elements: el,
-                    kind: Nade::Smoke,
-                },
-            );
-        }
-        A::ThousandCuts => {
-            // Vanish, then cuts land on everything around, one after another.
+        A::Fortress => {
+            let life = 8.0 + tier;
             if let Some(p) = roster.0.get_mut(&id) {
-                p.vanish = 2.2;
+                p.guard = life;
+                p.guard_cut = 0.8;
             }
-            let mut targets = w.near(feet, 15.0);
-            targets.sort_by(|a, b| a.1.distance(feet).total_cmp(&b.1.distance(feet)));
-            let count = targets.len().min(14 + 2 * tier as usize);
-            let dmg = 420.0 * mult;
-            for (i, (e, _)) in targets.into_iter().take(count).enumerate() {
-                for k in 0..2 {
-                    let mut s = Strike::new(id, feet, 0.25 + i as f32 * 0.11 + k as f32 * 0.9, 1.0, dmg * 0.5, el);
-                    s.target = Some(e);
-                    s.stun = 1.0;
-                    s.fx = Some(Fx::Spell {
-                        ability,
-                        pos: [0.0; 3],
-                        dir: (Quat::from_rotation_y(rng.gen_range(0.0..6.3)) * Vec3::X).to_array(),
-                        size: 1.0,
-                    });
-                    w.strike(s);
+            let mut z = zone(id, feet, 5.0, 60.0 * mult, 0.4, life);
+            z.follow = Some(id);
+            z.elements = fire;
+            z.kind = zone::FORTRESS;
+            w.zone(z);
+            w.spell(ability, feet, flat, 5.0);
+        }
+        A::RallyCry => {
+            let radius = 10.0;
+            let time = 6.0 + tier;
+            for other in roster.0.values_mut() {
+                if other.alive && other.feet().distance(feet) < radius {
+                    other.health = (other.health + other.max_health() * (0.3 + 0.05 * tier)).min(other.max_health());
+                    other.guard = other.guard.max(time);
+                    other.guard_cut = other.guard_cut.max(0.4);
+                    other.stim = other.stim.max(time);
                 }
             }
-            // The finishing flourish where you reappear.
-            let mut s = Strike::new(id, feet, 2.1, 6.0, 150.0 * mult, el);
-            s.fx = Some(Fx::Slash {
-                pos: (feet + Vec3::Y * 1.1).to_array(),
-                dir: flat.to_array(),
-                radius: 6.0,
-            });
-            w.strike(s);
+            w.spell(ability, feet, flat, radius);
+        }
+        A::Earthshaker => {
+            // Three shockwaves, each wider than the last.
+            for (i, radius) in [6.0, 10.0, 14.0].into_iter().enumerate() {
+                let delay = 0.15 + 0.55 * i as f32;
+                let mut s = Strike::new(id, feet, delay, radius, 450.0 * mult, el);
+                s.stun = 1.5;
+                s.fx = Some(Fx::Spell {
+                    ability,
+                    pos: feet.to_array(),
+                    dir: flat.to_array(),
+                    size: radius,
+                });
+                w.strike(s);
+            }
             w.spell(ability, feet, flat, 0.0);
         }
-        A::RisingDragon => {
-            // The jump is done locally; launch everything in front.
-            let dmg = (200.0 + 70.0 * tier) * mult;
-            for (e, pos) in w.near(feet, 4.8) {
-                let to = (pos - feet).with_y(0.0);
-                if to.length() < 1.0 || to.normalize().dot(flat) > 0.2 {
-                    w.hit(e, dmg, id, fire, 1.4);
-                }
-            }
-            w.spell(ability, feet, flat, 1.0);
-        }
 
-        // --- Tinker ----------------------------------------------------------
-        A::Sentry => {
-            let dist = ray_world(feet + Vec3::Y * 0.5, flat, 3.0, w.boxes);
-            let at = feet + flat * (dist - 0.6).max(0.3);
-            w.spawn(
-                NetKind::Turret,
-                Transform::from_translation(at).with_rotation(Quat::from_rotation_arc(Vec3::NEG_Z, flat)),
-                TurretBrain {
-                    owner: id,
-                    life: 15.0 + 5.0 * tier,
-                    cooldown: 0.5,
-                    damage: (24.0 + 8.0 * tier) * mult,
-                    elements: el,
-                    follow: None,
-                },
+        // --- Medic -----------------------------------------------------------
+        A::HealingGrenade => {
+            w.nade(
+                NetKind::Missile(look::MEDKIT),
+                origin + dir * 0.6,
+                GrenadeBrain::new(
+                    id,
+                    throw(crate::abilities::GRENADE_SPEED),
+                    1.2,
+                    12.0 + 4.0 * tier,
+                    5.0 + 0.3 * tier,
+                    el,
+                    Nade::Heal,
+                ),
             );
-            w.emit(Fx::Ring {
-                pos: at.to_array(),
-                radius: 1.5,
-                color: [0.3, 0.9, 1.0],
-            });
         }
-        A::SupplyDrop => {
-            let heal = 35.0 + 15.0 * tier;
+        A::NeurotoxinDart => {
+            let mut m = Missile::new(id, dir * 55.0, 0.8, (80.0 + 30.0 * tier) * mult, el | POISON);
+            m.stun = 2.0 + 0.2 * tier;
+            m.hit_radius = 0.4;
+            m.end = End::Spread;
+            m.color = [0.7, 1.0, 0.2];
+            w.missile(look::DART, hand, m);
+        }
+        A::Resurrection => {
             for other in roster.0.values_mut() {
-                if other.alive && other.feet().distance(feet) < 8.0 {
-                    other.health = (other.health + heal).min(other.max_health());
-                    other.supply_seq = other.supply_seq.wrapping_add(1);
+                if !other.alive {
+                    other.alive = true;
+                    let at = other.feet();
+                    w.emit(Fx::Spell {
+                        ability,
+                        pos: at.to_array(),
+                        dir: flat.to_array(),
+                        size: 1.0,
+                    });
                 }
+                other.health = other.max_health();
+                other.guard = other.guard.max(3.0);
+                other.guard_cut = other.guard_cut.max(0.5);
             }
-            w.spell(ability, feet, flat, 8.0);
+            w.spell(ability, feet, flat, 0.0);
         }
-        A::TeslaCoil => {
-            let dist = ray_world(origin, dir, 40.0, w.boxes);
-            let at = origin + dir * (dist - 0.5).max(0.5);
-            let at = if at.y < feet.y + 0.3 { at } else { at.with_y(feet.y) };
-            let at = at.with_y(at.y.max(0.0));
-            let model = w.spawn(NetKind::Coil, Transform::from_translation(at), ());
-            let mut z = zone(id, at, 8.0, 90.0 * mult, 0.4, 10.0 + tier);
-            z.timer = 0.3;
-            z.elements = shock;
-            z.kind = 1;
-            z.model = Some(model);
-            w.zone(z);
-        }
-        A::ProximityMines => {
-            for d in fan(flat, 3, 0.6) {
-                w.nade(
-                    NetKind::Mine,
-                    origin + dir * 0.6,
-                    GrenadeBrain {
-                        owner: id,
-                        velocity: d * 11.0 + Vec3::Y * 4.0,
-                        fuse: 30.0,
-                        damage: (200.0 + 80.0 * tier) * mult,
-                        radius: 4.0,
-                        elements: el,
-                        kind: Nade::Mine,
-                    },
-                );
-            }
-        }
-        A::CombatDrone => {
+        A::MedDrone => {
             w.spawn(
                 NetKind::Drone,
                 Transform::from_translation(feet + Vec3::Y * 2.2 + right * 0.8),
                 TurretBrain {
                     owner: id,
-                    life: 15.0 + 5.0 * tier,
+                    life: 18.0 + 4.0 * tier,
                     cooldown: 0.3,
-                    damage: (20.0 + 7.0 * tier) * mult,
+                    damage: (14.0 + 5.0 * tier) * mult,
                     elements: el,
                     follow: Some(id),
+                    heal: 8.0 + 3.0 * tier,
+                    heal_timer: 0.5,
+                    wraith: false,
+                    slot: 0,
                 },
             );
             w.emit(Fx::Ring {
                 pos: (feet + Vec3::Y * 2.0).to_array(),
                 radius: 1.2,
-                color: [0.3, 1.0, 0.8],
+                color: [0.4, 1.0, 0.8],
             });
         }
-        A::MortarBattery => {
-            let center = w.aim_ground(origin, dir, 60.0);
-            let radius = 9.0;
-            w.spell(ability, center, flat, radius);
-            for i in 0..18 {
-                let ang = rng.gen_range(0.0..std::f32::consts::TAU);
-                let r = radius * rng.gen_range(0.0f32..1.0).sqrt();
-                let at = center + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
-                let delay = 1.0 + i as f32 * 0.26 + rng.gen_range(0.0..0.15);
-                w.emit(Fx::Falling {
-                    kind: falling::SHELL,
-                    from: (at + Vec3::Y * 30.0).to_array(),
-                    to: at.to_array(),
-                    time: delay,
-                });
-                let mut s = Strike::new(id, at, delay, 3.2, 200.0 * mult, el);
-                s.fx = Some(blast(at, 3.2, [1.0, 0.7, 0.3]));
+        A::Sterilize => {
+            let radius = 16.0;
+            for (e, pos) in w.near(feet, radius) {
+                // The wave reaches the far ones a moment later.
+                let mut s = Strike::new(id, pos, pos.distance(feet) / 30.0, 0.5, 700.0 * mult, el);
+                s.target = Some(e);
+                s.stun = 1.0;
                 w.strike(s);
             }
-        }
-        A::GravGrenade => {
-            w.nade(
-                NetKind::Missile(look::GRAV),
-                origin + dir * 0.6,
-                GrenadeBrain {
-                    owner: id,
-                    velocity: throw(crate::abilities::GRENADE_SPEED),
-                    fuse: 1.0,
-                    damage: (240.0 + 90.0 * tier) * mult,
-                    radius: 6.5,
-                    elements: el,
-                    kind: Nade::Grav,
-                },
-            );
+            w.spell(ability, feet, flat, radius);
         }
 
-        // --- Blaze -----------------------------------------------------------
-        A::Firebomb => {
-            w.nade(
-                NetKind::Firebomb,
-                origin + dir * 0.6,
-                GrenadeBrain {
-                    owner: id,
-                    velocity: throw(crate::abilities::GRENADE_SPEED),
-                    fuse: crate::abilities::GRENADE_FUSE,
-                    damage: (60.0 + 20.0 * tier) * mult,
-                    radius: 4.0 + 0.5 * tier,
-                    elements: fire,
-                    kind: Nade::Fire,
-                },
-            );
-        }
-        A::FlameWave => {
-            let range = 8.0 + tier;
-            let dmg = (70.0 + 30.0 * tier) * mult;
-            for (e, pos) in w.enemies.to_vec() {
-                let to = pos + Vec3::Y - origin;
-                let d = to.length();
-                if d < range && (d < 1.0 || to.normalize().dot(dir) > 0.8) {
-                    w.hit(e, dmg, id, fire, 0.0);
-                }
+        // --- Revenant --------------------------------------------------------
+        A::ScytheSweep => {
+            let radius = 4.5 + 0.3 * tier;
+            let dmg = (110.0 + 40.0 * tier) * mult;
+            for (e, _) in w.near(feet, radius) {
+                w.hit(e, dmg, id, el | DRAIN, 0.3);
             }
-            w.emit(Fx::Cone {
-                pos: (origin + dir * 0.5 - Vec3::Y * 0.2).to_array(),
-                dir: dir.to_array(),
-                range,
-            });
+            w.spell(ability, feet + Vec3::Y * 1.0, flat, radius);
         }
-        A::Inferno => {
-            let mut z = zone(id, feet, 6.0, 50.0 * mult, 0.3, 8.0 + tier);
+        A::SoulChains => {
+            // Chains lash out to the closest zombies in front and haul them in.
+            let mut caught = w.cone(origin, dir, 15.0, 0.85);
+            caught.sort_by(|a, b| a.1.distance(feet).total_cmp(&b.1.distance(feet)));
+            let dmg = (60.0 + 25.0 * tier) * mult;
+            for (e, pos) in caught.into_iter().take(5 + tier as usize / 2) {
+                w.hit(e, dmg, id, el, 1.5 + 0.2 * tier);
+                w.forces.0.push(Force {
+                    pos: feet + flat * 1.2,
+                    radius: 20.0,
+                    strength: 18.0,
+                    life: (pos.distance(feet) / 18.0).clamp(0.15, 0.8),
+                    only: Some(e),
+                });
+                let chest = pos + Vec3::Y * 1.1;
+                w.spell(ability, hand, chest - hand, 1.0);
+            }
+            if w.cone(origin, dir, 15.0, 0.85).is_empty() {
+                // A miss still shows the chains lashing out.
+                let reach = ray_world(origin, dir, 15.0, w.boxes);
+                w.spell(ability, hand, dir * reach, 0.0);
+            }
+        }
+        A::Reaper => {
+            let life = 7.0 + tier;
+            let mut z = zone(id, feet, 5.5, 90.0 * mult, 0.3, life);
             z.follow = Some(id);
-            z.elements = fire;
-            z.kind = 3;
+            z.elements = el | DRAIN;
+            z.kind = zone::REAPER;
             w.zone(z);
         }
-        A::Fireball => {
-            let mut m = Missile::new(id, dir * 26.0, 1.6, 0.0, fire);
-            m.hit_radius = 0.8;
-            m.blast = 4.5;
-            m.blast_damage = (160.0 + 60.0 * tier) * mult;
-            m.end = End::FirePool;
-            m.color = [1.0, 0.5, 0.12];
-            w.missile(look::FIREBALL, hand, m);
-            w.spell(ability, hand, dir, 1.0);
-        }
-        A::FlameDash => {
-            // The dash is done locally; the path is left burning.
-            let len = 22.0 * (0.22 + 0.03 * tier);
-            let end = feet + flat * len;
-            let dmg = (60.0 + 25.0 * tier) * mult;
-            for (e, pos) in w.enemies.to_vec() {
-                let (a, b, q) = (feet.with_y(0.0), end.with_y(0.0), pos.with_y(0.0));
-                let ab = b - a;
-                let t = ((q - a).dot(ab) / ab.length_squared().max(1e-4)).clamp(0.0, 1.0);
-                if q.distance(a + ab * t) < 1.8 {
-                    w.hit(e, dmg, id, fire, 0.0);
-                }
+        A::WraithStep => {
+            // The drift is done locally; you're mist for a moment, and
+            // everything you pass through is chilled to the bone.
+            let end = dash_end(w);
+            let dmg = (50.0 + 20.0 * tier) * mult;
+            for (e, _) in w.along(feet, end, 1.6) {
+                w.hit(e, dmg, id, el, 0.8);
             }
-            for i in 0..4 {
-                let at = feet.lerp(end, (i as f32 + 0.5) / 4.0).with_y(0.0);
-                let mut z = zone(id, at, 1.8, 18.0 * mult, 0.3, 4.0 + tier);
-                z.elements = fire;
-                z.kind = 2;
-                w.zone(z);
+            if let Some(p) = roster.0.get_mut(&id) {
+                p.vanish = p.vanish.max(1.2 + 0.1 * tier);
             }
             w.send(Fx::Dash {
                 player: id,
                 a: feet.to_array(),
                 b: end.to_array(),
             });
-            w.spell(ability, feet, flat, len);
+            w.spell(ability, feet, flat, feet.distance(end));
         }
-        A::MeteorShower => {
-            let center = w.aim_ground(origin, dir, 60.0);
-            let radius = 10.0;
-            for i in 0..12 {
-                let ang = rng.gen_range(0.0..std::f32::consts::TAU);
-                let r = radius * rng.gen_range(0.0f32..1.0).sqrt();
-                let at = center + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
-                let delay = 0.8 + i as f32 * 0.33 + rng.gen_range(0.0..0.2);
-                let side = Vec3::new(rng.gen_range(-1.0..1.0), 0.0, rng.gen_range(-1.0..1.0));
-                w.emit(Fx::Falling {
-                    kind: falling::METEOR,
-                    from: (at + side * 14.0 + Vec3::Y * 34.0).to_array(),
-                    to: at.to_array(),
-                    time: delay,
+        A::ArmyOfTheDead => {
+            for i in 0..4u8 {
+                let ang = i as f32 / 4.0 * std::f32::consts::TAU;
+                let at = feet + Vec3::new(ang.cos(), 0.0, ang.sin()) * 2.0;
+                w.spawn(
+                    NetKind::Wraith,
+                    Transform::from_translation(at).looking_to(flat, Vec3::Y),
+                    TurretBrain {
+                        owner: id,
+                        life: 12.0 + tier,
+                        cooldown: 0.4 + 0.1 * i as f32,
+                        damage: 90.0 * mult,
+                        elements: el | DRAIN,
+                        follow: Some(id),
+                        heal: 0.0,
+                        heal_timer: 0.0,
+                        wraith: true,
+                        slot: i,
+                    },
+                );
+                w.emit(Fx::Spell {
+                    ability,
+                    pos: at.to_array(),
+                    dir: flat.to_array(),
+                    size: 1.0,
                 });
-                let mut s = Strike::new(id, at, delay, 3.8, 280.0 * mult, fire);
-                s.pool = if i % 3 == 0 { 2.5 } else { 0.0 };
-                s.fx = Some(blast(at, 3.8, [1.0, 0.4, 0.05]));
-                w.strike(s);
             }
-            w.spell(ability, center, flat, radius);
+            w.spell(ability, feet, flat, 0.0);
         }
-        A::MagmaGeyser => {
-            let at = w.aim_ground(origin, dir, 30.0);
-            let mut s = Strike::new(id, at, 0.75, 3.6, (240.0 + 90.0 * tier) * mult, fire);
-            s.stun = 1.2;
-            s.pool = 3.0;
-            // Size 0 is the eruption; the cast shows the ground cracking.
+
+        // --- Demolisher ------------------------------------------------------
+        A::StickyBomb => {
+            w.nade(
+                NetKind::Missile(look::STICKY),
+                origin + dir * 0.6,
+                GrenadeBrain::new(
+                    id,
+                    throw(crate::abilities::GRENADE_SPEED * 1.2),
+                    1.6,
+                    (220.0 + 80.0 * tier) * mult,
+                    4.5,
+                    el,
+                    Nade::Sticky,
+                ),
+            );
+        }
+        A::BlastJump => {
+            let radius = 4.5;
+            let dmg = (130.0 + 50.0 * tier) * mult;
+            for (e, _) in w.near(feet, radius) {
+                w.hit(e, dmg, id, el, 0.5);
+            }
+            let end = dash_end(w);
+            w.send(Fx::Dash {
+                player: id,
+                a: feet.to_array(),
+                b: end.to_array(),
+            });
+            w.emit(blast(feet, radius, [1.0, 0.55, 0.15]));
+            w.spell(ability, feet, flat, radius);
+        }
+        A::Payload => {
+            let target = w.aim_ground(origin, dir, 70.0);
+            let radius = 11.0;
+            let delay = 1.8;
+            w.emit(Fx::Falling {
+                kind: falling::BOMB,
+                from: (target - flat * 6.0 + Vec3::Y * 40.0).to_array(),
+                to: target.to_array(),
+                time: delay,
+            });
+            let mut s = Strike::new(id, target, delay, radius, 3500.0 * mult, fire);
+            s.stun = 1.0;
+            s.pool = 5.0;
             s.fx = Some(Fx::Spell {
                 ability,
-                pos: at.to_array(),
+                pos: target.to_array(),
                 dir: flat.to_array(),
                 size: 0.0,
             });
             w.strike(s);
-            w.spell(ability, at, flat, 3.6);
+            w.spell(ability, target, flat, radius);
+        }
+        A::Claymore => {
+            let dist = ray_world(feet + Vec3::Y * 0.5, flat, 2.5, w.boxes);
+            let at = feet + flat * (dist - 0.5).max(0.4);
+            w.spawn(
+                NetKind::Missile(look::CLAYMORE),
+                Transform::from_translation(at.with_y(0.0)).looking_to(flat, Vec3::Y),
+                MineBrain {
+                    owner: id,
+                    arm: 0.8,
+                    life: 45.0,
+                    damage: (260.0 + 90.0 * tier) * mult,
+                    radius: 8.0,
+                    elements: el,
+                    kind: MineKind::Claymore,
+                    facing: flat,
+                    stun: 0.6,
+                },
+            );
+        }
+        A::ChainReaction => {
+            if let Some(p) = roster.0.get_mut(&id) {
+                p.chain = 10.0 + tier;
+            }
+            w.spell(ability, feet, flat, 1.0);
         }
 
-        // --- Valkyrie --------------------------------------------------------
-        A::ArcSpear => {
-            use crate::abilities::{SPEAR_RANGE, SPEAR_WIDTH};
-            let dist = ray_world(origin, dir, SPEAR_RANGE, w.boxes);
-            let end = origin + dir * dist;
-            let dmg = (140.0 + 55.0 * tier) * mult;
-            for (e, pos) in w.enemies.to_vec() {
-                let chest = pos + Vec3::Y;
-                let t = (chest - origin).dot(dir).clamp(0.0, dist);
-                if chest.distance(origin + dir * t) < SPEAR_WIDTH {
-                    w.hit(e, dmg, id, shock, 0.3);
-                }
+        // --- Chemist ---------------------------------------------------------
+        A::AcidFlask => {
+            w.nade(
+                NetKind::Missile(look::FLASK),
+                origin + dir * 0.6,
+                GrenadeBrain::new(
+                    id,
+                    throw(crate::abilities::GRENADE_SPEED),
+                    3.0,
+                    (35.0 + 12.0 * tier) * mult,
+                    3.5 + 0.3 * tier,
+                    el | POISON,
+                    Nade::Acid,
+                ),
+            );
+        }
+        A::ToxicCloud => {
+            // Three puffs along the spray, wider further out.
+            for (i, (d, r)) in [(2.5, 2.4), (5.5, 3.0), (9.0, 3.8)].into_iter().enumerate() {
+                let reach = ray_world(feet + Vec3::Y, flat, d + 1.0, w.boxes) - 1.0;
+                let at = feet + flat * reach.min(d).max(0.5);
+                let mut z = zone(id, at, r, (20.0 + 8.0 * tier) * mult, 0.5, 6.0 + 0.5 * tier);
+                z.timer = 0.1 * i as f32;
+                z.elements = el | POISON;
+                z.kind = zone::TOXIC;
+                w.zone(z);
             }
-            w.emit(Fx::Spear {
-                a: (origin + dir * 0.6 - Vec3::Y * 0.15).to_array(),
-                b: end.to_array(),
-            });
+            w.spell(ability, hand, dir, 10.0);
         }
-        A::StormLeap => {
-            use crate::abilities::{leap_length, LEAP_RADIUS};
-            let land = feet + flat * leap_length(tier);
-            let dmg = (110.0 + 45.0 * tier) * mult;
-            // Lands as you come down.
-            let mut s = Strike::new(id, land, 0.45, LEAP_RADIUS, dmg, shock);
-            s.stun = 0.6;
-            s.fx = Some(Fx::Slam {
-                pos: land.to_array(),
-                radius: LEAP_RADIUS,
-            });
-            w.strike(s);
-            w.send(Fx::Dash {
-                player: id,
-                a: feet.to_array(),
-                b: land.to_array(),
-            });
-        }
-        A::Ragnarok => {
-            let radius = crate::abilities::RAGNAROK_RADIUS;
-            let mut z = zone(id, feet, radius, 160.0 * mult, 0.3, 8.0 + tier);
-            z.timer = 0.2;
-            z.follow = Some(id);
-            z.elements = shock;
-            z.kind = 4;
+        A::PlagueBloom => {
+            let at = w.aim_ground(origin, dir, 50.0);
+            let mut z = zone(id, at, PLAGUE_START, 90.0 * mult, 0.4, 12.0 + tier);
+            z.elements = el | POISON;
+            z.kind = zone::PLAGUE;
+            z.grow = PLAGUE_GROW;
+            z.max_radius = PLAGUE_MAX;
             w.zone(z);
         }
-        A::ThunderClap => {
-            let radius = 6.5 + 0.5 * tier;
-            let dmg = (90.0 + 35.0 * tier) * mult;
-            for (e, _) in w.near(feet, radius) {
-                w.hit(e, dmg, id, shock, 1.4 + 0.2 * tier);
+        A::Catalyst => {
+            let dmg = (250.0 + 90.0 * tier) * mult;
+            let mut pops = Vec::new();
+            for z in w.zones.0.iter_mut() {
+                if z.owner == id && matches!(z.kind, zone::ACID | zone::TOXIC | zone::PLAGUE) && z.life > 0.0 {
+                    pops.push((z.pos, z.radius + 1.5, z.kind));
+                    z.life = 0.0;
+                }
             }
-            w.spell(ability, feet, flat, radius);
-        }
-        A::ChainLightning => {
-            // The first bolt goes to the enemy closest to where you aim.
-            let first = w
-                .enemies
-                .iter()
-                .map(|(e, p)| (*e, *p + Vec3::Y))
-                .filter(|(_, c)| {
-                    let to = *c - origin;
-                    to.length() < 28.0
-                        && to.normalize_or_zero().dot(dir) > 0.9
-                        && line_of_sight(origin, *c, w.boxes)
-                })
-                .min_by(|a, b| {
-                    let off = |c: Vec3| (c - origin).normalize_or_zero().dot(dir);
-                    off(b.1).total_cmp(&off(a.1))
+            for (pos, radius, kind) in pops {
+                for (e, _) in w.near(pos, radius) {
+                    w.hit(e, dmg, id, el | POISON, 0.6);
+                }
+                w.emit(Fx::ZoneEnd {
+                    pos: pos.to_array(),
+                    kind,
                 });
-            let mut from = hand;
-            let mut dmg = (130.0 + 45.0 * tier) * mult;
-            let Some(mut next) = first else {
-                let end = origin + dir * ray_world(origin, dir, 20.0, w.boxes);
-                w.emit(Fx::Lightning {
-                    a: hand.to_array(),
-                    b: end.to_array(),
-                });
-                return;
-            };
-            let mut hit: Vec<Entity> = Vec::new();
-            for _ in 0..(7 + tier as usize) {
-                let (e, at) = next;
-                hit.push(e);
-                w.hit(e, dmg, id, el, 0.5);
-                w.emit(Fx::Lightning {
-                    a: from.to_array(),
-                    b: at.to_array(),
-                });
-                from = at;
-                dmg *= 0.9;
-                let Some(n) = w
-                    .enemies
-                    .iter()
-                    .map(|(e, p)| (*e, *p + Vec3::Y))
-                    .filter(|(e, p)| !hit.contains(e) && p.distance(at) < 9.0)
-                    .min_by(|a, b| a.1.distance(at).total_cmp(&b.1.distance(at)))
-                else {
-                    break;
-                };
-                next = n;
+                w.spell(ability, pos, flat, radius);
             }
+            w.spell(ability, hand, dir, 0.0);
         }
-        A::Bifrost => {
-            // A beam from the sky sweeping out along where you look.
-            let start = feet + flat * 2.0;
-            let len = ray_world(start + Vec3::Y, flat, 36.0, w.boxes).max(6.0);
-            let sweep = 2.2;
-            let steps = 16;
-            for i in 0..=steps {
-                let f = i as f32 / steps as f32;
-                let mut s = Strike::new(id, start + flat * len * f, 0.5 + f * sweep, 3.0, 150.0 * mult, shock);
-                s.stun = 0.4;
+        A::Petrify => {
+            // Turned to stone where they stand, then they shatter.
+            let hit = w.cone(origin, dir, 18.0, 0.7);
+            for (i, (e, _)) in hit.into_iter().enumerate() {
+                w.hit(e, 0.0, id, el, 4.0);
+                let mut s = Strike::new(id, feet, 2.6 + 0.04 * i as f32, 1.0, 900.0 * mult, el);
+                s.target = Some(e);
+                s.fx = Some(Fx::Spell {
+                    ability,
+                    pos: [0.0; 3],
+                    dir: flat.to_array(),
+                    size: 0.0,
+                });
                 w.strike(s);
             }
-            w.spell(ability, start, flat, len);
+            w.spell(ability, hand, dir, 18.0);
         }
-        A::SpearRain => {
-            let center = w.aim_ground(origin, dir, 50.0);
-            let radius = 6.0 + 0.5 * tier;
-            for i in 0..12 {
+
+        // --- Ranger ----------------------------------------------------------
+        A::Grapple => {
+            // The zip is done locally; everyone sees the line.
+            let reach = ray_world(origin, dir, GRAPPLE_RANGE, w.boxes);
+            w.spell(ability, hand, dir, reach);
+        }
+        A::HuntersMark => {
+            let dmg = (30.0 + 10.0 * tier) * mult;
+            for (e, pos) in w.cone(origin, dir, 28.0, 0.82) {
+                w.hit(e, dmg, id, el | MARK, 0.0);
+                w.emit(Fx::Spell {
+                    ability,
+                    pos: (pos + Vec3::Y * 2.3).to_array(),
+                    dir: flat.to_array(),
+                    size: 1.0,
+                });
+            }
+            w.spell(ability, hand, dir, 0.0);
+        }
+        A::Deadeye => {
+            // Lock on to the ten zombies nearest your aim, then fire.
+            let mut targets = w.cone(origin, dir, 60.0, 0.45);
+            let off = |p: Vec3| (p + Vec3::Y - origin).normalize_or_zero().dot(dir);
+            targets.sort_by(|a, b| off(b.1).total_cmp(&off(a.1)));
+            for (i, (e, pos)) in targets.into_iter().take(10).enumerate() {
+                let delay = 0.7 + 0.12 * i as f32;
+                let mut s = Strike::new(id, pos, delay, 1.0, 1400.0 * mult, el);
+                s.target = Some(e);
+                s.stun = 0.5;
+                s.fx = Some(Fx::Spell {
+                    ability,
+                    pos: [0.0; 3],
+                    dir: dir.to_array(),
+                    size: 1.0,
+                });
+                w.strike(s);
+                w.emit(Fx::Spell {
+                    ability,
+                    pos: (pos + Vec3::Y * 1.2).to_array(),
+                    dir: dir.to_array(),
+                    size: 0.0,
+                });
+            }
+        }
+        A::BearTrap => {
+            let mut g = GrenadeBrain::new(
+                id,
+                throw(crate::abilities::GRENADE_SPEED * 0.85),
+                45.0,
+                (150.0 + 50.0 * tier) * mult,
+                1.8,
+                el,
+                Nade::Trap,
+            );
+            g.stun = 5.0 + 0.5 * tier;
+            w.nade(NetKind::Missile(look::TRAP), origin + dir * 0.6, g);
+        }
+        A::ArrowStorm => {
+            let center = w.aim_ground(origin, dir, 60.0);
+            let radius = 8.0;
+            w.spell(ability, center, flat, radius);
+            for i in 0..36 {
                 let ang = rng.gen_range(0.0..std::f32::consts::TAU);
                 let r = radius * rng.gen_range(0.0f32..1.0).sqrt();
                 let at = center + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
-                let delay = 0.35 + i as f32 * 0.09;
-                w.emit(Fx::Falling {
-                    kind: falling::SPEAR,
-                    from: (at + Vec3::new(rng.gen_range(-2.0..2.0), 26.0, rng.gen_range(-2.0..2.0)))
-                        .to_array(),
-                    to: at.to_array(),
-                    time: delay,
-                });
-                let mut s = Strike::new(id, at, delay, 2.4, (120.0 + 45.0 * tier) * mult, shock);
-                s.stun = 0.5;
-                s.fx = Some(Fx::Slam {
-                    pos: at.to_array(),
-                    radius: 2.4,
-                });
+                let delay = 0.6 + i as f32 * 0.08 + rng.gen_range(0.0..0.06);
+                // Every other arrow is shown; all of them hit.
+                if i % 2 == 0 {
+                    w.emit(Fx::Falling {
+                        kind: falling::ARROW,
+                        from: (at - flat * 8.0 + Vec3::Y * 26.0).to_array(),
+                        to: at.to_array(),
+                        time: delay,
+                    });
+                }
+                let mut s = Strike::new(id, at, delay, 2.0, 260.0 * mult, el);
+                s.stun = 0.4;
                 w.strike(s);
             }
-            w.spell(ability, center, flat, radius);
         }
     }
 }
@@ -1017,6 +957,34 @@ pub(super) fn cast(
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
+
+fn event(target: Entity, amount: f32, from: u8, elements: u8, stun: f32) -> DamageEvent {
+    DamageEvent {
+        target,
+        amount,
+        from: Some(from),
+        headshot: false,
+        legs: false,
+        elements,
+        chained: false,
+        stun,
+    }
+}
+
+fn add_zone(z: Zone, zones: &mut Zones, fx: &mut FxQueue, out: &mut FxOutbox) {
+    emit(
+        fx,
+        out,
+        Fx::Zone {
+            pos: z.pos.to_array(),
+            radius: z.radius,
+            life: z.life,
+            follow: z.follow.unwrap_or(255),
+            kind: z.kind,
+        },
+    );
+    zones.0.push(z);
+}
 
 /// Delayed strikes land.
 #[allow(clippy::too_many_arguments)]
@@ -1038,23 +1006,11 @@ pub(super) fn strikes(
         .partition(|s| s.delay <= 0.0);
     strikes.0 = waiting;
     for s in ready {
-        let hit = |e: Entity, damage: &mut DamageQueue| {
-            damage.0.push(DamageEvent {
-                target: e,
-                amount: s.damage,
-                from: Some(s.owner),
-                headshot: false,
-                legs: false,
-                elements: s.elements,
-                chained: false,
-                stun: s.stun,
-            });
-        };
         if let Some(target) = s.target {
             let Ok((e, tf)) = enemies.get(target) else {
                 continue;
             };
-            hit(e, &mut damage);
+            damage.0.push(event(e, s.damage, s.owner, s.elements, s.stun));
             if let Some(Fx::Spell { ability, dir, size, .. }) = s.fx.clone() {
                 emit(
                     &mut fx,
@@ -1071,34 +1027,22 @@ pub(super) fn strikes(
         }
         for (e, t) in &enemies {
             if t.translation.with_y(0.0).distance(s.pos.with_y(0.0)) < s.radius {
-                hit(e, &mut damage);
+                damage.0.push(event(e, s.damage, s.owner, s.elements, s.stun));
             }
         }
         if let Some(f) = s.fx.clone() {
             emit(&mut fx, &mut out, f);
         }
         if s.pool > 0.0 {
-            let life = 4.0;
-            let mut z = zone(s.owner, s.pos.with_y(0.0), s.pool, s.damage * 0.08, 0.3, life);
-            z.elements = s.elements;
-            z.kind = 2;
-            emit(
-                &mut fx,
-                &mut out,
-                Fx::Zone {
-                    pos: z.pos.to_array(),
-                    radius: z.radius,
-                    life,
-                    follow: 255,
-                    kind: 2,
-                },
-            );
-            zones.0.push(z);
+            let mut z = zone(s.owner, s.pos.with_y(0.0), s.pool, s.damage * 0.02, 0.3, 5.0);
+            z.elements = s.elements | Element::Fire.bit();
+            z.kind = zone::FIRE;
+            add_zone(z, &mut zones, &mut fx, &mut out);
         }
     }
 }
 
-/// Pull and push areas wear off; vanish and stim timers run down.
+/// Pull and push areas wear off; buff timers run down.
 pub fn timers(time: Res<Time>, mut forces: ResMut<Forces>, mut roster: ResMut<Roster>) {
     let dt = time.delta_secs();
     for f in forces.0.iter_mut() {
@@ -1108,6 +1052,10 @@ pub fn timers(time: Res<Time>, mut forces: ResMut<Forces>, mut roster: ResMut<Ro
     for p in roster.0.values_mut() {
         p.stim = (p.stim - dt).max(0.0);
         p.vanish = (p.vanish - dt).max(0.0);
+        p.guard = (p.guard - dt).max(0.0);
+        if p.guard <= 0.0 {
+            p.guard_cut = 0.0;
+        }
     }
 }
 
@@ -1116,7 +1064,6 @@ pub fn timers(time: Res<Time>, mut forces: ResMut<Forces>, mut roster: ResMut<Ro
 pub(super) fn missiles(
     mut commands: Commands,
     time: Res<Time>,
-    mut zones: ResMut<Zones>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
@@ -1163,6 +1110,7 @@ pub(super) fn missiles(
         // Hits along this step.
         let seg = to - from;
         let len2 = seg.length_squared().max(1e-6);
+        let mut struck = None;
         for (enemy, chest) in &list {
             let t = ((*chest - from).dot(seg) / len2).clamp(0.0, 1.0);
             if chest.distance(from + seg * t) > m.hit_radius + 0.45 {
@@ -1176,40 +1124,12 @@ pub(super) fn missiles(
             } else {
                 stop = true;
             }
-            if m.damage > 0.0 {
-                damage.0.push(DamageEvent {
-                    target: *enemy,
-                    amount: m.damage,
-                    from: Some(m.owner),
-                    headshot: false,
-                    legs: false,
-                    elements: m.elements,
-                    chained: false,
-                    stun: m.stun,
-                });
+            struck = Some(*enemy);
+            if m.damage > 0.0 || m.stun > 0.0 {
+                damage.0.push(event(*enemy, m.damage, m.owner, m.elements, m.stun));
             }
             if !m.pierce {
                 break;
-            }
-        }
-        if m.chill > 0.0 {
-            m.chill_timer -= dt;
-            if m.chill_timer <= 0.0 {
-                m.chill_timer = 0.25;
-                for (enemy, p) in &positions {
-                    if p.distance(from.with_y(p.y)) < m.chill {
-                        damage.0.push(DamageEvent {
-                            target: *enemy,
-                            amount: m.damage * 0.2,
-                            from: Some(m.owner),
-                            headshot: false,
-                            legs: false,
-                            elements: m.elements,
-                            chained: true,
-                            stun: 0.6,
-                        });
-                    }
-                }
             }
         }
         if !stop {
@@ -1235,7 +1155,7 @@ pub(super) fn missiles(
                 &mut damage,
                 &mut fx,
                 &mut out,
-                if m.end == End::Fizzle { color } else { Color::srgb(m.color[0], m.color[1], m.color[2]) },
+                color,
             );
         } else {
             emit(
@@ -1248,67 +1168,45 @@ pub(super) fn missiles(
                 },
             );
         }
-        match m.end {
-            End::Fizzle => {}
-            End::FirePool => {
-                let life = 4.0;
-                let mut z = zone(m.owner, at.with_y(0.0), 3.5, m.blast_damage * 0.1, 0.3, life);
-                z.elements = m.elements;
-                z.kind = 2;
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Zone {
-                        pos: z.pos.to_array(),
-                        radius: z.radius,
-                        life,
-                        follow: 255,
-                        kind: 2,
-                    },
-                );
-                zones.0.push(z);
-            }
-            End::Shatter => {
-                for (enemy, p) in &positions {
-                    if p.distance(at.with_y(p.y)) < m.blast {
-                        damage.0.push(DamageEvent {
-                            target: *enemy,
-                            amount: 0.0,
-                            from: Some(m.owner),
-                            headshot: false,
-                            legs: false,
-                            elements: m.elements,
-                            chained: true,
-                            stun: 1.8,
-                        });
-                    }
+        if m.end == End::Spread {
+            if let Some(first) = struck {
+                // The toxin jumps to the three nearest zombies.
+                let mut near: Vec<&(Entity, Vec3)> = list
+                    .iter()
+                    .filter(|(o, p)| *o != first && p.distance(at) < 7.0)
+                    .collect();
+                near.sort_by(|a, b| a.1.distance(at).total_cmp(&b.1.distance(at)));
+                for (o, p) in near.into_iter().take(3) {
+                    let mut ev = event(*o, m.damage * 0.5, m.owner, m.elements, m.stun * 0.6);
+                    ev.chained = true;
+                    damage.0.push(ev);
+                    emit(
+                        &mut fx,
+                        &mut out,
+                        Fx::Spell {
+                            ability: Ability::NeurotoxinDart,
+                            pos: at.to_array(),
+                            dir: (*p - at).to_array(),
+                            size: 1.0,
+                        },
+                    );
                 }
-                emit(
-                    &mut fx,
-                    &mut out,
-                    Fx::Nova {
-                        pos: at.with_y(0.0).to_array(),
-                        radius: m.blast,
-                    },
-                );
             }
         }
         commands.entity(e).despawn();
     }
 }
 
-/// Thrown grenades bounce and go off.
+/// Thrown things fly, stick or land, and go off.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn grenades(
     mut commands: Commands,
     time: Res<Time>,
-    mut state: ResMut<MatchState>,
     mut zones: ResMut<Zones>,
-    mut strikes: ResMut<Strikes>,
-    mut forces: ResMut<Forces>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
+    mut roster: ResMut<Roster>,
     mut nades: Query<(Entity, &mut Transform, &mut GrenadeBrain), Without<EnemyBrain>>,
     enemies: Query<(Entity, &Transform), With<EnemyBrain>>,
     colliders: Query<(&Transform, &Collider), (Without<GrenadeBrain>, Without<EnemyBrain>)>,
@@ -1319,163 +1217,128 @@ pub(super) fn grenades(
     }
     let boxes = collect_boxes(colliders.iter());
     let enemy_list: Vec<(Entity, Vec3)> = enemies.iter().map(|(e, t)| (e, t.translation)).collect();
-    let mut rng = rand::thread_rng();
     for (e, mut tf, mut g) in &mut nades {
         g.fuse -= dt;
-        g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
-        let next = tf.translation + g.velocity * dt;
-        // Firebombs and grav grenades burst on landing; mines stick and arm;
-        // the rest bounce off the floor and stop at walls.
-        let sticks = matches!(g.kind, Nade::Fire | Nade::Grav | Nade::Mine);
-        let mut landed = false;
-        if next.y < 0.1 && sticks {
-            landed = true;
-            tf.translation.y = 0.1;
-        } else if next.y < 0.1 {
-            g.velocity.y = -g.velocity.y * 0.35;
-            g.velocity *= 0.6;
-            tf.translation.y = 0.1;
-        } else if !line_of_sight(tf.translation, next, &boxes) {
-            g.velocity = -g.velocity * 0.3;
-        } else {
-            tf.translation = next;
-        }
-        if g.kind == Nade::Mine {
-            if landed {
-                let id = state.next_net_id;
-                state.next_net_id += 1;
-                commands.spawn((
-                    crate::InGameEntity,
-                    Replicated {
-                        id,
-                        kind: NetKind::Mine,
-                    },
-                    Transform::from_translation(tf.translation.with_y(0.02)),
-                    MineBrain {
-                        owner: g.owner,
-                        arm: 0.8,
-                        life: g.fuse,
-                        damage: g.damage,
-                        radius: g.radius,
-                        elements: g.elements,
-                    },
-                ));
-                commands.entity(e).despawn();
+        // A sticky bomb rides along on its zombie (and goes off if it dies).
+        if let Some((target, offset)) = g.stuck {
+            match enemies.get(target) {
+                Ok((_, t)) => tf.translation = t.translation + offset,
+                Err(_) => g.fuse = g.fuse.min(0.0),
             }
-            continue;
-        }
-        let touching = g.kind != Nade::Smoke
-            && enemy_list
+        } else if !g.landed {
+            g.velocity.y -= crate::abilities::GRENADE_GRAVITY * dt;
+            let next = tf.translation + g.velocity * dt;
+            if next.y < 0.1 {
+                tf.translation.y = 0.1;
+                g.landed = true;
+            } else if !line_of_sight(tf.translation, next, &boxes) {
+                // Sticky bombs cling to walls; the rest drop off them.
+                if g.kind == Nade::Sticky {
+                    g.landed = true;
+                } else {
+                    g.velocity = Vec3::new(-g.velocity.x * 0.2, g.velocity.y.min(0.0), -g.velocity.z * 0.2);
+                }
+            } else {
+                tf.translation = next;
+            }
+            let touching = enemy_list
                 .iter()
-                .any(|(_, p)| (*p + Vec3::Y).distance(tf.translation) < 1.0);
-        if !(g.fuse <= 0.0 || touching || landed) {
-            continue;
+                .find(|(_, p)| (*p + Vec3::Y).distance(tf.translation) < 1.0);
+            if let Some((target, p)) = touching {
+                match g.kind {
+                    Nade::Sticky => g.stuck = Some((*target, tf.translation - *p)),
+                    Nade::Trap => {}
+                    _ => g.landed = true,
+                }
+            }
         }
         let at = tf.translation;
         let ground = at.with_y(0.0);
-        let mut color = Color::srgb(1.0, 0.55, 0.15);
-        if let Some(el) = elements_in(g.elements).next() {
-            color = el.color();
-        }
-        let mut add_zone = |z: Zone, fx: &mut FxQueue, out: &mut FxOutbox| {
-            emit(
-                fx,
-                out,
-                Fx::Zone {
-                    pos: z.pos.to_array(),
-                    radius: z.radius,
-                    life: z.life,
-                    follow: 255,
-                    kind: z.kind,
-                },
-            );
-            zones.0.push(z);
-        };
         match g.kind {
-            Nade::Frag | Nade::Mine => {}
-            Nade::Fire => {
-                let mut z = zone(g.owner, ground, g.radius, g.damage * 0.4, 0.3, 6.0);
-                z.elements = g.elements;
-                z.kind = 2;
-                add_zone(z, &mut fx, &mut out);
-                color = Color::srgb(1.0, 0.45, 0.1);
-            }
-            Nade::Cluster => {
-                // Six bomblets scatter and go off one after another.
-                for i in 0..6 {
-                    let ang = i as f32 / 6.0 * std::f32::consts::TAU + rng.gen_range(-0.3..0.3);
-                    let out_dir = Vec3::new(ang.cos(), 0.0, ang.sin());
-                    let mut m = Missile::new(
-                        g.owner,
-                        out_dir * rng.gen_range(4.0..7.0) + Vec3::Y * rng.gen_range(4.0..6.5),
-                        rng.gen_range(0.55..0.95),
-                        0.0,
-                        g.elements,
-                    );
-                    m.gravity = 16.0;
-                    m.blast = 2.8;
-                    m.blast_damage = g.damage * 0.8;
-                    let id = state.next_net_id;
-                    state.next_net_id += 1;
-                    commands.spawn((
-                        crate::InGameEntity,
-                        Replicated {
-                            id,
-                            kind: NetKind::Missile(look::BOMBLET),
-                        },
-                        Transform::from_translation(at + Vec3::Y * 0.3),
-                        m,
-                    ));
+            Nade::Sticky => {
+                if g.fuse > 0.0 {
+                    continue;
                 }
+                explode(
+                    at + Vec3::Y * 0.2,
+                    g.radius,
+                    g.damage,
+                    Some(g.owner),
+                    g.elements,
+                    &enemy_list,
+                    &mut damage,
+                    &mut fx,
+                    &mut out,
+                    Color::srgb(1.0, 0.45, 0.15),
+                );
             }
-            Nade::Smoke => {
-                let mut z = zone(g.owner, ground, g.radius, g.damage, 0.5, 6.5);
-                z.elements = g.elements;
-                z.kind = zone::SMOKE;
-                add_zone(z, &mut fx, &mut out);
-                commands.entity(e).despawn();
-                continue;
+            Nade::Heal => {
+                if !g.landed && g.fuse > 0.0 {
+                    continue;
+                }
+                // A burst of healing straight away, then the mist lingers.
+                for p in roster.0.values_mut() {
+                    if p.alive && p.feet().distance(ground) < g.radius {
+                        p.health = (p.health + g.damage * 3.0).min(p.max_health());
+                    }
+                }
+                let mut z = zone(g.owner, ground, g.radius, 0.0, 0.5, 6.0);
+                z.heal = g.damage;
+                z.kind = zone::HEAL;
+                add_zone(z, &mut zones, &mut fx, &mut out);
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Heal {
+                        pos: ground.to_array(),
+                        radius: g.radius,
+                    },
+                );
             }
-            Nade::Grav => {
-                let life = 2.6;
-                let mut z = zone(g.owner, ground, g.radius, g.damage * 0.05, 0.25, life);
+            Nade::Acid => {
+                if !g.landed && g.fuse > 0.0 {
+                    continue;
+                }
+                let mut z = zone(g.owner, ground, g.radius, g.damage, 0.35, 7.0);
                 z.elements = g.elements;
-                z.kind = zone::SINGULARITY;
-                add_zone(z, &mut fx, &mut out);
-                forces.0.push(Force {
-                    pos: ground,
-                    radius: g.radius + 2.0,
-                    strength: 9.0,
-                    life,
-                });
-                let mut s = Strike::new(g.owner, ground, life, g.radius, g.damage, g.elements);
-                s.fx = Some(Fx::Explosion {
-                    pos: (ground + Vec3::Y).to_array(),
+                z.kind = zone::ACID;
+                add_zone(z, &mut zones, &mut fx, &mut out);
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Spell {
+                        ability: Ability::AcidFlask,
+                        pos: ground.to_array(),
+                        dir: Vec3::NEG_Z.to_array(),
+                        size: g.radius,
+                    },
+                );
+            }
+            Nade::Trap => {
+                if !g.landed {
+                    continue;
+                }
+                // Lies open on the floor, keeping its model.
+                tf.translation = ground;
+                commands.entity(e).remove::<GrenadeBrain>().insert(MineBrain {
+                    owner: g.owner,
+                    arm: 0.5,
+                    life: g.fuse,
+                    damage: g.damage,
                     radius: g.radius,
-                    color: [0.75, 0.4, 1.0],
+                    elements: g.elements,
+                    kind: MineKind::Trap,
+                    facing: g.velocity.with_y(0.0).normalize_or(Vec3::NEG_Z),
+                    stun: g.stun,
                 });
-                strikes.0.push(s);
-                commands.entity(e).despawn();
                 continue;
             }
         }
-        explode(
-            at + Vec3::Y * 0.3,
-            g.radius,
-            g.damage,
-            Some(g.owner),
-            g.elements,
-            &enemy_list,
-            &mut damage,
-            &mut fx,
-            &mut out,
-            color,
-        );
         commands.entity(e).despawn();
     }
 }
 
-/// Mines wait for a zombie to come close.
+/// Claymores and bear traps wait for a zombie to come close.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn mines(
     mut commands: Commands,
@@ -1494,32 +1357,74 @@ pub(super) fn mines(
     for (e, tf, mut m) in &mut mines {
         m.arm -= dt;
         m.life -= dt;
-        let pos = tf.translation;
-        let tripped = m.arm <= 0.0 && list.iter().any(|(_, p)| p.with_y(0.0).distance(pos.with_y(0.0)) < 2.4);
-        if tripped || m.life <= 0.0 {
-            explode(
-                pos + Vec3::Y * 0.4,
-                m.radius,
-                m.damage,
-                Some(m.owner),
-                m.elements,
-                &list,
-                &mut damage,
-                &mut fx,
-                &mut out,
-                Color::srgb(1.0, 0.4, 0.2),
-            );
+        let pos = tf.translation.with_y(0.0);
+        if m.life <= 0.0 {
             commands.entity(e).despawn();
+            continue;
+        }
+        if m.arm > 0.0 {
+            continue;
+        }
+        match m.kind {
+            MineKind::Claymore => {
+                // Trips on anything a few metres in front.
+                let in_cone = |p: Vec3, range: f32| {
+                    let to = (p - pos).with_y(0.0);
+                    let d = to.length();
+                    d < range && (d < 1.0 || to.normalize().dot(m.facing) > 0.45)
+                };
+                if !list.iter().any(|(_, p)| in_cone(*p, 4.5)) {
+                    continue;
+                }
+                for (enemy, p) in &list {
+                    if in_cone(*p, m.radius) {
+                        damage.0.push(event(*enemy, m.damage, m.owner, m.elements, m.stun));
+                    }
+                }
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Spell {
+                        ability: Ability::Claymore,
+                        pos: (pos + Vec3::Y * 0.3).to_array(),
+                        dir: m.facing.to_array(),
+                        size: m.radius,
+                    },
+                );
+                commands.entity(e).despawn();
+            }
+            MineKind::Trap => {
+                let Some((enemy, _)) = list
+                    .iter()
+                    .filter(|(_, p)| p.with_y(0.0).distance(pos) < m.radius)
+                    .min_by(|a, b| a.1.distance(pos).total_cmp(&b.1.distance(pos)))
+                else {
+                    continue;
+                };
+                damage.0.push(event(*enemy, m.damage, m.owner, m.elements, m.stun));
+                emit(
+                    &mut fx,
+                    &mut out,
+                    Fx::Spell {
+                        ability: Ability::BearTrap,
+                        pos: pos.to_array(),
+                        dir: m.facing.to_array(),
+                        size: 1.0,
+                    },
+                );
+                commands.entity(e).despawn();
+            }
         }
     }
 }
 
-/// Sentries and drones pick the nearest enemy they can see and shoot it.
+/// The med drone hovers by its owner, healing and zapping; spectral
+/// warriors hunt the zombies near their owner and cut them down.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn turrets(
     mut commands: Commands,
     time: Res<Time>,
-    roster: Res<Roster>,
+    mut roster: ResMut<Roster>,
     mut damage: ResMut<DamageQueue>,
     mut fx: ResMut<FxQueue>,
     mut out: ResMut<FxOutbox>,
@@ -1536,59 +1441,119 @@ pub(super) fn turrets(
     for (e, mut tf, mut t) in &mut turrets {
         t.life -= dt;
         let owner = t.follow.and_then(|id| roster.0.get(&id));
-        if t.life <= 0.0 || (t.follow.is_some() && owner.is_none_or(|p| !p.alive)) {
+        let (owner_feet, owner_yaw) = match owner {
+            Some(p) if p.alive => (p.feet(), p.yaw),
+            _ => {
+                t.life = t.life.min(0.0);
+                (Vec3::ZERO, 0.0)
+            }
+        };
+        if t.life <= 0.0 {
             emit(
                 &mut fx,
                 &mut out,
-                Fx::Explosion {
-                    pos: (tf.translation + Vec3::Y * 0.6).to_array(),
-                    radius: 1.2,
-                    color: [0.3, 0.9, 1.0],
+                if t.wraith {
+                    Fx::Spell {
+                        ability: Ability::ArmyOfTheDead,
+                        pos: tf.translation.to_array(),
+                        dir: Vec3::NEG_Z.to_array(),
+                        size: 1.0,
+                    }
+                } else {
+                    Fx::Explosion {
+                        pos: (tf.translation + Vec3::Y * 0.6).to_array(),
+                        radius: 1.2,
+                        color: [0.4, 1.0, 0.8],
+                    }
                 },
             );
             commands.entity(e).despawn();
             continue;
         }
-        // The drone hovers over your right shoulder, bobbing.
-        if let Some(p) = owner {
-            let fwd = Vec3::new(-p.yaw.sin(), 0.0, -p.yaw.cos());
-            let right = Vec3::new(-fwd.z, 0.0, fwd.x);
-            let want = p.feet() + Vec3::Y * (2.3 + 0.15 * (t_now * 2.5).sin()) + right * 1.0 - fwd * 0.3;
-            let k = (dt * 5.0).min(1.0);
-            tf.translation = tf.translation.lerp(want, k);
-        }
+        let fwd = Vec3::new(-owner_yaw.sin(), 0.0, -owner_yaw.cos());
+        let right = Vec3::new(-fwd.z, 0.0, fwd.x);
         t.cooldown -= dt;
-        let (gun, range) = if t.follow.is_some() {
-            (tf.translation, 22.0)
-        } else {
-            (tf.translation + Vec3::Y * 0.85, 24.0)
-        };
+        if t.wraith {
+            // Go for the zombie nearest the owner, or wait at their side.
+            let target = enemies
+                .iter()
+                .map(|(e, et, _)| (e, et.translation))
+                .filter(|(_, p)| p.distance(owner_feet) < 22.0)
+                .min_by(|a, b| a.1.distance(tf.translation).total_cmp(&b.1.distance(tf.translation)));
+            let pos = tf.translation;
+            let (goal, enemy) = match target {
+                Some((enemy, p)) => (p, Some(enemy)),
+                None => {
+                    let side = [right * 1.6, -right * 1.6, right * 2.6 - fwd, -right * 2.6 - fwd][t.slot as usize % 4];
+                    (owner_feet + side - fwd * 0.8, None)
+                }
+            };
+            let to = (goal - pos).with_y(0.0);
+            let reach = if enemy.is_some() { 1.4 } else { 0.3 };
+            if to.length() > reach {
+                let step = to.normalize() * (9.0 * dt).min(to.length() - reach);
+                tf.translation = (pos + step).with_y(0.0);
+            }
+            if to.length_squared() > 1e-4 {
+                tf.look_to(to.normalize(), Vec3::Y);
+            }
+            if let Some(enemy) = enemy {
+                if to.length() < reach + 0.4 && t.cooldown <= 0.0 {
+                    t.cooldown = 0.65;
+                    damage.0.push(event(enemy, t.damage, t.owner, t.elements, 0.4));
+                    emit(
+                        &mut fx,
+                        &mut out,
+                        Fx::Slash {
+                            pos: (tf.translation + Vec3::Y * 1.1).to_array(),
+                            dir: to.normalize_or(Vec3::NEG_Z).to_array(),
+                            radius: 1.8,
+                        },
+                    );
+                }
+            }
+            continue;
+        }
+        // The drone hovers over your left shoulder, bobbing.
+        let want = owner_feet + Vec3::Y * (2.3 + 0.15 * (t_now * 2.5).sin()) - right * 1.0 - fwd * 0.3;
+        let k = (dt * 5.0).min(1.0);
+        tf.translation = tf.translation.lerp(want, k);
+        t.heal_timer -= dt;
+        if t.heal_timer <= 0.0 && t.heal > 0.0 {
+            t.heal_timer = 1.0;
+            for p in roster.0.values_mut() {
+                if p.alive && p.feet().distance(owner_feet) < 8.0 && p.health < p.max_health() {
+                    p.health = (p.health + t.heal).min(p.max_health());
+                    emit(
+                        &mut fx,
+                        &mut out,
+                        Fx::Spell {
+                            ability: Ability::MedDrone,
+                            pos: tf.translation.to_array(),
+                            dir: (p.feet() + Vec3::Y * 1.0 - tf.translation).to_array(),
+                            size: 1.0,
+                        },
+                    );
+                }
+            }
+        }
+        let gun = tf.translation;
         let target = enemies
             .iter()
             .map(|(e, et, b)| (e, et.translation + Vec3::Y * 1.1 * enemy_scale(b.kind)))
-            .filter(|(_, p)| p.distance(gun) < range && line_of_sight(gun, *p, &boxes))
+            .filter(|(_, p)| p.distance(gun) < 18.0 && line_of_sight(gun, *p, &boxes))
             .min_by(|a, b| a.1.distance(gun).total_cmp(&b.1.distance(gun)));
         let Some((enemy, at)) = target else { continue };
         let flat = (at - gun).with_y(0.0).normalize_or(Vec3::NEG_Z);
         tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, flat);
         if t.cooldown <= 0.0 {
-            t.cooldown = if t.follow.is_some() { 0.2 } else { 0.15 };
-            damage.0.push(DamageEvent {
-                target: enemy,
-                amount: t.damage,
-                from: Some(t.owner),
-                headshot: false,
-                legs: false,
-                elements: t.elements,
-                chained: false,
-                stun: 0.0,
-            });
+            t.cooldown = 0.35;
+            damage.0.push(event(enemy, t.damage, t.owner, t.elements, 0.0));
             emit(
                 &mut fx,
                 &mut out,
-                Fx::Tracer {
-                    shooter: 255,
-                    a: (gun + (at - gun).normalize_or_zero() * 0.5).to_array(),
+                Fx::Lightning {
+                    a: (gun + (at - gun).normalize_or_zero() * 0.3).to_array(),
                     b: at.to_array(),
                 },
             );

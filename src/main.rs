@@ -196,11 +196,16 @@ pub struct PlayerInfo {
     /// Augment upgrades on each ability (see `data::Augment`).
     pub augments: [u8; 2],
     pub ult_charge: f32,
-    pub overdrive: f32,
-    /// Combat Stim: faster movement and fire while above zero.
+    /// Chain Reaction: kills explode while above zero.
+    pub chain: f32,
+    /// Rally Cry: faster movement while above zero.
     pub stim: f32,
-    /// Thousand Cuts: gone from sight, untouchable, while above zero.
+    /// Wraith Step: untouchable, and zombies lose track of you, while above zero.
     pub vanish: f32,
+    /// Fortress and Rally Cry: damage taken is cut by `guard_cut` while
+    /// `guard` is above zero.
+    pub guard: f32,
+    pub guard_cut: f32,
     /// Highest action number the host has handled (for resending).
     pub action_ack: u32,
 }
@@ -257,9 +262,11 @@ impl PlayerInfo {
             charges: [1; 2],
             augments: [0; 2],
             ult_charge: 0.0,
-            overdrive: 0.0,
+            chain: 0.0,
             stim: 0.0,
             vanish: 0.0,
+            guard: 0.0,
+            guard_cut: 0.0,
             action_ack: 0,
         }
     }
@@ -330,14 +337,20 @@ impl PlayerInfo {
         if !self.alive || self.vanish > 0.0 {
             return;
         }
+        let amount = if self.guard > 0.0 {
+            amount * (1.0 - self.guard_cut)
+        } else {
+            amount
+        };
         self.health -= amount;
         if self.health <= 0.0 {
             self.health = 0.0;
             self.alive = false;
             // Perks are lost when you go down.
             self.perks = 0;
-            self.overdrive = 0.0;
+            self.chain = 0.0;
             self.stim = 0.0;
+            self.guard = 0.0;
         }
     }
 }
@@ -524,13 +537,12 @@ pub enum NetKind {
     Fireball,
     Grenade,
     PowerUp(data::PowerUp),
-    Firebomb,
-    Turret,
-    Coil,
-    /// An ability projectile (see `sim::powers::Look`).
+    /// An ability projectile or gadget (see `sim::powers::look`).
     Missile(u8),
-    Mine,
+    /// The Medic's drone.
     Drone,
+    /// One of the Revenant's spectral warriors.
+    Wraith,
 }
 
 impl NetKind {
@@ -560,6 +572,9 @@ pub struct Enemy;
 pub struct EnemyStatus {
     pub flash: f32,
     pub burning: bool,
+    pub poisoned: bool,
+    /// Hunter's Mark.
+    pub marked: bool,
     pub slowed: bool,
     /// Frozen or stunned in place.
     pub stunned: bool,

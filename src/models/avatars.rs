@@ -28,6 +28,9 @@ impl Plugin for AvatarPlugin {
                 enemy_colors,
                 spin,
                 tumble,
+                toss,
+                blink,
+                hover,
                 spinners,
             )
                 .chain()
@@ -46,144 +49,15 @@ pub struct ReplicatedAssets {
     spark: Handle<StandardMaterial>,
     pickup_meshes: [Handle<Mesh>; 4],
     pickup_mat: Handle<StandardMaterial>,
-    /// Gadget models: (solid, glowing) for the firebomb, turret and coil.
-    gadgets: [(Handle<Mesh>, Handle<Mesh>); 3],
     gadget_mat: Handle<StandardMaterial>,
     gadget_glow: Handle<StandardMaterial>,
     /// Ability projectiles by look: (solid, glowing, light colour).
     missiles: Vec<(Handle<Mesh>, Handle<Mesh>, Color)>,
-    mine: (Handle<Mesh>, Handle<Mesh>),
     drone: (Handle<Mesh>, Handle<Mesh>),
     rotor: Handle<Mesh>,
-}
-
-/// Blaze's firebomb: a bottle with a burning rag.
-pub(crate) fn firebomb_kit() -> (crate::kit::Kit, crate::kit::Kit) {
-    use crate::kit::{c, Kit};
-    let (mut k, mut g) = (Kit::new(), Kit::new());
-    let v = Vec3::new;
-    k.cyl(
-        v(0.0, 0.0, 0.0),
-        0.045,
-        0.13,
-        Quat::IDENTITY,
-        c(0.55, 0.25, 0.08),
-    );
-    k.frustum(
-        v(0.0, 0.085, 0.0),
-        0.016,
-        0.045,
-        0.04,
-        Quat::IDENTITY,
-        c(0.55, 0.25, 0.08),
-    );
-    k.cyl(
-        v(0.0, 0.12, 0.0),
-        0.016,
-        0.04,
-        Quat::IDENTITY,
-        c(0.5, 0.22, 0.07),
-    );
-    k.cyl(
-        v(0.0, 0.0, 0.0),
-        0.047,
-        0.05,
-        Quat::IDENTITY,
-        c(0.85, 0.8, 0.65),
-    );
-    k.blob(v(0.0, 0.15, 0.0), v(0.025, 0.03, 0.025), c(0.8, 0.75, 0.6));
-    g.blob(v(0.0, 0.18, 0.0), v(0.03, 0.05, 0.03), c(1.0, 0.55, 0.1));
-    (k, g)
-}
-
-/// Tinker's sentry: tripod, ammo box, twin barrels and a sensor eye.
-pub(crate) fn turret_kit() -> (crate::kit::Kit, crate::kit::Kit) {
-    use crate::kit::{c, Kit};
-    let (mut k, mut g) = (Kit::new(), Kit::new());
-    let v = Vec3::new;
-    let yellow = c(0.95, 0.75, 0.12);
-    let dark = c(0.15, 0.15, 0.17);
-    let steel = c(0.55, 0.57, 0.6);
-    for i in 0..3 {
-        let a = i as f32 * std::f32::consts::TAU / 3.0 + 0.5;
-        k.cyl_between(
-            v(0.0, 0.55, 0.0),
-            v(a.cos() * 0.5, 0.0, a.sin() * 0.5),
-            0.025,
-            dark,
-        );
-        k.cyl(
-            v(a.cos() * 0.5, 0.02, a.sin() * 0.5),
-            0.05,
-            0.04,
-            Quat::IDENTITY,
-            dark,
-        );
-    }
-    k.cyl(v(0.0, 0.6, 0.0), 0.08, 0.12, Quat::IDENTITY, steel);
-    k.cuboid(v(0.0, 0.82, 0.05), v(0.32, 0.26, 0.4), yellow);
-    k.cuboid(v(0.0, 0.96, 0.05), v(0.26, 0.04, 0.34), c(0.85, 0.65, 0.08));
-    k.cuboid(v(0.22, 0.76, 0.1), v(0.12, 0.16, 0.2), c(0.3, 0.36, 0.22));
-    for x in [-0.07, 0.07] {
-        k.cyl_z(v(x, 0.84, -0.35), 0.028, 0.45, dark);
-        k.cyl_z(v(x, 0.84, -0.58), 0.04, 0.06, steel);
-    }
-    k.cuboid(v(0.0, 0.84, -0.17), v(0.24, 0.12, 0.06), steel);
-    k.cuboid(v(-0.2, 0.84, 0.05), v(0.06, 0.12, 0.3), dark);
-    g.cyl_z(v(0.0, 0.93, -0.16), 0.035, 0.02, c(0.3, 0.9, 1.0));
-    g.cuboid(v(0.0, 0.97, 0.25), v(0.18, 0.012, 0.02), c(0.3, 0.9, 1.0));
-    (k, g)
-}
-
-/// Tinker's tesla coil: a base, a column wound with copper and a charged ball.
-pub(crate) fn coil_kit() -> (crate::kit::Kit, crate::kit::Kit) {
-    use crate::kit::{c, Kit};
-    let (mut k, mut g) = (Kit::new(), Kit::new());
-    let v = Vec3::new;
-    let dark = c(0.18, 0.18, 0.2);
-    let copper = c(0.85, 0.48, 0.22);
-    k.cyl(v(0.0, 0.08, 0.0), 0.5, 0.16, Quat::IDENTITY, dark);
-    k.cyl(
-        v(0.0, 0.2, 0.0),
-        0.38,
-        0.08,
-        Quat::IDENTITY,
-        c(0.95, 0.75, 0.12),
-    );
-    for i in 0..4 {
-        let a = i as f32 * std::f32::consts::FRAC_PI_2;
-        k.cuboid_rot(
-            v(a.cos() * 0.45, 0.12, a.sin() * 0.45),
-            v(0.2, 0.12, 0.12),
-            Quat::from_rotation_y(-a),
-            dark,
-        );
-    }
-    k.cyl(
-        v(0.0, 1.2, 0.0),
-        0.1,
-        2.0,
-        Quat::IDENTITY,
-        c(0.35, 0.35, 0.38),
-    );
-    for i in 0..12 {
-        k.torus(
-            v(0.0, 0.5 + i as f32 * 0.12, 0.0),
-            0.025,
-            0.15,
-            Quat::IDENTITY,
-            copper,
-        );
-    }
-    k.torus(
-        v(0.0, 2.25, 0.0),
-        0.06,
-        0.32,
-        Quat::IDENTITY,
-        c(0.6, 0.62, 0.66),
-    );
-    g.sphere(v(0.0, 2.5, 0.0), 0.22, c(0.55, 0.85, 1.0));
-    (k, g)
+    wraith: (Handle<Mesh>, Handle<Mesh>),
+    /// Blinking red lights on sticky bombs and claymores.
+    blinker: Handle<StandardMaterial>,
 }
 
 fn glow(
@@ -218,29 +92,24 @@ fn setup(
             emissive: LinearRgba::rgb(0.25, 0.25, 0.25),
             ..crate::kit::vertex_material(0.4, 0.3)
         }),
-        gadgets: [firebomb_kit(), turret_kit(), coil_kit()].map(|(k, g)| {
-            (
-                meshes.add(k.build_or_empty()),
-                meshes.add(g.build_or_empty()),
-            )
-        }),
         gadget_mat: materials.add(crate::kit::vertex_material(0.5, 0.3)),
         gadget_glow: materials.add(crate::kit::glow_material(3.0)),
-        missiles: (0..=crate::sim::powers::look::GRAV)
+        missiles: (0..=crate::sim::powers::look::LAST)
             .map(|l| {
                 let (k, g, light) = projectiles::missile_kit(l);
                 (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()), light)
             })
             .collect(),
-        mine: {
-            let (k, g) = projectiles::mine_kit();
-            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
-        },
         drone: {
             let (k, g) = projectiles::drone_kit();
             (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
         },
         rotor: meshes.add(projectiles::rotor_kit().build_or_empty()),
+        wraith: {
+            let (k, g) = projectiles::wraith_kit();
+            (meshes.add(k.build_or_empty()), meshes.add(g.build_or_empty()))
+        },
+        blinker: glow(&mut materials, Color::srgb(1.0, 0.1, 0.05), 20.0),
     });
 }
 
@@ -254,6 +123,23 @@ struct Spin;
 /// Thrown things tumble through the air.
 #[derive(Component)]
 struct Tumble;
+
+/// A thrown gadget: tumbles while flying, then lies still once it has
+/// landed (or stuck to something).
+#[derive(Component, Default)]
+struct Toss {
+    last_y: f32,
+    still: f32,
+    settled: bool,
+}
+
+/// Blinks a light on and off this many times a second.
+#[derive(Component)]
+struct Blink(f32);
+
+/// A gentle hover bob (spectral warriors), with a phase offset.
+#[derive(Component)]
+struct Hover(f32);
 
 /// Power-up models: a nuke bomb, a skull, a big "x2" and an ammo crate.
 fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
@@ -367,7 +253,7 @@ fn powerup_kit(kind: PowerUp) -> crate::kit::Kit {
     k
 }
 
-/// Spins a part about its own axes (kunai end over end, rotors, rings).
+/// Spins a part about its own axes (drone rotors).
 #[derive(Component)]
 struct Spinner(Vec3);
 
@@ -383,6 +269,56 @@ fn tumble(time: Res<Time>, mut q: Query<&mut Transform, With<Tumble>>) {
     let dt = time.delta_secs();
     for mut tf in &mut q {
         tf.rotate(Quat::from_euler(EulerRot::XYZ, dt * 9.0, dt * 4.0, 0.0));
+    }
+}
+
+fn toss(
+    time: Res<Time>,
+    roots: Query<&Transform, Without<Toss>>,
+    mut q: Query<(&mut Transform, &mut Toss, &ChildOf)>,
+) {
+    let dt = time.delta_secs();
+    for (mut tf, mut t, parent) in &mut q {
+        if t.settled {
+            continue;
+        }
+        let Ok(root) = roots.get(parent.parent()) else {
+            continue;
+        };
+        let y = root.translation.y;
+        if (y - t.last_y).abs() < 1e-4 {
+            t.still += dt;
+        } else {
+            t.still = 0.0;
+        }
+        t.last_y = y;
+        // Thrown things come to rest at 0.1 m.
+        if y < 0.13 || t.still > 0.25 {
+            t.settled = true;
+            tf.rotation = Quat::IDENTITY;
+        } else {
+            tf.rotate(Quat::from_euler(EulerRot::XYZ, dt * 9.0, dt * 4.0, 0.0));
+        }
+    }
+}
+
+fn blink(time: Res<Time>, mut q: Query<(&Blink, &mut Visibility)>) {
+    let t = time.elapsed_secs();
+    for (b, mut vis) in &mut q {
+        let on = (t * b.0).fract() < 0.35;
+        let want = if on { Visibility::Inherited } else { Visibility::Hidden };
+        if *vis != want {
+            *vis = want;
+        }
+    }
+}
+
+fn hover(time: Res<Time>, mut q: Query<(&Hover, &mut Transform)>) {
+    let t = time.elapsed_secs();
+    for (h, mut tf) in &mut q {
+        let a = t * 2.2 + h.0;
+        tf.translation.y = 0.1 + a.sin() * 0.06;
+        tf.rotation = Quat::from_rotation_z((a * 0.5).sin() * 0.04);
     }
 }
 
@@ -525,68 +461,56 @@ fn dress(
                 ));
             });
         }
-        NetKind::Firebomb | NetKind::Turret | NetKind::Coil => {
-            let i = match kind {
-                NetKind::Firebomb => 0,
-                NetKind::Turret => 1,
-                _ => 2,
-            };
-            let (solid, glow) = assets.gadgets[i].clone();
-            commands.entity(root).with_children(|p| {
-                let scale = if i == 0 { 1.4 } else { 1.0 };
-                let mut e = p.spawn((
-                    Mesh3d(solid),
-                    MeshMaterial3d(assets.gadget_mat.clone()),
-                    Transform::from_scale(Vec3::splat(scale)),
-                ));
-                if i == 0 {
-                    e.insert(Tumble);
-                }
-                e.with_child((Mesh3d(glow), MeshMaterial3d(assets.gadget_glow.clone())));
-                let (color, height, power) = match i {
-                    0 => (Color::srgb(1.0, 0.5, 0.15), 0.2, 6_000.0),
-                    1 => (Color::srgb(0.3, 0.9, 1.0), 1.0, 4_000.0),
-                    _ => (Color::srgb(0.5, 0.8, 1.0), 2.5, 60_000.0),
-                };
-                p.spawn((
-                    PointLight {
-                        intensity: power,
-                        color,
-                        range: if i == 2 { 9.0 } else { 3.0 },
-                        ..default()
-                    },
-                    Transform::from_xyz(0.0, height, 0.0),
-                ));
-            });
-        }
         NetKind::Missile(look) => {
             use crate::sim::powers::look as L;
             let Some((solid, glowing, light)) = assets.missiles.get(look as usize).cloned() else {
                 return;
             };
-            let spin = match look {
-                L::KUNAI => Vec3::X * -22.0,
-                L::CRYO => Vec3::new(1.5, 3.0, 0.0),
-                L::GRAV => Vec3::new(4.0, 7.0, 0.0),
-                L::ROCKET => Vec3::Z * 10.0,
-                L::SMOKE | L::BOMBLET => Vec3::new(8.0, 0.0, 5.0),
-                _ => Vec3::ZERO,
-            };
+            // Thrown gadgets tumble until they land; the dart flies straight
+            // and the claymore is set down.
+            let thrown = matches!(look, L::STICKY | L::MEDKIT | L::FLASK | L::TRAP);
             let (power, range) = match look {
-                0..=2 => (60_000.0 * (1.0 + look as f32), 8.0),
-                L::FIREBALL => (120_000.0, 9.0),
-                L::CRYO => (60_000.0, 7.0),
-                L::BOMBLET | L::SMOKE => (0.0, 1.0),
-                _ => (15_000.0, 4.0),
+                L::DART => (8_000.0, 3.0),
+                L::MEDKIT => (10_000.0, 3.0),
+                L::FLASK => (20_000.0, 4.0),
+                _ => (0.0, 1.0),
+            };
+            let led = match look {
+                L::STICKY => Some(projectiles::STICKY_LED),
+                L::CLAYMORE => Some(projectiles::CLAYMORE_LED),
+                _ => None,
             };
             commands.entity(root).with_children(|p| {
-                p.spawn((
-                    Spinner(spin),
+                let mut e = p.spawn((
                     Mesh3d(solid),
                     MeshMaterial3d(assets.gadget_mat.clone()),
                     Transform::default(),
-                ))
-                .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                ));
+                if thrown {
+                    e.insert(Toss::default());
+                }
+                e.with_children(|m| {
+                    m.spawn((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
+                    if let Some(at) = led {
+                        m.spawn((
+                            Blink(if look == L::STICKY { 4.0 } else { 1.5 }),
+                            Mesh3d(assets.ball.clone()),
+                            MeshMaterial3d(assets.blinker.clone()),
+                            Transform::from_translation(at).with_scale(Vec3::splat(0.013)),
+                            Visibility::default(),
+                        ))
+                        .with_child((
+                            PointLight {
+                                intensity: 2_500.0,
+                                color: light,
+                                range: 2.0,
+                                ..default()
+                            },
+                            // Undo the bulb's scale.
+                            Transform::from_scale(Vec3::splat(1.0 / 0.013)),
+                        ));
+                    }
+                });
                 if power > 0.0 {
                     p.spawn((
                         PointLight {
@@ -600,10 +524,11 @@ fn dress(
                 }
             });
         }
-        NetKind::Mine => {
-            let (solid, glowing) = assets.mine.clone();
+        NetKind::Wraith => {
+            let (solid, glowing) = assets.wraith.clone();
             commands.entity(root).with_children(|p| {
                 p.spawn((
+                    Hover((root.index() % 7) as f32),
                     Mesh3d(solid),
                     MeshMaterial3d(assets.gadget_mat.clone()),
                     Transform::default(),
@@ -611,12 +536,12 @@ fn dress(
                 .with_child((Mesh3d(glowing), MeshMaterial3d(assets.gadget_glow.clone())));
                 p.spawn((
                     PointLight {
-                        intensity: 3_000.0,
-                        color: Color::srgb(1.0, 0.2, 0.1),
-                        range: 2.5,
+                        intensity: 25_000.0,
+                        color: Color::srgb(0.3, 1.0, 0.8),
+                        range: 5.0,
                         ..default()
                     },
-                    Transform::from_xyz(0.0, 0.25, 0.0),
+                    Transform::from_xyz(0.0, 1.3, -0.3),
                 ));
             });
         }
@@ -691,6 +616,18 @@ fn enemy_colors(
             (
                 Color::srgb(0.75, 0.9, 1.0),
                 LinearRgba::rgb(0.12, 0.25, 0.45),
+            )
+        } else if status.marked {
+            // Hunter's Mark: a pulsing red glow.
+            let pulse = 0.6 + 0.4 * (time.elapsed_secs() * 6.0).sin().abs();
+            (
+                Color::srgb(1.0, 0.55, 0.5),
+                LinearRgba::rgb(0.7, 0.04, 0.02) * pulse,
+            )
+        } else if status.poisoned {
+            (
+                Color::srgb(0.65, 0.95, 0.4),
+                LinearRgba::rgb(0.12, 0.35, 0.02),
             )
         } else if status.burning {
             let flicker = 0.6 + 0.4 * (time.elapsed_secs() * 12.0).sin().abs();

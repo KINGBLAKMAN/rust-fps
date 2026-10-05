@@ -1847,7 +1847,7 @@ fn handle_buttons(
                 }
                 kit[slot] = a;
                 if crate::data::valid_kit(c, profile.char_level(c).0, kit) {
-                    profile.kits.insert(c, kit);
+                    profile.class_kits.insert(c, kit);
                 }
             }
             UiAction::SelectCrate(i) => {

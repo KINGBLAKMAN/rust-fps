@@ -643,8 +643,11 @@ fn update_hud(
                 if state.double_points > 0.0 {
                     info += &format!("\nDOUBLE POINTS {:.0}s", state.double_points);
                 }
-                if me.overdrive > 0.0 {
-                    info += &format!("\nOVERDRIVE {:.0}s", me.overdrive);
+                if me.chain > 0.0 {
+                    info += &format!("\nCHAIN REACTION {:.0}s", me.chain);
+                }
+                if me.guard > 0.0 {
+                    info += &format!("\nGUARD {:.0}% {:.0}s", me.guard_cut * 100.0, me.guard);
                 }
                 if !session.status.is_empty() && session.role == crate::Role::Host {
                     info += &format!("\n{}", session.status);
@@ -715,7 +718,7 @@ fn update_hud(
                 })
                 .unwrap_or_default(),
             HudText::Ammo => match loadout.current() {
-                Some(_) if me.overdrive > 0.0 || me.gun_buff().free_ammo => "INFINITE".to_string(),
+                Some(_) if me.gun_buff().free_ammo => "INFINITE".to_string(),
                 Some(_) if loadout.reload > 0.0 => "Reloading...".to_string(),
                 Some(g) => format!("{} / {}", g.mag, g.reserve),
                 None => String::new(),

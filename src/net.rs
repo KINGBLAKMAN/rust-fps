@@ -25,7 +25,7 @@ use crate::{
 
 pub const DEFAULT_PORT: u16 = 7777;
 /// Bump when the message format changes so old builds can't join.
-const PROTOCOL_VERSION: u32 = 11;
+const PROTOCOL_VERSION: u32 = 12;
 const SNAPSHOT_INTERVAL: f32 = 1.0 / 30.0;
 const SEND_INTERVAL: f32 = 1.0 / 60.0;
 const TIMEOUT_SECS: f64 = 10.0;
@@ -182,7 +182,7 @@ struct NetEntity {
     pos: [f32; 3],
     yaw: f32,
     /// 1 = hit flash, 2 = burning, 4 = slowed, 8 = crawling, 16 = attacking,
-    /// 32 = stunned.
+    /// 32 = stunned, 64 = poisoned, 128 = marked.
     flags: u8,
 }
 
@@ -872,6 +872,8 @@ fn host_send(
                         | (s.crawler as u8) << 3
                         | (s.attacking as u8) << 4
                         | (s.stunned as u8) << 5
+                        | (s.poisoned as u8) << 6
+                        | (s.marked as u8) << 7
                 }),
             })
             .collect(),
@@ -1112,6 +1114,8 @@ fn client_receive(
                     status.crawler = ent.flags & 8 != 0;
                     status.attacking = ent.flags & 16 != 0;
                     status.stunned = ent.flags & 32 != 0;
+                    status.poisoned = ent.flags & 64 != 0;
+                    status.marked = ent.flags & 128 != 0;
                 }
             }
         } else {

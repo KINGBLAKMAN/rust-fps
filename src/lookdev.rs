@@ -31,7 +31,7 @@ pub enum View {
     Side,
     /// Close up on the guns on the bench.
     Guns,
-    /// Close up on three heroes' heads (Tinker, Blaze, Valkyrie).
+    /// Close up on three heroes' heads (Demolisher, Chemist, Ranger).
     Heads,
     /// Every ground marker shape, from above the yard.
     Markers,

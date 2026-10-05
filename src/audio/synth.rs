@@ -597,3 +597,82 @@ mod tests {
         assert_eq!(&w[0..4], b"RIFF");
     }
 }
+
+/// Rattling links: a run of small metal clinks.
+pub fn chain(len: f32, seed: u32) -> Buf {
+    let mut out = render(len + 0.1, |_| 0.0);
+    let mut n = Noise::new(seed);
+    let mut t = 0.0;
+    let mut i = 0;
+    while t < len {
+        let f = 2400.0 + 900.0 * n.next();
+        let clink = bell(&[(f, 1.0, 0.03), (f * 1.47, 0.5, 0.02)], 0.08)
+            .mix(&click(f * 0.8, seed + i, 0.03), 0.0, 0.5);
+        out = out.mix(&clink, t, 0.6 * (1.0 - t / len * 0.5));
+        t += 0.025 + 0.02 * n.next().abs();
+        i += 1;
+    }
+    out.normalize(0.7)
+}
+
+/// A plucked string (bowstrings).
+pub fn twang(freq: f32, seed: u32) -> Buf {
+    let mut o = Osc::new();
+    let mut o2 = Osc::new();
+    let mut n = Noise::new(seed);
+    let mut lp = Lp::new();
+    render(0.45, |t| {
+        let f = freq * (1.0 + 0.3 * decay(t, 0.01));
+        let pluck = lp.run(n.next(), 3000.0) * decay(t, 0.006);
+        (o.saw(f) * 0.6 + o2.sine(f * 2.01) * 0.3) * decay(t, 0.09) + pluck
+    })
+    .normalize(0.7)
+}
+
+/// Steel jaws slamming shut.
+pub fn snap(seed: u32) -> Buf {
+    click(1800.0, seed, 0.06)
+        .mix(&thud(160.0, 0.18, seed + 1), 0.0, 0.8)
+        .mix(&bell(&[(1250.0, 0.5, 0.15), (1930.0, 0.35, 0.1)], 0.35), 0.01, 0.6)
+        .normalize(0.85)
+}
+
+/// Glass or stone breaking into pieces.
+pub fn shatter(seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+    let mut tinkle = render(0.7, |t| {
+        let x = n.next();
+        let spark = if n.next() > 0.995 { 3.0 } else { 0.0 };
+        bp.run(x, 5200.0, 1.2) * (decay(t, 0.05) * 2.0 + spark * decay(t, 0.25))
+    });
+    tinkle = tinkle.mix(&thud(220.0, 0.15, seed + 1), 0.0, 0.5);
+    tinkle.normalize(0.75)
+}
+
+/// A long hiss of gas or spray.
+pub fn hiss(len: f32, seed: u32) -> Buf {
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+    render(len, |t| {
+        let k = t / len;
+        bp.run(n.next(), 4500.0 - 1500.0 * k, 0.9) * env(t, 0.05, len * 0.4)
+    })
+    .normalize(0.6)
+}
+
+/// A hollow ghostly moan.
+pub fn wail(len: f32, seed: u32) -> Buf {
+    let mut o = Osc::new();
+    let mut o2 = Osc::new();
+    let mut n = Noise::new(seed);
+    let mut bp = Bp::new();
+    render(len, |t| {
+        let k = t / len;
+        let f = 330.0 + 160.0 * (k * std::f32::consts::PI).sin() + 12.0 * (t * 5.0 * TAU).sin();
+        let tone = o.sine(f) * 0.6 + o2.sine(f * 1.5) * 0.25;
+        let air = bp.run(n.next(), f * 2.0, 3.0) * 0.5;
+        (tone + air) * (k * std::f32::consts::PI).sin()
+    })
+    .normalize(0.6)
+}

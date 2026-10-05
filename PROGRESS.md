@@ -2,7 +2,7 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v11.0 (2026-10-05)
+## Current version: v11.0 (2026-10-05); v12.0 in progress, does not build yet
 
 Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
 
@@ -102,14 +102,26 @@ Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed
 
 ## Next session
 
-Jonah's "Game Overhaul" list is split into versions (agreed plan, 2026-10-05):
+v12.0 (new classes) was stopped half way on 2026-10-05 and pushed as a WIP commit on `claude/project-thread-7oz85t`. It does NOT compile yet. When v12 is finished, fold the WIP commit into the single `v12.0: ...` commit (one commit per version).
 
-- v8.1: fewer power-ups, slower cooldowns (done).
-- v9.0: the run: no COD doors, survive rounds, level up and pick upgrades, map boss, teleporter to the next map, 5 maps then a final boss, harder each map (done).
-- v10.0: classes (the 6 characters): 2 primaries and 2 secondaries each, 2 weapon abilities, 2 class abilities, weapon upgrades; alt fire on some guns instead of ADS.
-- v11.0: ability upgrades that scale (more daggers in a fan, two fireballs, extra dashes, more grenades), tuned over a 5-map run.
-- v12.0: character rework: detailed models, new ability visuals and animations.
-- v13.0: procedural maps per run, plus 10 new map themes.
-- v14.0: sound design pass and a menu rework (bigger text, decorative but simple).
+Done in the WIP commit:
+- `data.rs`: 6 new classes (Bulwark, Medic, Revenant, Demolisher, Chemist, Ranger; serde aliases map the old names so saves carry over), 30 new abilities (`Ability`, `ABILITY_DEFS`, 5 per class: two abilities and an ult at level 1, an ability at 3, an ult at 6), class guns and weapon abilities (Toxic Rounds replaces Incendiary Mag, Soul Siphon heals), augments per ability. Medic trim is green (no red cross anywhere).
+- `sim/powers.rs`: all 30 abilities on the host, plus sticky bombs, heal/acid canisters, claymores, bear traps, the med drone and Army of the Dead warriors (`TurretBrain::wraith`). Damage-mask effect bits `powers::effect::{POISON, MARK, DRAIN}`.
+- `sim/mod.rs`: poison and Hunter's Mark on zombies (`EnemyBrain::poison/marked`, `EnemyStatus::poisoned/marked`, net flags 64/128), drain healing and Chain Reaction kill blasts in `apply_damage`, zones with `heal`/`grow`, `Force::only` (Soul Chains), Soul Siphon lifesteal in `resolve_shots`.
+- `main.rs`: `PlayerInfo` `chain`, `guard`/`guard_cut` (Fortress, Rally Cry), `overdrive` removed; NetKind Firebomb/Turret/Coil/Mine removed, `Wraith` added. `fx::Fx::ZoneEnd` added. `PROTOCOL_VERSION` 12.
+- `abilities/mod.rs`: movement for Shield Charge, Wraith Step, Blast Jump, Grapple (`move_time`, `GRAPPLE_RANGE`).
+- `progression.rs`: starting guns and unlocks for the new classes (17 career levels).
+- `models/projectiles.rs` + `models/avatars.rs`: new gadget models (dart, sticky bomb, medkit, acid flask, bear trap, claymore), med drone, spectral warrior.
+- `rig/heroes.rs`: six new hero models (built, never looked at on screen).
+- `abilities/preview.rs`, `audio/`: previews and sounds were being rewritten (they compile; not checked).
+- README class/ability/gun tables rewritten for v12.
 
-Start v10.0 (classes and alt fire) next.
+Left to do for v12.0:
+1. Fix the remaining compile errors: `fx/spells.rs` and `fx/mod.rs` (ability visuals and zone visuals half rewritten: `movers/sweeps/rumbles` systems, removed SpellAssets fields, the `falling()` call), `fx/auras.rs` (auras for guard, stim, chain instead of Overdrive/CombatStim), `viewmodel.rs` (old ability names, removed avatars gadget kits; held items should use `projectiles::missile_kit`, Revenant swings a scythe).
+2. Check every ability has a visual per the spec: what each `Fx::Spell` means (pos/dir/size) is written in `cast()` in `sim/powers.rs`; zone kinds in `powers::zone`.
+3. `cargo build` with no warnings, `cargo test`.
+4. Test under Xvfb: lookdev lineup/side/heads for the six heroes, cast every ability (sandbox), check HUD text, Characters screen, loadout screen.
+5. Balance pass on the new numbers (first guesses in `cast()`).
+6. Bump Cargo.toml to 12.0.0, update PROGRESS.md history and known issues, Windows build and zips, push, reply to Jonah.
+
+After v12: v13.0 procedural maps per run plus 10 new map themes; v14.0 sound design pass and a menu rework (bigger text, decorative but simple).
