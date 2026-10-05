@@ -199,7 +199,7 @@ fn use_abilities(
         if slot == 2 {
             me.ult_charge >= 100.0
         } else {
-            me.cooldowns[slot as usize] <= 0.0
+            me.charges[slot as usize] > 0
         }
     };
 

@@ -605,7 +605,7 @@ fn update_hud(
     let ready = |i: usize| match i {
         2 => me.ult_charge >= 100.0,
         3 | 4 => me.weapon_cd[i - 3] <= 0.0,
-        _ => me.cooldowns[i] <= 0.0,
+        _ => me.charges[i] > 0,
     };
     // The weapon ability running right now (box index).
     let running = |i: usize| i >= 3 && me.buff_time > 0.0 && me.buff == Some(weapon[i - 3]);
@@ -747,15 +747,23 @@ fn update_hud(
                     } else {
                         format!("{:.0}%", me.ult_charge)
                     }
+                } else if me.max_charges(i) > 1 {
+                    let mut t = format!("{}/{}", me.charges[i], me.max_charges(i));
+                    if me.cooldowns[i] > 0.0 {
+                        t += &format!("  {:.1}s", me.cooldowns[i]);
+                    }
+                    t
                 } else if ready(i) {
                     "READY".to_string()
                 } else {
                     format!("{:.1}s", me.cooldowns[i])
                 };
+                let roman = ["I", "II", "III", "IV", "V", "VI"][(me.tiers[i] as usize).min(5)];
+                let copies = me.copies(i);
+                let many = if copies > 1 { format!(" x{copies}") } else { String::new() };
                 format!(
-                    "{} {}\n[{}] {}",
+                    "{} {roman}\n[{}] {}{many}",
                     abilities[i].name(),
-                    "I".repeat(me.tiers[i] as usize + 1),
                     key_name(settings.key(keys[i])),
                     status
                 )
@@ -796,8 +804,11 @@ fn update_hud(
                 let frac = if i == 2 {
                     me.ult_charge / 100.0
                 } else {
-                    let cd = me.kit[i].cooldown(me.tiers[i]);
-                    1.0 - me.cooldowns[i] / cd
+                    if me.cooldowns[i] <= 0.0 {
+                        1.0
+                    } else {
+                        1.0 - me.cooldowns[i] / me.ability_cooldown(i)
+                    }
                 };
                 node.height = Val::Percent(frac.clamp(0.0, 1.0) * 100.0);
                 bg.0 = if ready(i) {

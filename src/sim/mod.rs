@@ -13,7 +13,7 @@ use crate::data::{
     GRENADE_RECHARGE,
     xp_to_next, Element, GunSpecial, Perk, PowerUp, Stat, Upgrade, AMMO_COST, BOX_COST, MAX_LEVEL,
     ROUNDS_PER_STAGE, STAGES,
-    MAX_GUN_TIER, MAX_TIER,
+    MAX_AUGMENT, MAX_GUN_TIER, MAX_TIER,
 };
 use crate::fx::{emit, rgb, Fx, FxOutbox, FxQueue};
 use crate::maps::{CurrentMap, EXTRACT_RADIUS};
@@ -302,6 +302,9 @@ fn roll_choices(p: &PlayerInfo) -> Vec<Upgrade> {
         .into_iter()
         .filter(|s| p.stats[*s as usize] < Stat::MAX_STACKS)
         .map(Upgrade::Stat);
+    let augments = (0..2u8)
+        .filter(|s| p.augments[*s as usize] < MAX_AUGMENT)
+        .map(Upgrade::Augment);
     let weapons = (0..2u8)
         .filter(|s| p.guns[*s as usize].is_some() && p.gun_tiers[*s as usize] < MAX_GUN_TIER)
         .map(Upgrade::Weapon);
@@ -309,7 +312,7 @@ fn roll_choices(p: &PlayerInfo) -> Vec<Upgrade> {
     if p.level % 10 == 0 && !elements.is_empty() {
         picks.push(elements.swap_remove(rng.gen_range(0..elements.len())));
     }
-    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).chain(stats).chain(weapons).collect();
+    let mut pool: Vec<Upgrade> = abilities.drain(..).chain(elements).chain(stats).chain(weapons).chain(augments).collect();
     while picks.len() < 3 && !pool.is_empty() {
         picks.push(pool.swap_remove(rng.gen_range(0..pool.len())));
     }
@@ -449,6 +452,15 @@ fn process_actions(
                     Upgrade::Weapon(s) => {
                         let t = &mut p.gun_tiers[s as usize & 1];
                         *t = (*t + 1).min(MAX_GUN_TIER);
+                    }
+                    Upgrade::Augment(s) => {
+                        let s = s as usize & 1;
+                        if p.augments[s] < MAX_AUGMENT {
+                            p.augments[s] += 1;
+                            if p.kit[s].augment() == crate::data::Augment::Charges {
+                                p.charges[s] += 1;
+                            }
+                        }
                     }
                 }
                 p.pending_picks = p.pending_picks.saturating_sub(1);
@@ -607,18 +619,20 @@ fn process_actions(
                     continue;
                 }
                 let s = slot as usize;
-                let ability = p.kit[s];
+                let copies = p.copies(s);
                 if slot == 2 {
                     if p.ult_charge < 100.0 {
                         continue;
                     }
                     p.ult_charge = 0.0;
                 } else {
-                    if p.cooldowns[s] > 0.0 {
+                    if p.charges[s] == 0 {
                         continue;
                     }
-                    let focus = 1.0 - p.stat(Stat::Focus) * Stat::Focus.per_stack();
-                    p.cooldowns[s] = ability.cooldown(p.tiers[s]) * focus;
+                    p.charges[s] -= 1;
+                    if p.cooldowns[s] <= 0.0 {
+                        p.cooldowns[s] = p.ability_cooldown(s);
+                    }
                 }
                 let origin = Vec3::from_array(origin);
                 let dir = Vec3::from_array(dir).normalize_or_zero();
@@ -644,7 +658,13 @@ fn process_actions(
                     enemies: &enemy_list,
                     boxes: &boxes,
                 };
-                powers::cast(&mut world, &mut roster, id, slot, origin, dir, charge);
+                // Augmented casts fan out extra copies either side.
+                for i in 0..copies {
+                    let side = if i % 2 == 1 { 1.0 } else { -1.0 };
+                    let turn = side * ((i + 1) / 2) as f32 * crate::data::COPY_SPREAD;
+                    let d = Quat::from_rotation_y(turn) * dir;
+                    powers::cast(&mut world, &mut roster, id, slot, origin, d, charge);
+                }
             }
         }
     }
@@ -1084,8 +1104,26 @@ fn player_timers(
 ) {
     let dt = time.delta_secs();
     for p in roster.0.values_mut() {
-        for cd in p.cooldowns.iter_mut() {
-            *cd = (*cd - dt).max(0.0);
+        // Charges come back one at a time.
+        for s in 0..2 {
+            let max = p.max_charges(s);
+            if p.charges[s] >= max {
+                p.charges[s] = max;
+                p.cooldowns[s] = 0.0;
+                continue;
+            }
+            if p.cooldowns[s] <= 0.0 {
+                p.cooldowns[s] = p.ability_cooldown(s);
+            }
+            p.cooldowns[s] -= dt;
+            if p.cooldowns[s] <= 0.0 {
+                p.charges[s] += 1;
+                p.cooldowns[s] = if p.charges[s] < max {
+                    p.ability_cooldown(s)
+                } else {
+                    0.0
+                };
+            }
         }
         p.overdrive = (p.overdrive - dt).max(0.0);
         for cd in p.weapon_cd.iter_mut() {
@@ -1307,7 +1345,7 @@ fn spawn_zombie(
         75.0 + 30.0 * r as f32
     } else {
         375.0 * 1.1f32.powi(r as i32 - 10)
-    };
+    } * (1.0 + 0.1 * state.stage as f32);
     let (health, speed) = match kind {
         NetKind::Shooter => (base_hp * 0.7, 2.6),
         NetKind::Brute => (base_hp * 3.0, (2.4 + 0.1 * r as f32).min(4.5)),
@@ -1408,6 +1446,7 @@ fn sandbox(
         }
         if sb.free_abilities {
             p.cooldowns = [0.0; 2];
+            p.charges = [p.max_charges(0), p.max_charges(1)];
             p.weapon_cd = [0.0; 2];
             p.ult_charge = 100.0;
         }

@@ -189,7 +189,12 @@ pub struct PlayerInfo {
     /// Underbarrel grenade recharge.
     pub grenade_cd: f32,
 
+    /// Time until the next charge of each ability comes back, and the uses
+    /// stored up now.
     pub cooldowns: [f32; 2],
+    pub charges: [u8; 2],
+    /// Augment upgrades on each ability (see `data::Augment`).
+    pub augments: [u8; 2],
     pub ult_charge: f32,
     pub overdrive: f32,
     /// Combat Stim: faster movement and fire while above zero.
@@ -249,6 +254,8 @@ impl PlayerInfo {
             weapon_cd: [0.0; 2],
             grenade_cd: 0.0,
             cooldowns: [0.0; 2],
+            charges: [1; 2],
+            augments: [0; 2],
             ult_charge: 0.0,
             overdrive: 0.0,
             stim: 0.0,
@@ -272,6 +279,28 @@ impl PlayerInfo {
         self.spawn_seq = seq + 1;
         self.action_ack = ack;
         self.ready = false;
+    }
+
+    /// Uses of ability `slot` that can be stored up.
+    pub fn max_charges(&self, slot: usize) -> u8 {
+        match self.kit[slot].augment() {
+            data::Augment::Charges => 1 + self.augments[slot],
+            data::Augment::Copies => 1,
+        }
+    }
+
+    /// Copies each cast of ability `slot` makes.
+    pub fn copies(&self, slot: usize) -> u8 {
+        match self.kit.get(slot).map(|a| a.augment()) {
+            Some(data::Augment::Copies) if slot < 2 => 1 + self.augments[slot],
+            _ => 1,
+        }
+    }
+
+    /// Ability cooldown for `slot` with the Focus stat.
+    pub fn ability_cooldown(&self, slot: usize) -> f32 {
+        let focus = 1.0 - self.stat(data::Stat::Focus) * data::Stat::Focus.per_stack();
+        self.kit[slot].cooldown(self.tiers[slot]) * focus
     }
 
     /// What the running weapon ability does to shots right now.

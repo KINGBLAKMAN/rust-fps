@@ -1783,10 +1783,27 @@ impl Ability {
         Color::srgb(r, g, b)
     }
 
-    /// Cooldown in seconds at an upgrade tier (0-3), after COOLDOWN_SCALE.
+    /// Cooldown in seconds at an upgrade tier (0-5), after COOLDOWN_SCALE.
+    /// Never below 40% of the base.
     pub fn cooldown(self, tier: u8) -> f32 {
         let (base, per) = self.def().cooldown;
-        (base - per * tier as f32) * COOLDOWN_SCALE
+        (base - per * tier as f32).max(base * 0.4) * COOLDOWN_SCALE
+    }
+
+    /// What augment upgrades do for this ability.
+    pub fn augment(self) -> Augment {
+        use Ability as A;
+        match self {
+            A::Dash
+            | A::ShadowStep
+            | A::FlameDash
+            | A::StormLeap
+            | A::RisingDragon
+            | A::CombatStim
+            | A::BarrierDome
+            | A::SupplyDrop => Augment::Charges,
+            _ => Augment::Copies,
+        }
     }
 
     /// Held in the hand and thrown (with an arc preview).
@@ -1815,7 +1832,22 @@ impl Ability {
 }
 
 /// Ability upgrade tiers bought with level-ups in a match.
-pub const MAX_TIER: u8 = 3;
+pub const MAX_TIER: u8 = 5;
+
+/// Augments: level-up upgrades that change how an ability works, up to
+/// `MAX_AUGMENT` on each of the two abilities (not the ultimate).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Augment {
+    /// One more use stored up (dashes and the like).
+    Charges,
+    /// One more copy each cast, fanned out (grenades, projectiles, blasts).
+    Copies,
+}
+
+pub const MAX_AUGMENT: u8 = 3;
+
+/// Angle between the copies of a fanned cast.
+pub const COPY_SPREAD: f32 = 0.2;
 
 /// Character levels: each one is earned with match XP played as that
 /// character, and unlocks abilities (see `AbilityDef::unlock`).
@@ -2100,6 +2132,8 @@ pub enum Upgrade {
     Stat(Stat),
     /// Upgrade the gun in slot 0 (primary) or 1 (secondary).
     Weapon(u8),
+    /// An augment for ability slot 0 or 1.
+    Augment(u8),
 }
 
 impl Upgrade {
@@ -2124,6 +2158,14 @@ impl Upgrade {
                 let gun = p.guns[s].map_or("Gun", |g| gun_def(g).name);
                 let tier = (p.gun_tiers[s] + 1).min(MAX_GUN_TIER);
                 format!("{gun}{}: +25% damage and magazine", tier_name(tier))
+            }
+            Upgrade::Augment(slot) => {
+                let a = kit[slot as usize & 1];
+                let n = p.augments[slot as usize & 1] + 2;
+                match a.augment() {
+                    Augment::Charges => format!("{}: {n} charges (use it {n} times in a row)", a.name()),
+                    Augment::Copies => format!("{}: {n} at once, fanned out", a.name()),
+                }
             }
         }
     }

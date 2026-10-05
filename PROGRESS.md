@@ -2,9 +2,9 @@
 
 Where the project is up to. Update this at the end of every work session, and before compacting.
 
-## Current version: v10.0 (2026-10-05)
+## Current version: v11.0 (2026-10-05)
 
-Released: the Windows zip, the all-versions zip (v1 to v10), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
+Released: the Windows zip, the all-versions zip (v1 to v11), and the code pushed to GitHub (branch `claude/project-thread-7oz85t`, on top of v8.0; main still has v7.0).
 
 ## Version history
 
@@ -65,6 +65,12 @@ Released: the Windows zip, the all-versions zip (v1 to v10), and the code pushed
   - The mystery box is the Armory: 750 for new random attachments on the gun in your hands, or a 5% wonder weapon (`roll_armory`). Wall boards are ammo caches (300, refill both guns).
   - Career unlocks cut to 16 levels: attachments and each class's second gun (`progression.rs`). Old career levels just mean more is unlocked.
   - Loadout screen rewritten: class guns in two columns with attachment pickers.
+- v11 (Game Overhaul part 4, scaling ability upgrades):
+  - `MAX_TIER` 3 to 5 (tier VI on the HUD); `Ability::cooldown` floors at 40% of the base.
+  - Augments (`data::Augment`, `Upgrade::Augment`, `PlayerInfo::augments`, `MAX_AUGMENT` = 3) for the two abilities. `Ability::augment()` says which: Charges (dashes, leaps, Stim, Dome, Supply Drop) or Copies (everything else).
+  - Charges: `PlayerInfo::charges`; `cooldowns[s]` is now the time to the next charge, refilled in `player_timers`. Clients check `charges > 0`.
+  - Copies: the host calls `powers::cast` once per copy with the aim turned by `COPY_SPREAD` (0.2 rad) steps either side. Self-centred abilities just stack.
+  - Zombie health +10% per map (`spawn_zombie`).
 
 ## Known issues and loose ends
 
@@ -82,10 +88,11 @@ Released: the Windows zip, the all-versions zip (v1 to v10), and the code pushed
 - Old "Extractions" from earlier versions count as "Runs won" on the main menu.
 - v10 weapon abilities, alt fire and the Armory were checked solo under lavapipe (buff timer, grenade and its recharge, loadout screen). Balance (buff numbers, grenade damage, slug damage, Armory price) is a first pass. Not yet tested in co-op.
 - Assault rifles lost aim down sights to the grenade; the Falcon AR still shows its built-in scope.
+- v11 augments were tested with a hook giving full augments (4 fanned grenades, 4 dash charges). Copies of self-centred abilities (Frost Nova, Thunder Clap, Heal Pulse) simply stack their damage or healing; the aiming preview still shows one copy. Balance untested.
 
 ## Ideas not done yet
 
-- Game Overhaul plan still to do: v11 scaling ability upgrades (spread shots, multiple grenades, more dashes), v12 character kit and model rework, v13 procedural maps plus 10 more map themes, v14 sound design and a menu rework (bigger text).
+- Game Overhaul plan still to do: v12 character kit and model rework, v13 procedural maps plus 10 more map themes, v14 sound design and a menu rework (bigger text).
 
 - Part 7 of the art brief: skin rarity looks (a different finish per rarity).
 - Jonah likes big maps with many rooms to traverse and explore; keep new maps that way.
